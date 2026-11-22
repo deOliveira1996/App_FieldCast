@@ -1,0 +1,113 @@
+name: Build FieldCast Android APK (Capacitor)
+
+on:
+  push:
+    branches:
+      - main
+      - master
+  pull_request:
+    branches:
+      - main
+      - master
+  workflow_dispatch:
+
+jobs:
+  build-android-apk:
+    name: Build & Package Android Debug APK
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Setup Java 21 (Eclipse Temurin)
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '21'
+          cache: 'gradle'
+
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Generate PWA & Android PNG icons from public/icon.svg
+        run: npm run icons:generate
+
+      - name: Run TypeScript typecheck & Vitest unit tests
+        run: |
+          npx tsc --noEmit
+          npm run test
+
+      - name: Build Web/PWA production bundle (dist/)
+        run: npm run build
+
+      - name: Initialize & Sync Capacitor Android project
+        run: |
+          if [ ! -d "android" ]; then
+            npx cap add android
+          fi
+          npx cap sync android
+
+      - name: Inject Android 14+ Foreground Service & Location permissions into AndroidManifest.xml
+        run: |
+          node - <<'EOF'
+          const fs = require('fs');
+          const path = require('path');
+
+          const manifestPath = path.join('android', 'app', 'src', 'main', 'AndroidManifest.xml');
+          if (!fs.existsSync(manifestPath)) {
+            throw new Error(`AndroidManifest.xml not found at ${manifestPath}`);
+          }
+
+          let xml = fs.readFileSync(manifestPath, 'utf8');
+
+          const requiredPermissions = [
+            'android.permission.INTERNET',
+            'android.permission.WAKE_LOCK',
+            'android.permission.ACCESS_COARSE_LOCATION',
+            'android.permission.ACCESS_FINE_LOCATION',
+            'android.permission.ACCESS_BACKGROUND_LOCATION',
+            'android.permission.FOREGROUND_SERVICE',
+            'android.permission.FOREGROUND_SERVICE_LOCATION',
+          ];
+
+          const missingTags = requiredPermissions
+            .filter((perm) => !xml.includes(`android:name="${perm}"`))
+            .map((perm) => `    <uses-permission android:name="${perm}" />`);
+
+          if (missingTags.length > 0) {
+            const injectionBlock = `\n    <!-- FieldCast Android 14+ Field & Background GPS Permissions -->\n${missingTags.join('\n')}\n`;
+            if (xml.includes('</manifest>')) {
+              xml = xml.replace('</manifest>', `${injectionBlock}</manifest>`);
+            } else {
+              throw new Error('Invalid AndroidManifest.xml: missing </manifest> closing tag');
+            }
+            fs.writeFileSync(manifestPath, xml, 'utf8');
+            console.log(`Injected ${missingTags.length} permissions into AndroidManifest.xml`);
+          } else {
+            console.log('All required permissions already present in AndroidManifest.xml');
+          }
+          EOF
+
+      - name: Compile Android Debug APK with Gradle
+        working-directory: android
+        run: |
+          chmod +x ./gradlew
+          ./gradlew assembleDebug --no-daemon
+
+      - name: Upload FieldCast Android APK Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: fieldcast-android-debug-apk
+          path: android/app/build/outputs/apk/debug/app-debug.apk
+          if-no-files-found: error
+          retention-days: 30

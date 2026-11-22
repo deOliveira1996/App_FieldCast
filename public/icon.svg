@@ -1,0 +1,59 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512" fill="none">
+  <defs>
+    <linearGradient id="bgGrad" x1="0" y1="0" x2="512" y2="512" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#0f172a" />
+      <stop offset="100%" stop-color="#020617" />
+    </linearGradient>
+    <linearGradient id="windGrad" x1="96" y1="160" x2="416" y2="280" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#38bdf8" />
+      <stop offset="100%" stop-color="#0284c7" />
+    </linearGradient>
+    <linearGradient id="waveGrad" x1="80" y1="330" x2="432" y2="410" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#2dd4bf" />
+      <stop offset="100%" stop-color="#0ea5e9" />
+    </linearGradient>
+  </defs>
+
+  <!-- Rounded Background Base -->
+  <rect width="512" height="512" rx="112" fill="url(#bgGrad)" />
+
+  <!-- Outer Tactical Compass Ring -->
+  <circle cx="256" cy="256" r="196" stroke="#1e293b" stroke-width="10" />
+  <circle cx="256" cy="256" r="196" stroke="#38bdf8" stroke-width="6" stroke-dasharray="16 28" stroke-linecap="round" opacity="0.55" />
+
+  <!-- Cardinal Ticks -->
+  <line x1="256" y1="44" x2="256" y2="76" stroke="#38bdf8" stroke-width="12" stroke-linecap="round" />
+  <line x1="256" y1="436" x2="256" y2="468" stroke="#64748b" stroke-width="8" stroke-linecap="round" />
+  <line x1="44" y1="256" x2="76" y2="256" stroke="#64748b" stroke-width="8" stroke-linecap="round" />
+  <line x1="436" y1="256" x2="468" y2="256" stroke="#64748b" stroke-width="8" stroke-linecap="round" />
+
+  <!-- Geometric North Compass Needle / Geo Pin -->
+  <polygon points="256,88 296,210 256,184 216,210" fill="#f59e0b" />
+
+  <!-- Wind Streamlines -->
+  <path
+    d="M116 232 H332 C356 232 374 214 374 190 C374 168 356 150 334 150 C314 150 298 164 296 182"
+    stroke="url(#windGrad)"
+    stroke-width="24"
+    stroke-linecap="round"
+    stroke-linejoin="round"
+  />
+  <path
+    d="M100 286 H364 C390 286 410 266 410 240"
+    stroke="#7dd3fc"
+    stroke-width="20"
+    stroke-linecap="round"
+  />
+
+  <!-- Ocean Wave Crest -->
+  <path
+    d="M108 356 C148 320 192 320 232 356 C272 392 316 392 356 356 C378 336 398 332 412 340"
+    stroke="url(#waveGrad)"
+    stroke-width="26"
+    stroke-linecap="round"
+    stroke-linejoin="round"
+  />
+
+  <!-- Center Waypoint Dot -->
+  <circle cx="256" cy="232" r="14" fill="#f8fafc" />
+</svg>
