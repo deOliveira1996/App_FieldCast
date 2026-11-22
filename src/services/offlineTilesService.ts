@@ -15,20 +15,40 @@ import type {
 export const MAX_OFFLINE_TILES_PER_MISSION = 300;
 export const MAX_CONCURRENT_TILE_DOWNLOADS = 4;
 
-export const CARTO_VOYAGER_TILE_URL =
-  'https://{s}.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}{r}.png';
-export const CARTO_DARK_MATTER_TILE_URL =
-  'https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png';
+/**
+ * Servidores de tiles 100% gratuitos, públicos e verificados (HTTP 200, image/png & image/jpeg, CORS '*')
+ * que NÃO exigem chave de API e nunca retornam marca d'água "API KEY REQUIRED".
+ */
+export const OSM_STANDARD_TILE_URL =
+  'https://tile.openstreetmap.org/{z}/{x}/{y}.png';
 
-export const CARTO_SUBDOMAINS = ['a', 'b', 'c', 'd'] as const;
+export const ESRI_WORLD_STREET_TILE_URL =
+  'https://server.arcgisonline.com/ArcGIS/rest/services/World_Street_Map/MapServer/tile/{z}/{y}/{x}';
+
+export const ESRI_WORLD_TOPO_TILE_URL =
+  'https://server.arcgisonline.com/ArcGIS/rest/services/World_Topo_Map/MapServer/tile/{z}/{y}/{x}';
+
+export const ESRI_WORLD_IMAGERY_TILE_URL =
+  'https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}';
+
+/**
+ * Constantes mantidas por retrocompatibilidade de contrato, apontando para os servidores
+ * gratuitos OpenStreetMap e Esri World Street Map (eliminando o bloqueio "API KEY REQUIRED" da CartoDB).
+ */
+export const CARTO_VOYAGER_TILE_URL = OSM_STANDARD_TILE_URL;
+export const CARTO_DARK_MATTER_TILE_URL = ESRI_WORLD_STREET_TILE_URL;
+
+export const CARTO_SUBDOMAINS = ['a', 'b', 'c'] as const;
 
 export const CARTO_ATTRIBUTION =
-  '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors &copy; <a href="https://carto.com/attributions">CARTO</a>';
+  '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors &bull; Tiles &copy; Esri';
 
 const WEB_MERCATOR_MAX_LAT = 85.05112878;
 const MAX_COORDINATE_ENUMERATION_SAFETY_CAP = 50_000;
 
 export type MapTileTheme = 'light' | 'dark';
+
+export type MapBaseStyle = 'osm' | 'esri_street' | 'esri_satellite';
 
 export type OfflineDownloadProgress = OfflineMissionProgress;
 
@@ -65,6 +85,7 @@ export interface OfflineCacheStats {
 export interface DownloadOfflineMissionOptions {
   bounds: OfflineMissionBounds;
   theme: MapTileTheme;
+  baseStyle?: MapBaseStyle;
   missionId?: string;
   missionName?: string;
   maxConcurrent?: number;
@@ -286,14 +307,27 @@ export function buildOfflineTileKey(
 }
 
 /**
- * Retorna o template de URL CartoDB compatível com CORS para o tema informado.
+ * Retorna o template de URL de mapa base gratuito (sem API Key) para o estilo selecionado.
+ */
+export function getTileUrlTemplateForStyle(style: MapBaseStyle): string {
+  if (style === 'esri_satellite') {
+    return ESRI_WORLD_IMAGERY_TILE_URL;
+  }
+  if (style === 'esri_street') {
+    return ESRI_WORLD_STREET_TILE_URL;
+  }
+  return OSM_STANDARD_TILE_URL;
+}
+
+/**
+ * Retorna o template de URL gratuito e verificado (OpenStreetMap / Esri World Street Map) para o tema informado.
  */
 export function getCartoTileUrlTemplate(theme: MapTileTheme): string {
   return theme === 'dark' ? CARTO_DARK_MATTER_TILE_URL : CARTO_VOYAGER_TILE_URL;
 }
 
 /**
- * Monta a URL concreta de um tile CartoDB (Voyager para tema Claro, DarkMatter para tema Escuro).
+ * Monta a URL concreta de um tile a partir do tema ou estilo base (100% gratuito e sem chave de API).
  */
 export function buildCartoTileUrl(
   theme: MapTileTheme,
@@ -303,21 +337,23 @@ export function buildCartoTileUrl(
   options?: {
     subdomain?: string;
     retina?: boolean;
+    baseStyle?: MapBaseStyle;
   },
 ): string {
   const subdomain =
     options?.subdomain ??
     CARTO_SUBDOMAINS[Math.abs(x + y) % CARTO_SUBDOMAINS.length] ??
     'a';
-  const retinaSuffix = options?.retina ? '@2x' : '';
-  const template = getCartoTileUrlTemplate(theme);
+  const template = options?.baseStyle
+    ? getTileUrlTemplateForStyle(options.baseStyle)
+    : getCartoTileUrlTemplate(theme);
 
   return template
     .replace('{s}', subdomain)
     .replace('{z}', String(z))
     .replace('{x}', String(x))
     .replace('{y}', String(y))
-    .replace('{r}', retinaSuffix);
+    .replace('{r}', '');
 }
 
 /**
@@ -335,6 +371,7 @@ export async function downloadOfflineMissionTiles(
   const {
     bounds,
     theme,
+    baseStyle,
     missionId = `mission-${Date.now()}`,
     missionName = 'Área de Missão Offline',
     signal,
@@ -430,7 +467,9 @@ export async function downloadOfflineMissionTiles(
         return;
       }
 
-      const url = buildCartoTileUrl(theme, coord.z, coord.x, coord.y);
+      const url = buildCartoTileUrl(theme, coord.z, coord.x, coord.y, {
+        baseStyle,
+      });
       const key = buildOfflineTileKey(theme, coord.z, coord.x, coord.y);
 
       try {
@@ -604,44 +643,94 @@ function createBlobDisplayUrl(blob: Blob): {
 /**
  * Subclasse customizada de `L.TileLayer` que sobrescreve `createTile()`
  * para buscar primeiro o blob do tile no IndexedDB (`dexie`) e cair na rede
- * CartoDB CORS (`crossOrigin: 'anonymous'`) quando não estiver em cache.
+ * gratuita sem API Key (OpenStreetMap / Esri ArcGIS Online) quando não estiver em cache.
+ *
+ * Não força `tile.crossOrigin = 'anonymous'` nas tags `<img>` de carregamento ao vivo
+ * para evitar bloqueios de CDN baseados em cabeçalho `Origin`, mantendo fallback secundário automático.
  */
 export class OfflineCartoTileLayer extends L.TileLayer {
   private theme: MapTileTheme;
+  private baseStyle: MapBaseStyle | null;
 
-  constructor(theme: MapTileTheme = 'dark', options?: L.TileLayerOptions) {
-    super(getCartoTileUrlTemplate(theme), {
+  constructor(
+    theme: MapTileTheme = 'light',
+    options?: L.TileLayerOptions & { baseStyle?: MapBaseStyle },
+  ) {
+    const initialStyle = options?.baseStyle ?? null;
+    const initialTemplate = initialStyle
+      ? getTileUrlTemplateForStyle(initialStyle)
+      : getCartoTileUrlTemplate(theme);
+
+    super(initialTemplate, {
       subdomains: [...CARTO_SUBDOMAINS],
       maxZoom: 19,
-      crossOrigin: 'anonymous',
       attribution: CARTO_ATTRIBUTION,
       ...options,
     });
     this.theme = theme;
+    this.baseStyle = initialStyle;
   }
 
   getTheme(): MapTileTheme {
     return this.theme;
   }
 
+  getBaseStyle(): MapBaseStyle {
+    if (this.baseStyle) {
+      return this.baseStyle;
+    }
+    return this.theme === 'dark' ? 'esri_street' : 'osm';
+  }
+
   setTheme(nextTheme: MapTileTheme): this {
     if (this.theme !== nextTheme) {
       this.theme = nextTheme;
-      this.setUrl(getCartoTileUrlTemplate(nextTheme));
+      if (!this.baseStyle) {
+        this.setUrl(getCartoTileUrlTemplate(nextTheme));
+      }
     }
     return this;
+  }
+
+  setBaseStyle(nextStyle: MapBaseStyle | null): this {
+    if (this.baseStyle !== nextStyle) {
+      this.baseStyle = nextStyle;
+      const nextUrl = nextStyle
+        ? getTileUrlTemplateForStyle(nextStyle)
+        : getCartoTileUrlTemplate(this.theme);
+      this.setUrl(nextUrl);
+    }
+    return this;
+  }
+
+  override getTileUrl(coords: L.Coords): string {
+    const rawZ = Number.isFinite(coords.z) ? coords.z : 12;
+    return buildCartoTileUrl(this.theme, rawZ, coords.x, coords.y, {
+      baseStyle: this.getBaseStyle(),
+    });
   }
 
   override createTile(coords: L.Coords, done: L.DoneCallback): HTMLElement {
     const tile = document.createElement('img');
     tile.alt = '';
     tile.setAttribute('role', 'presentation');
-    tile.crossOrigin = 'anonymous';
+    tile.referrerPolicy = 'no-referrer-when-downgrade';
 
     const key = buildOfflineTileKey(this.theme, coords.z, coords.x, coords.y);
     const networkUrl = this.getTileUrl(coords);
+    const secondaryFallbackUrl = buildCartoTileUrl(
+      this.theme,
+      coords.z,
+      coords.x,
+      coords.y,
+      {
+        baseStyle:
+          this.getBaseStyle() === 'osm' ? 'esri_street' : 'osm',
+      },
+    );
     let activeObjectUrl: string | null = null;
     let triedNetworkFallback = false;
+    let triedSecondaryServer = false;
 
     const cleanupObjectUrl = (): void => {
       if (activeObjectUrl) {
@@ -665,6 +754,12 @@ export class OfflineCartoTileLayer extends L.TileLayer {
         triedNetworkFallback = true;
         tile.dataset.offlineSource = 'network-fallback';
         tile.src = networkUrl;
+        return;
+      }
+      if (!triedSecondaryServer && tile.src !== secondaryFallbackUrl) {
+        triedSecondaryServer = true;
+        tile.dataset.offlineSource = 'network-secondary-fallback';
+        tile.src = secondaryFallbackUrl;
         return;
       }
       done(new Error(`Falha ao carregar tile ${key}`), tile);
@@ -701,11 +796,11 @@ export class OfflineCartoTileLayer extends L.TileLayer {
 }
 
 /**
- * Factory para instanciar `OfflineCartoTileLayer` com o tema Claro (Voyager) ou Escuro (DarkMatter).
+ * Factory para instanciar `OfflineCartoTileLayer` com servidores gratuitos sem API Key (OSM / Esri).
  */
 export function createOfflineCartoTileLayer(
-  theme: MapTileTheme = 'dark',
-  options?: L.TileLayerOptions,
+  theme: MapTileTheme = 'light',
+  options?: L.TileLayerOptions & { baseStyle?: MapBaseStyle },
 ): OfflineCartoTileLayer {
   return new OfflineCartoTileLayer(theme, options);
 }

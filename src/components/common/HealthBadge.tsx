@@ -18,25 +18,25 @@ const LEVEL_CONFIG: Record<
   }
 > = {
   healthy: {
-    label: 'Sistema Operacional',
+    label: 'Online',
     shortLabel: 'Online',
-    dotColor: 'bg-emerald-500',
+    dotColor: 'bg-emerald-400',
     badgeStyle:
-      'border-emerald-500/40 bg-emerald-500/10 text-emerald-800 dark:text-emerald-300 hover:bg-emerald-500/20',
+      'border-white/25 bg-white/15 text-white hover:bg-white/25',
   },
   degraded: {
-    label: 'Modo Degradado / Cache',
-    shortLabel: 'Degradado',
-    dotColor: 'bg-amber-500',
+    label: 'Modo Local',
+    shortLabel: 'Local',
+    dotColor: 'bg-amber-300',
     badgeStyle:
-      'border-amber-500/40 bg-amber-500/10 text-amber-900 dark:text-amber-300 hover:bg-amber-500/20',
+      'border-white/25 bg-white/15 text-white hover:bg-white/25',
   },
   down: {
-    label: 'Offline / Falha de Serviços',
+    label: 'Offline',
     shortLabel: 'Offline',
-    dotColor: 'bg-red-500',
+    dotColor: 'bg-rose-400',
     badgeStyle:
-      'border-red-500/40 bg-red-500/10 text-red-900 dark:text-red-300 hover:bg-red-500/20',
+      'border-rose-300/50 bg-rose-600/30 text-white hover:bg-rose-600/40',
   },
 };
 
@@ -49,8 +49,8 @@ export const HealthBadge: React.FC<HealthBadgeProps> = ({ snapshot, onClick, cla
       type="button"
       onClick={onClick}
       aria-label={`Autodiagnóstico do Sistema: ${cfg.label}. Clique para abrir detalhes.`}
-      title={`Health Check: ${cfg.label}`}
-      className={`min-h-[44px] min-w-[44px] px-3 py-2 rounded-xl border text-xs font-bold inline-flex items-center gap-2 transition-colors focus:outline-none focus:ring-2 focus:ring-sky-500 ${cfg.badgeStyle} ${className}`}
+      title={`Status do Sistema: ${cfg.label}`}
+      className={`min-h-[40px] min-w-[40px] px-3 py-1.5 rounded-xl border text-xs font-semibold inline-flex items-center gap-2 transition-colors focus:outline-none focus:ring-2 focus:ring-white/70 ${cfg.badgeStyle} ${className}`}
     >
       <span className="relative flex h-2.5 w-2.5 shrink-0" aria-hidden="true">
         <span
@@ -58,13 +58,13 @@ export const HealthBadge: React.FC<HealthBadgeProps> = ({ snapshot, onClick, cla
         />
         <span className={`relative inline-flex rounded-full h-2.5 w-2.5 ${cfg.dotColor}`} />
       </span>
-      <Activity className="w-4 h-4 shrink-0" aria-hidden="true" />
+      <Activity className="w-3.5 h-3.5 shrink-0" aria-hidden="true" />
       <span className="hidden sm:inline">{cfg.label}</span>
       <span className="sm:hidden">{cfg.shortLabel}</span>
       {errorCount > 0 && (
         <span
           aria-label={`${errorCount} erros registrados`}
-          className="px-1.5 py-0.5 rounded-full text-[10px] font-extrabold bg-red-600 text-white"
+          className="px-1.5 py-0.5 rounded-full text-[10px] font-bold bg-rose-500 text-white"
         >
           {errorCount}
         </span>

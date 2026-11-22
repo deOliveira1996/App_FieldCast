@@ -197,7 +197,7 @@ describe('Sprint 3A — Offline Mission Tiles Service & Concurrency Queue', () =
     expect(cancelledResult.completedTiles).toBe(0);
   });
 
-  it('OfflineCartoTileLayer sobrescreve createTile() lendo do Dexie primeiro e usando CartoDB CORS como fallback', async () => {
+  it('OfflineCartoTileLayer sobrescreve createTile() lendo do Dexie primeiro e usando servidores gratuitos sem API Key (OSM / Esri) como fallback', async () => {
     const z = 12;
     const x = 1495;
     const y = 2401;
@@ -217,24 +217,38 @@ describe('Sprint 3A — Offline Mission Tiles Service & Concurrency Queue', () =
 
     const layer = createOfflineCartoTileLayer('light');
     expect(layer.getTheme()).toBe('light');
+    expect(layer.getBaseStyle()).toBe('osm');
 
-    // Tile em cache no Dexie
+    // Tile em cache no Dexie (não força crossOrigin='anonymous' em <img> ao vivo para evitar bloqueios de CDN)
     const cachedCoords = { x, y, z } as L.Coords;
     const cachedImg = layer.createTile(cachedCoords, () => {}) as HTMLImageElement;
-    expect(cachedImg.crossOrigin).toBe('anonymous');
 
     await new Promise((resolve) => setTimeout(resolve, 25));
     expect(cachedImg.dataset.offlineSource).toBe('indexeddb');
 
-    // Tile não existente em cache -> fallback para URL CartoDB CORS
+    // Tile não existente em cache -> fallback para URL OpenStreetMap gratuita sem API Key
     const uncachedCoords = { x: x + 1, y, z } as L.Coords;
     const uncachedImg = layer.createTile(uncachedCoords, () => {}) as HTMLImageElement;
     await new Promise((resolve) => setTimeout(resolve, 25));
     expect(uncachedImg.dataset.offlineSource).toBe('network');
-    expect(uncachedImg.src).toContain('basemaps.cartocdn.com/rastertiles/voyager');
+    expect(uncachedImg.src).toContain('tile.openstreetmap.org/12/1496/2401.png');
+    expect(uncachedImg.src).not.toContain('basemaps.cartocdn.com');
 
-    // Verifica URL do tema escuro
+    // Verifica URL dos estilos gratuitos (OSM e Esri World Street Map / Imagery)
+    const lightUrl = buildCartoTileUrl('light', z, x, y);
+    expect(lightUrl).toBe('https://tile.openstreetmap.org/12/1495/2401.png');
+
     const darkUrl = buildCartoTileUrl('dark', z, x, y);
-    expect(darkUrl).toContain('basemaps.cartocdn.com/dark_all/12/1495/2401.png');
+    expect(darkUrl).toContain(
+      'server.arcgisonline.com/ArcGIS/rest/services/World_Street_Map/MapServer/tile/12/2401/1495',
+    );
+    expect(darkUrl).not.toContain('basemaps.cartocdn.com');
+
+    const satelliteUrl = buildCartoTileUrl('light', z, x, y, {
+      baseStyle: 'esri_satellite',
+    });
+    expect(satelliteUrl).toContain(
+      'server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/12/2401/1495',
+    );
   });
 });

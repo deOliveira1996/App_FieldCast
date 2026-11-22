@@ -2,25 +2,7 @@ import { useCallback, useEffect, useState } from 'react';
 
 export type ThemeMode = 'light' | 'dark';
 
-const THEME_STORAGE_KEY = 'fieldcast_theme';
-
-function getInitialTheme(defaultTheme: ThemeMode = 'dark'): ThemeMode {
-  if (typeof window === 'undefined') {
-    return defaultTheme;
-  }
-  try {
-    const stored = window.localStorage.getItem(THEME_STORAGE_KEY);
-    if (stored === 'light' || stored === 'dark') {
-      return stored;
-    }
-    if (window.matchMedia && window.matchMedia('(prefers-color-scheme: light)').matches) {
-      return 'light';
-    }
-  } catch {
-    // Ignore localStorage access errors in restricted webviews
-  }
-  return defaultTheme;
-}
+export const THEME_STORAGE_KEY = 'fieldcast_theme_clean_v2';
 
 function applyThemeToDom(theme: ThemeMode): void {
   if (typeof document === 'undefined') {
@@ -35,8 +17,25 @@ function applyThemeToDom(theme: ThemeMode): void {
 
   const metaThemeColor = document.querySelector('meta[name="theme-color"]');
   if (metaThemeColor) {
-    metaThemeColor.setAttribute('content', theme === 'dark' ? '#070b14' : '#f8fafc');
+    metaThemeColor.setAttribute('content', theme === 'dark' ? '#0d1f36' : '#f0f8ff');
   }
+}
+
+function getInitialTheme(_defaultTheme: ThemeMode = 'light'): ThemeMode {
+  if (typeof window === 'undefined') {
+    return 'light';
+  }
+  let resolved: ThemeMode = 'light';
+  try {
+    const stored = window.localStorage.getItem(THEME_STORAGE_KEY);
+    if (stored === 'light' || stored === 'dark') {
+      resolved = stored;
+    }
+  } catch {
+    // Ignore localStorage access errors in restricted webviews
+  }
+  applyThemeToDom(resolved);
+  return resolved;
 }
 
 export interface UseThemeResult {
@@ -47,10 +46,10 @@ export interface UseThemeResult {
 }
 
 /**
- * Hook de gerenciamento persistente de Tema Claro (alto contraste solar)
- * e Escuro (noturno), sincronizado com `localStorage` e classe `dark` no `<html>`.
+ * Hook de gerenciamento persistente do Tema Clean Azul/Branco (padrão 'light')
+ * e Tema Oceânico Noturno ('dark'), sincronizado com `localStorage` e classe `dark` no `<html>`.
  */
-export function useTheme(defaultTheme: ThemeMode = 'dark'): UseThemeResult {
+export function useTheme(defaultTheme: ThemeMode = 'light'): UseThemeResult {
   const [theme, setThemeState] = useState<ThemeMode>(() => getInitialTheme(defaultTheme));
 
   useEffect(() => {

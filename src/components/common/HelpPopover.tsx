@@ -201,7 +201,7 @@ export const HelpPopover: React.FC<HelpPopoverProps> = ({
         aria-controls={popoverId}
         aria-label={label ?? `Ajuda sobre ${resolvedTitle}`}
         title={`Ajuda: ${resolvedTitle}`}
-        className="min-h-[44px] min-w-[44px] p-2 rounded-xl inline-flex items-center justify-center text-slate-600 hover:text-sky-600 dark:text-slate-400 dark:hover:text-sky-400 hover:bg-slate-200/70 dark:hover:bg-slate-800/80 transition-colors focus:outline-none focus:ring-2 focus:ring-sky-500"
+        className="min-h-[38px] min-w-[38px] p-1.5 rounded-xl inline-flex items-center justify-center text-slate-500 hover:text-[#0080cd] dark:text-sky-300/75 dark:hover:text-sky-300 hover:bg-sky-50 dark:hover:bg-sky-900/50 transition-colors focus:outline-none focus:ring-2 focus:ring-sky-500"
       >
         <HelpCircle className="w-4 h-4" aria-hidden="true" />
       </button>
@@ -212,13 +212,13 @@ export const HelpPopover: React.FC<HelpPopoverProps> = ({
           role="dialog"
           aria-label={resolvedTitle}
           onClick={(e) => e.stopPropagation()}
-          className={`absolute z-50 top-full mt-1.5 w-80 sm:w-96 rounded-2xl border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900 text-slate-900 dark:text-slate-100 shadow-2xl p-4 space-y-3 text-left ${
+          className={`absolute z-50 top-full mt-1.5 w-80 sm:w-96 rounded-2xl border border-sky-200 dark:border-sky-800 bg-white dark:bg-[#132a47] text-slate-800 dark:text-sky-50 shadow-2xl p-4 space-y-3 text-left ${
             align === 'left' ? 'left-0' : 'right-0'
           }`}
         >
-          <div className="flex items-start justify-between gap-2 border-b border-slate-200 dark:border-slate-800 pb-2.5">
+          <div className="flex items-start justify-between gap-2 border-b border-sky-100 dark:border-sky-800 pb-2.5">
             <div className="flex items-center gap-2">
-              <HelpCircle className="w-5 h-5 text-sky-600 dark:text-sky-400 shrink-0" />
+              <HelpCircle className="w-5 h-5 text-[#0080cd] dark:text-sky-400 shrink-0" />
               <h4 className="text-sm font-bold leading-snug">{resolvedTitle}</h4>
             </div>
             <button

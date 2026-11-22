@@ -94,7 +94,7 @@ export const ThresholdSettingsModal: React.FC<ThresholdSettingsModalProps> = ({
       {
         actionKey: 'save_safe_window_thresholds',
         moduleName: 'ThresholdSettingsModal',
-        successTitle: 'Limites do Semáforo de Janela Segura atualizados',
+        successTitle: 'Limites de operação atualizados',
         errorTitle: 'Erro ao salvar limites operacionais',
         onLoadingChange: setIsSaving,
         onToast,
@@ -107,28 +107,28 @@ export const ThresholdSettingsModal: React.FC<ThresholdSettingsModalProps> = ({
       role="dialog"
       aria-modal="true"
       aria-labelledby="threshold-modal-title"
-      className="fixed inset-0 z-50 flex items-center justify-center p-3 sm:p-6 bg-slate-950/75 backdrop-blur-sm"
+      className="fixed inset-0 z-50 flex items-center justify-center p-3 sm:p-6 bg-sky-950/45 dark:bg-slate-950/75 backdrop-blur-sm"
       onClick={onClose}
     >
       <div
         onClick={(e) => e.stopPropagation()}
-        className="w-full max-w-lg rounded-2xl border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900 text-slate-900 dark:text-slate-100 shadow-2xl overflow-hidden"
+        className="w-full max-w-lg rounded-3xl border border-sky-200 dark:border-sky-800/80 bg-white dark:bg-[#132a47] text-slate-800 dark:text-sky-50 shadow-2xl overflow-hidden"
       >
         {/* Header */}
-        <div className="flex items-center justify-between gap-3 px-5 py-4 border-b border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-slate-900/90">
+        <div className="flex items-center justify-between gap-3 px-5 py-4 border-b border-sky-100 dark:border-sky-800/70 bg-gradient-to-r from-sky-50 via-blue-50/40 to-white dark:from-[#0f243d] dark:to-[#132a47]">
           <div className="flex items-center gap-3">
-            <div className="p-2.5 rounded-xl bg-emerald-500/15 text-emerald-600 dark:text-emerald-400 border border-emerald-500/30">
+            <div className="p-2.5 rounded-2xl bg-[#0080cd] text-white shadow-sm">
               <Sliders className="w-5 h-5" aria-hidden="true" />
             </div>
             <div>
               <div className="flex items-center gap-1">
-                <h2 id="threshold-modal-title" className="text-base sm:text-lg font-bold">
-                  Limites do Semáforo de Janela Segura
+                <h2 id="threshold-modal-title" className="text-base sm:text-lg font-bold text-slate-900 dark:text-white">
+                  Limites da Janela Segura
                 </h2>
                 <HelpPopover topic="safe_window" align="left" />
               </div>
-              <p className="text-xs text-slate-600 dark:text-slate-400">
-                Personalize os tetos operacionais que pintam cada hora em Verde, Amarelo ou Vermelho
+              <p className="text-xs text-slate-600 dark:text-sky-200/80">
+                Defina os valores máximos ideais para sua atividade no mar ou em campo
               </p>
             </div>
           </div>
@@ -137,7 +137,7 @@ export const ThresholdSettingsModal: React.FC<ThresholdSettingsModalProps> = ({
             type="button"
             onClick={onClose}
             aria-label="Fechar configuração de limites"
-            className="min-h-[44px] min-w-[44px] rounded-xl inline-flex items-center justify-center text-slate-600 dark:text-slate-400 hover:bg-slate-200 dark:hover:bg-slate-800 transition-colors"
+            className="min-h-[44px] min-w-[44px] rounded-2xl inline-flex items-center justify-center text-slate-500 dark:text-sky-200 hover:bg-sky-100/80 dark:hover:bg-sky-900/50 transition-colors"
           >
             <X className="w-5 h-5" aria-hidden="true" />
           </button>
@@ -148,7 +148,7 @@ export const ThresholdSettingsModal: React.FC<ThresholdSettingsModalProps> = ({
           {validationError && (
             <div
               role="alert"
-              className="rounded-xl border border-red-500/40 bg-red-500/10 p-3 text-xs font-semibold text-red-700 dark:text-red-300"
+              className="rounded-xl border border-rose-300 bg-rose-50 p-3 text-xs font-semibold text-rose-700 dark:bg-rose-950/60 dark:text-rose-200"
             >
               {validationError}
             </div>
@@ -159,9 +159,9 @@ export const ThresholdSettingsModal: React.FC<ThresholdSettingsModalProps> = ({
             <div className="space-y-1.5">
               <label
                 htmlFor="threshold-wind"
-                className="flex items-center gap-1.5 text-xs font-bold text-slate-700 dark:text-slate-300"
+                className="flex items-center gap-1.5 text-xs font-bold text-slate-700 dark:text-sky-200"
               >
-                <Wind className="w-4 h-4 text-sky-500" aria-hidden="true" />
+                <Wind className="w-4 h-4 text-[#0080cd]" aria-hidden="true" />
                 <span>Vento Máximo 10m (km/h)</span>
               </label>
               <input
@@ -173,10 +173,10 @@ export const ThresholdSettingsModal: React.FC<ThresholdSettingsModalProps> = ({
                 required
                 value={maxWindKmh}
                 onChange={(e) => setMaxWindKmh(Number(e.target.value))}
-                className="w-full min-h-[44px] px-3.5 py-2 rounded-xl border border-slate-300 dark:border-slate-700 bg-slate-50 dark:bg-slate-950 text-sm font-mono font-bold focus:outline-none focus:ring-2 focus:ring-sky-500"
+                className="w-full min-h-[44px] px-3.5 py-2 rounded-xl border border-sky-200 dark:border-sky-700 bg-[#f4f8fb] dark:bg-[#0d1f36] text-sm font-bold focus:outline-none focus:ring-2 focus:ring-sky-500"
               />
-              <p className="text-[11px] text-slate-500 dark:text-slate-400">
-                Padrão: {DEFAULT_SAFE_WINDOW_THRESHOLDS.maxWindKmh} km/h (5 a 150)
+              <p className="text-[11px] text-slate-500 dark:text-sky-200/75">
+                Padrão: {DEFAULT_SAFE_WINDOW_THRESHOLDS.maxWindKmh} km/h
               </p>
             </div>
 
@@ -184,9 +184,9 @@ export const ThresholdSettingsModal: React.FC<ThresholdSettingsModalProps> = ({
             <div className="space-y-1.5">
               <label
                 htmlFor="threshold-gust"
-                className="flex items-center gap-1.5 text-xs font-bold text-slate-700 dark:text-slate-300"
+                className="flex items-center gap-1.5 text-xs font-bold text-slate-700 dark:text-sky-200"
               >
-                <Wind className="w-4 h-4 text-amber-500" aria-hidden="true" />
+                <Wind className="w-4 h-4 text-orange-500" aria-hidden="true" />
                 <span>Rajada Máxima 10m (km/h)</span>
               </label>
               <input
@@ -198,10 +198,10 @@ export const ThresholdSettingsModal: React.FC<ThresholdSettingsModalProps> = ({
                 required
                 value={maxGustKmh}
                 onChange={(e) => setMaxGustKmh(Number(e.target.value))}
-                className="w-full min-h-[44px] px-3.5 py-2 rounded-xl border border-slate-300 dark:border-slate-700 bg-slate-50 dark:bg-slate-950 text-sm font-mono font-bold focus:outline-none focus:ring-2 focus:ring-sky-500"
+                className="w-full min-h-[44px] px-3.5 py-2 rounded-xl border border-sky-200 dark:border-sky-700 bg-[#f4f8fb] dark:bg-[#0d1f36] text-sm font-bold focus:outline-none focus:ring-2 focus:ring-sky-500"
               />
-              <p className="text-[11px] text-slate-500 dark:text-slate-400">
-                Padrão: {DEFAULT_SAFE_WINDOW_THRESHOLDS.maxGustKmh} km/h (5 a 200)
+              <p className="text-[11px] text-slate-500 dark:text-sky-200/75">
+                Padrão: {DEFAULT_SAFE_WINDOW_THRESHOLDS.maxGustKmh} km/h
               </p>
             </div>
 
@@ -209,9 +209,9 @@ export const ThresholdSettingsModal: React.FC<ThresholdSettingsModalProps> = ({
             <div className="space-y-1.5">
               <label
                 htmlFor="threshold-wave"
-                className="flex items-center gap-1.5 text-xs font-bold text-slate-700 dark:text-slate-300"
+                className="flex items-center gap-1.5 text-xs font-bold text-slate-700 dark:text-sky-200"
               >
-                <Waves className="w-4 h-4 text-teal-500" aria-hidden="true" />
+                <Waves className="w-4 h-4 text-[#0080cd]" aria-hidden="true" />
                 <span>Altura Máx. de Onda (m)</span>
               </label>
               <input
@@ -223,11 +223,10 @@ export const ThresholdSettingsModal: React.FC<ThresholdSettingsModalProps> = ({
                 required
                 value={maxWaveM}
                 onChange={(e) => setMaxWaveM(Number(e.target.value))}
-                className="w-full min-h-[44px] px-3.5 py-2 rounded-xl border border-slate-300 dark:border-slate-700 bg-slate-50 dark:bg-slate-950 text-sm font-mono font-bold focus:outline-none focus:ring-2 focus:ring-sky-500"
+                className="w-full min-h-[44px] px-3.5 py-2 rounded-xl border border-sky-200 dark:border-sky-700 bg-[#f4f8fb] dark:bg-[#0d1f36] text-sm font-bold focus:outline-none focus:ring-2 focus:ring-sky-500"
               />
-              <p className="text-[11px] text-slate-500 dark:text-slate-400">
-                Padrão: {DEFAULT_SAFE_WINDOW_THRESHOLDS.maxWaveM.toFixed(1)} m (ignorado em
-                continente)
+              <p className="text-[11px] text-slate-500 dark:text-sky-200/75">
+                Padrão: {DEFAULT_SAFE_WINDOW_THRESHOLDS.maxWaveM.toFixed(1)} m
               </p>
             </div>
 
@@ -235,10 +234,10 @@ export const ThresholdSettingsModal: React.FC<ThresholdSettingsModalProps> = ({
             <div className="space-y-1.5">
               <label
                 htmlFor="threshold-precip"
-                className="flex items-center gap-1.5 text-xs font-bold text-slate-700 dark:text-slate-300"
+                className="flex items-center gap-1.5 text-xs font-bold text-slate-700 dark:text-sky-200"
               >
-                <CloudRain className="w-4 h-4 text-indigo-500" aria-hidden="true" />
-                <span>Probabilidade Máx. Chuva (%)</span>
+                <CloudRain className="w-4 h-4 text-[#0080cd]" aria-hidden="true" />
+                <span>Chance Máx. de Chuva (%)</span>
               </label>
               <input
                 id="threshold-precip"
@@ -249,20 +248,20 @@ export const ThresholdSettingsModal: React.FC<ThresholdSettingsModalProps> = ({
                 required
                 value={maxPrecipProbPct}
                 onChange={(e) => setMaxPrecipProbPct(Number(e.target.value))}
-                className="w-full min-h-[44px] px-3.5 py-2 rounded-xl border border-slate-300 dark:border-slate-700 bg-slate-50 dark:bg-slate-950 text-sm font-mono font-bold focus:outline-none focus:ring-2 focus:ring-sky-500"
+                className="w-full min-h-[44px] px-3.5 py-2 rounded-xl border border-sky-200 dark:border-sky-700 bg-[#f4f8fb] dark:bg-[#0d1f36] text-sm font-bold focus:outline-none focus:ring-2 focus:ring-sky-500"
               />
-              <p className="text-[11px] text-slate-500 dark:text-slate-400">
-                Padrão: {DEFAULT_SAFE_WINDOW_THRESHOLDS.maxPrecipProbPct}% (0 a 100%)
+              <p className="text-[11px] text-slate-500 dark:text-sky-200/75">
+                Padrão: {DEFAULT_SAFE_WINDOW_THRESHOLDS.maxPrecipProbPct}%
               </p>
             </div>
           </div>
 
           {/* Actions */}
-          <div className="flex flex-col sm:flex-row items-stretch sm:items-center justify-between gap-3 pt-3 border-t border-slate-200 dark:border-slate-800">
+          <div className="flex flex-col sm:flex-row items-stretch sm:items-center justify-between gap-3 pt-3 border-t border-sky-100 dark:border-sky-800/70">
             <button
               type="button"
               onClick={handleRestoreDefaults}
-              className="min-h-[44px] min-w-[44px] px-4 py-2 rounded-xl text-xs font-bold inline-flex items-center justify-center gap-2 bg-slate-100 dark:bg-slate-800 hover:bg-slate-200 dark:hover:bg-slate-700 text-slate-700 dark:text-slate-200 transition-colors"
+              className="min-h-[42px] min-w-[44px] px-4 py-2 rounded-full text-xs font-semibold inline-flex items-center justify-center gap-2 bg-[#f4f8fb] dark:bg-[#0d1f36] hover:bg-sky-50 text-slate-700 dark:text-sky-200 border border-sky-200 dark:border-sky-800 transition-colors"
             >
               <RotateCcw className="w-4 h-4" aria-hidden="true" />
               <span>Restaurar Padrão</span>
@@ -272,14 +271,14 @@ export const ThresholdSettingsModal: React.FC<ThresholdSettingsModalProps> = ({
               <button
                 type="button"
                 onClick={onClose}
-                className="min-h-[44px] min-w-[44px] px-4 py-2 rounded-xl text-xs font-bold bg-slate-200 dark:bg-slate-800 hover:bg-slate-300 dark:hover:bg-slate-700 text-slate-800 dark:text-slate-200 transition-colors flex-1 sm:flex-initial"
+                className="min-h-[42px] min-w-[44px] px-4 py-2 rounded-full text-xs font-semibold bg-slate-100 dark:bg-sky-900/50 hover:bg-slate-200 text-slate-700 dark:text-sky-100 transition-colors flex-1 sm:flex-initial"
               >
                 Cancelar
               </button>
               <button
                 type="submit"
                 disabled={isSaving}
-                className="min-h-[44px] min-w-[44px] px-5 py-2 rounded-xl text-xs font-bold inline-flex items-center justify-center gap-2 bg-emerald-600 hover:bg-emerald-500 disabled:opacity-60 text-white shadow-sm transition-colors flex-1 sm:flex-initial"
+                className="min-h-[42px] min-w-[44px] px-5 py-2 rounded-full text-xs font-bold inline-flex items-center justify-center gap-2 bg-[#0080cd] hover:bg-[#006bb3] disabled:opacity-60 text-white shadow-sm transition-colors flex-1 sm:flex-initial"
               >
                 <Save className="w-4 h-4" aria-hidden="true" />
                 <span>{isSaving ? 'Salvando...' : 'Salvar Limites'}</span>

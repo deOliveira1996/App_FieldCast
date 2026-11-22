@@ -1,15 +1,20 @@
-import React, { useState } from 'react';
+import React, { useMemo, useState } from 'react';
 import {
+  ArrowDown,
+  ArrowUp,
   ChevronDown,
   ChevronUp,
   Clock,
   CloudRain,
   Compass,
+  Droplets,
   Gauge,
-  MapPin,
+  Map as MapIcon,
+  Moon,
   Mountain,
   ShieldCheck,
   Sliders,
+  Sun,
   Thermometer,
   Waves,
   Wind,
@@ -22,6 +27,10 @@ import type {
   SafeWindowStatus,
 } from '../../types/weather';
 import { HelpPopover } from '../common/HelpPopover';
+import {
+  COMPLETE_VISIBLE_PARAMS,
+  type ForecastVisibleParams,
+} from './forecastParamsVisibility';
 
 export interface CurrentSummaryCardProps {
   forecast: NormalizedForecast;
@@ -29,31 +38,36 @@ export interface CurrentSummaryCardProps {
   selectedHourIndex: number;
   onOpenThresholdModal: () => void;
   onOpenLocationsModal?: () => void;
+  visibleParams?: ForecastVisibleParams;
+  isMiniMapOpen?: boolean;
+  onToggleMiniMap?: () => void;
 }
 
 const CONFIDENCE_COLOR_STYLES: Record<
   ConfidenceBadgeColor,
   {
     badge: string;
-    bar: string;
+    dot: string;
     label: string;
   }
 > = {
   green: {
     badge:
-      'border-emerald-500/40 bg-emerald-500/15 text-emerald-900 dark:text-emerald-200',
-    bar: 'bg-emerald-500',
+      'border-emerald-200 bg-emerald-50 text-emerald-800 dark:border-emerald-700/60 dark:bg-emerald-950/60 dark:text-emerald-200',
+    dot: 'bg-emerald-500',
     label: 'Alta Confiabilidade',
   },
   amber: {
-    badge: 'border-amber-500/40 bg-amber-500/15 text-amber-950 dark:text-amber-200',
-    bar: 'bg-amber-500',
+    badge:
+      'border-amber-200 bg-amber-50 text-amber-900 dark:border-amber-700/60 dark:bg-amber-950/60 dark:text-amber-200',
+    dot: 'bg-amber-500',
     label: 'Confiabilidade Moderada',
   },
   red: {
-    badge: 'border-red-500/40 bg-red-500/15 text-red-900 dark:text-red-200',
-    bar: 'bg-red-500',
-    label: 'Baixa Confiabilidade / Divergência',
+    badge:
+      'border-rose-200 bg-rose-50 text-rose-900 dark:border-rose-700/60 dark:bg-rose-950/60 dark:text-rose-200',
+    dot: 'bg-rose-500',
+    label: 'Divergência entre Modelos',
   },
 };
 
@@ -67,32 +81,37 @@ const SAFE_WINDOW_STYLES: Record<
 > = {
   green: {
     container:
-      'border-emerald-500/40 bg-emerald-500/10 text-emerald-950 dark:text-emerald-100',
+      'border-emerald-200 bg-emerald-50/80 text-emerald-900 dark:border-emerald-700/60 dark:bg-emerald-950/50 dark:text-emerald-100',
     dot: 'bg-emerald-500',
-    title: 'Janela Segura (Verde)',
+    title: 'Janela Favorável',
   },
   amber: {
-    container: 'border-amber-500/40 bg-amber-500/10 text-amber-950 dark:text-amber-100',
+    container:
+      'border-amber-200 bg-amber-50/80 text-amber-900 dark:border-amber-700/60 dark:bg-amber-950/50 dark:text-amber-100',
     dot: 'bg-amber-500',
-    title: 'Atenção Operacional (Amarelo)',
+    title: 'Atenção Moderada',
   },
   red: {
-    container: 'border-red-500/40 bg-red-500/10 text-red-950 dark:text-red-100',
-    dot: 'bg-red-500',
-    title: 'Fora dos Limites (Vermelho)',
+    container:
+      'border-rose-200 bg-rose-50/80 text-rose-900 dark:border-rose-700/60 dark:bg-rose-950/50 dark:text-rose-100',
+    dot: 'bg-rose-500',
+    title: 'Acima dos Limites',
   },
 };
 
-function degreesToCardinal(deg: number | null | undefined): string {
+export function degreesToCardinalShort(deg: number | null | undefined): string {
   if (deg === null || deg === undefined || Number.isNaN(deg)) {
     return '—';
   }
-  const directions = ['N', 'NE', 'L', 'SE', 'S', 'SO', 'O', 'NO'];
+  const directions = ['N', 'NE', 'E', 'SE', 'S', 'SW', 'W', 'NW'];
   const index = Math.round((((deg % 360) + 360) % 360) / 45) % 8;
-  return `${directions[index]} (${Math.round(deg)}°)`;
+  return directions[index] ?? 'N';
 }
 
-function formatTimeHHMM(isoString: string, timezone?: string): string {
+function formatTimeHHMM(isoString: string | null | undefined, timezone?: string): string {
+  if (!isoString) {
+    return '—';
+  }
   try {
     const d = new Date(isoString);
     if (Number.isNaN(d.getTime())) {
@@ -115,7 +134,7 @@ function formatHourDateTimeLabel(hour: EnsembleHour | undefined, timezone?: stri
   try {
     const d = new Date(hour.timestampUnix * 1000);
     return d.toLocaleString('pt-BR', {
-      weekday: 'short',
+      weekday: 'long',
       day: '2-digit',
       month: '2-digit',
       hour: '2-digit',
@@ -133,6 +152,9 @@ export const CurrentSummaryCard: React.FC<CurrentSummaryCardProps> = ({
   selectedHourIndex,
   onOpenThresholdModal,
   onOpenLocationsModal,
+  visibleParams = COMPLETE_VISIBLE_PARAMS,
+  isMiniMapOpen,
+  onToggleMiniMap,
 }) => {
   const [showConfidenceDetails, setShowConfidenceDetails] = useState(false);
 
@@ -149,436 +171,450 @@ export const CurrentSummaryCard: React.FC<CurrentSummaryCardProps> = ({
 
   const updatedAtHHMM = formatTimeHHMM(forecast.fetchedAtIso, forecast.timezone);
 
-  const originLabel = activeLocation.isApproximateIp
-    ? 'Aproximado via IP'
-    : activeLocation.origin === 'gps'
-      ? 'GPS Preciso'
-      : activeLocation.origin === 'cached'
-        ? 'Cache Offline'
-        : activeLocation.origin === 'saved'
-          ? 'Ponto Salvo'
-          : 'Busca Geográfica';
+  // Compute Day Min & Max Temperature across 24h window around selected hour
+  const dayTempStats = useMemo(() => {
+    const startIdx = Math.floor(safeIndex / 24) * 24;
+    const windowHours = forecast.hours.slice(startIdx, startIdx + 24);
+    const temps = (windowHours.length > 0 ? windowHours : forecast.hours.slice(0, 24))
+      .map((h) => h.temperature2mC.mean)
+      .filter((v): v is number => v !== null && !Number.isNaN(v));
+    if (temps.length === 0) {
+      return { min: null, max: null };
+    }
+    return {
+      min: Math.round(Math.min(...temps)),
+      max: Math.round(Math.max(...temps)),
+    };
+  }, [forecast.hours, safeIndex]);
+
+  const activeEphemeris =
+    forecast.ephemerisByDay[Math.floor(safeIndex / 24)] ?? forecast.ephemerisByDay[0];
+
+  const windCardDir = degreesToCardinalShort(currentHour?.windDirection10m.degree);
+  const windSpd =
+    currentHour?.windSpeed10m.mean !== null && currentHour?.windSpeed10m.mean !== undefined
+      ? Math.round(currentHour.windSpeed10m.mean)
+      : null;
+  const gustSpd =
+    currentHour?.windGusts10m.mean !== null && currentHour?.windGusts10m.mean !== undefined
+      ? Math.round(currentHour.windGusts10m.mean)
+      : null;
 
   return (
     <section
       aria-label="Resumo Atual, Confiabilidade e Semáforo Operacional"
-      className="rounded-2xl border border-slate-300/90 dark:border-slate-800 bg-white dark:bg-slate-900 shadow-sm p-4 sm:p-5 space-y-4"
+      className="rounded-2xl border border-slate-200/90 dark:border-sky-800/70 bg-white dark:bg-[#132a47] shadow-sm p-5 sm:p-6 space-y-5"
     >
-      {/* Top Row: Location Metadata, DEM Elevation, Timestamp & Confidence/Semaphore Controls */}
-      <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-4 border-b border-slate-200 dark:border-slate-800 pb-4">
-        <div className="space-y-1.5">
-          <div className="flex flex-wrap items-center gap-2">
+      {/* Top Header Row: Climatempo Clean Title + Map Pin Button + Confidence & Semaphore Pills */}
+      <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-4">
+        <div className="space-y-1">
+          <div className="flex flex-wrap items-center gap-2.5">
             {onOpenLocationsModal ? (
               <button
                 type="button"
                 onClick={onOpenLocationsModal}
-                className="min-h-[44px] px-3 py-1.5 -ml-1 rounded-xl hover:bg-slate-100 dark:hover:bg-slate-800 inline-flex items-center gap-2 text-left transition-colors focus:outline-none focus:ring-2 focus:ring-sky-500"
+                className="group inline-flex items-center gap-2 text-left rounded-xl hover:text-[#0080cd] transition-colors focus:outline-none focus:ring-2 focus:ring-sky-500"
               >
-                <MapPin className="w-5 h-5 text-sky-600 dark:text-sky-400 shrink-0" />
-                <h1 className="text-lg sm:text-xl font-extrabold text-slate-900 dark:text-white">
-                  {activeLocation.name}
+                <h1 className="text-lg sm:text-xl font-extrabold text-slate-900 dark:text-white group-hover:text-[#0080cd] dark:group-hover:text-sky-300">
+                  Previsão para {activeLocation.name}
                 </h1>
               </button>
             ) : (
-              <div className="inline-flex items-center gap-2">
-                <MapPin className="w-5 h-5 text-sky-600 dark:text-sky-400 shrink-0" />
-                <h1 className="text-lg sm:text-xl font-extrabold text-slate-900 dark:text-white">
-                  {activeLocation.name}
-                </h1>
-              </div>
+              <h1 className="text-lg sm:text-xl font-extrabold text-slate-900 dark:text-white">
+                Previsão para {activeLocation.name}
+              </h1>
             )}
 
-            {/* DEM Elevation Badge (Exclusively from Open-Meteo DEM) */}
-            <span
-              title="Altitude extraída exclusivamente do Modelo Digital de Elevação (DEM) da Open-Meteo"
-              className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-xs font-bold bg-slate-100 dark:bg-slate-800 text-slate-800 dark:text-slate-200 border border-slate-300 dark:border-slate-700"
-            >
-              <Mountain className="w-3.5 h-3.5 text-sky-600 dark:text-sky-400" aria-hidden="true" />
-              <span>Altitude DEM: {Math.round(forecast.elevationDemM)} m</span>
+            {onToggleMiniMap && (
+              <button
+                type="button"
+                onClick={onToggleMiniMap}
+                aria-expanded={isMiniMapOpen}
+                className={`min-h-[34px] px-3 py-1 rounded-full text-xs font-bold inline-flex items-center gap-1.5 border transition-all ${
+                  isMiniMapOpen
+                    ? 'bg-[#0080cd] text-white border-[#0080cd] shadow-sm'
+                    : 'bg-sky-50 dark:bg-sky-900/50 hover:bg-sky-100 text-[#0070b8] dark:text-sky-200 border-sky-200 dark:border-sky-700'
+                }`}
+              >
+                <MapIcon className="w-3.5 h-3.5" aria-hidden="true" />
+                <span>{isMiniMapOpen ? 'Ocultar Mapa Pin' : 'Dar Pin no Mapa'}</span>
+              </button>
+            )}
+
+            <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-xs font-medium bg-slate-100 dark:bg-[#0d1f36] text-slate-600 dark:text-sky-200">
+              <Mountain className="w-3.5 h-3.5 text-[#0080cd] dark:text-sky-400" aria-hidden="true" />
+              <span>Alt. {Math.round(forecast.elevationDemM)}m</span>
             </span>
 
-            {/* Location Origin Badge */}
-            <span
-              className={`inline-flex items-center gap-1 px-2.5 py-1 rounded-lg text-xs font-bold border ${
-                activeLocation.isApproximateIp
-                  ? 'bg-amber-500/15 text-amber-900 dark:text-amber-300 border-amber-500/40'
-                  : 'bg-sky-500/10 text-sky-900 dark:text-sky-300 border-sky-500/30'
-              }`}
-            >
-              <Compass className="w-3.5 h-3.5" aria-hidden="true" />
-              <span>{originLabel}</span>
-            </span>
-
-            {/* Updated Timestamp Badge */}
-            <span
-              className={`inline-flex items-center gap-1 px-2.5 py-1 rounded-lg text-xs font-semibold ${
-                forecast.fromCache
-                  ? 'bg-amber-500/15 text-amber-900 dark:text-amber-300 border border-amber-500/30'
-                  : 'bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-400'
-              }`}
-            >
+            <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-xs font-medium bg-slate-100 dark:bg-[#0d1f36] text-slate-500 dark:text-sky-200/80">
               <Clock className="w-3.5 h-3.5" aria-hidden="true" />
-              <span>
-                Atualizado às {updatedAtHHMM}
-                {forecast.fromCache ? ' (Cache Offline)' : ''}
-              </span>
+              <span>Atualizado {updatedAtHHMM}</span>
             </span>
           </div>
 
-          <p className="text-xs text-slate-600 dark:text-slate-400 font-mono">
-            Coordenadas: {forecast.latitude.toFixed(4)}°, {forecast.longitude.toFixed(4)}° • Fuso:{' '}
-            {forecast.timezone} • Exibindo hora #{safeIndex + 1} (
-            {formatHourDateTimeLabel(currentHour, forecast.timezone)})
+          <p className="text-xs text-slate-500 dark:text-sky-200/80 capitalize">
+            {formatHourDateTimeLabel(currentHour, forecast.timezone)} •{' '}
+            <span className="normal-case">
+              Lat {forecast.latitude.toFixed(3)}°, Lon {forecast.longitude.toFixed(3)}°
+            </span>
           </p>
         </div>
 
-        {/* Confidence Score Badge + Safe Window Semaphore */}
-        <div className="flex flex-wrap items-center gap-2.5">
-          {/* Confidence Badge Button + HelpPopover */}
-          <div className="inline-flex items-center rounded-xl border p-1 pr-1.5 gap-1 bg-slate-50 dark:bg-slate-950/60 border-slate-300 dark:border-slate-800">
+        {/* Right Status Pills: Confidence + Safe Window + Limits */}
+        <div className="flex flex-wrap items-center gap-2">
+          <div className="inline-flex items-center rounded-xl border border-slate-200 dark:border-sky-800 bg-[#f8fafc] dark:bg-[#0d1f36] p-1 gap-1">
             <button
               type="button"
               onClick={() => setShowConfidenceDetails((prev) => !prev)}
               aria-expanded={showConfidenceDetails}
-              title="Clique para inspecionar os 4 pilares do Índice de Confiabilidade"
-              className={`min-h-[44px] px-3 py-1.5 rounded-lg border text-xs font-bold inline-flex items-center gap-2 transition-colors focus:outline-none focus:ring-2 focus:ring-sky-500 ${confStyle.badge}`}
+              className={`min-h-[38px] px-3 py-1 rounded-lg border text-xs font-bold inline-flex items-center gap-2 transition-colors ${confStyle.badge}`}
             >
-              <ShieldCheck className="w-4 h-4 shrink-0" aria-hidden="true" />
-              <div className="text-left">
-                <span className="block text-[10px] uppercase tracking-wider opacity-80">
-                  Confiança
-                </span>
-                <span className="text-sm font-extrabold">
-                  {Math.round(confidence.total)}/100 • {confStyle.label}
-                </span>
-              </div>
+              <span className={`w-2.5 h-2.5 rounded-full ${confStyle.dot}`} />
+              <span>
+                Confiança {Math.round(confidence.total)}% • {confStyle.label}
+              </span>
               {showConfidenceDetails ? (
-                <ChevronUp className="w-4 h-4 shrink-0" aria-hidden="true" />
+                <ChevronUp className="w-3.5 h-3.5" aria-hidden="true" />
               ) : (
-                <ChevronDown className="w-4 h-4 shrink-0" aria-hidden="true" />
+                <ChevronDown className="w-3.5 h-3.5" aria-hidden="true" />
               )}
             </button>
             <HelpPopover topic="confidence" />
           </div>
 
-          {/* Safe Window Semaphore + Threshold Config Button + HelpPopover */}
           <div
-            className={`inline-flex items-center rounded-xl border p-1 pr-1.5 gap-1 ${safeStyle.container}`}
+            className={`inline-flex items-center rounded-xl border p-1 gap-1 ${safeStyle.container}`}
           >
-            <div className="px-3 py-1.5 flex items-center gap-2.5">
-              <span className={`w-3 h-3 rounded-full shrink-0 ${safeStyle.dot}`} />
-              <div>
-                <span className="block text-[10px] font-bold uppercase tracking-wider opacity-80">
-                  Semáforo Operacional
-                </span>
-                <span className="text-xs sm:text-sm font-extrabold">{safeStyle.title}</span>
-              </div>
+            <div className="px-2.5 py-1 flex items-center gap-2">
+              <span className={`w-2.5 h-2.5 rounded-full shrink-0 ${safeStyle.dot}`} />
+              <span className="text-xs font-bold">{safeStyle.title}</span>
             </div>
 
             <button
               type="button"
               onClick={onOpenThresholdModal}
               aria-label="Configurar limites do Semáforo de Janela Segura"
-              title="Configurar Limites (Vento, Rajada, Onda, Chuva)"
-              className="min-h-[44px] min-w-[44px] px-2.5 py-1.5 rounded-lg bg-white/80 dark:bg-slate-900/80 hover:bg-white dark:hover:bg-slate-800 text-slate-800 dark:text-slate-100 border border-slate-300/80 dark:border-slate-700 text-xs font-bold inline-flex items-center gap-1.5 transition-colors focus:outline-none focus:ring-2 focus:ring-sky-500"
+              className="min-h-[36px] px-2.5 py-1 rounded-lg bg-white dark:bg-[#132a47] hover:bg-sky-50 text-slate-700 dark:text-sky-100 border border-slate-200 dark:border-sky-700 text-xs font-semibold inline-flex items-center gap-1 transition-colors"
             >
-              <Sliders className="w-3.5 h-3.5 text-sky-600 dark:text-sky-400" aria-hidden="true" />
-              <span className="hidden sm:inline">Limites</span>
+              <Sliders className="w-3.5 h-3.5 text-[#0080cd] dark:text-sky-400" aria-hidden="true" />
+              <span>Limites</span>
             </button>
-
             <HelpPopover topic="safe_window" />
           </div>
         </div>
       </div>
 
-      {/* Expandable Confidence Score Breakdown Tooltip/Panel */}
+      {/* Expandable Confidence Score Breakdown */}
       {showConfidenceDetails && (
         <div
           role="region"
           aria-label="Detalhamento do Índice de Confiabilidade"
-          className="rounded-xl border border-slate-300 dark:border-slate-700 bg-slate-50 dark:bg-slate-950/90 p-4 space-y-3"
+          className="rounded-xl border border-sky-100 dark:border-sky-800 bg-[#f4f8fb] dark:bg-[#0d1f36] p-4 space-y-3"
         >
           <div className="flex flex-wrap items-center justify-between gap-2">
-            <h3 className="text-xs font-extrabold uppercase tracking-wider text-slate-700 dark:text-slate-300">
-              Decomposição Auditável do Índice de Confiabilidade ({Math.round(confidence.total)} /
-              100 pts)
+            <h3 className="text-xs font-bold text-slate-800 dark:text-sky-100 flex items-center gap-1.5">
+              <ShieldCheck className="w-4 h-4 text-[#0080cd]" />
+              <span>Composição da Confiabilidade ({Math.round(confidence.total)}/100 pontos)</span>
             </h3>
             {confidence.isContinental && (
-              <span className="px-2.5 py-0.5 rounded-full text-[11px] font-bold bg-sky-500/15 text-sky-800 dark:text-sky-300 border border-sky-500/30">
-                Regra Continental Ativa: Pesos redistribuídos sem penalidade marinha
+              <span className="px-2.5 py-0.5 rounded-full text-[11px] font-semibold bg-sky-100 dark:bg-sky-900 text-[#0070b8] dark:text-sky-200">
+                Ponto Continental (pesos adaptados para terra firme)
               </span>
             )}
           </div>
 
-          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3 text-xs">
-            <div className="rounded-lg bg-white dark:bg-slate-900 p-3 border border-slate-200 dark:border-slate-800">
-              <span className="text-slate-500 dark:text-slate-400 block">
-                1. Concordância entre Modelos
-              </span>
-              <span className="text-base font-extrabold text-slate-900 dark:text-white">
+          <div className="grid grid-cols-2 lg:grid-cols-4 gap-3 text-xs">
+            <div className="rounded-xl bg-white dark:bg-[#132a47] p-3 border border-slate-200/70 dark:border-sky-800">
+              <span className="text-slate-500 dark:text-sky-200/75 block">Acordo entre Modelos</span>
+              <span className="text-sm font-extrabold text-slate-900 dark:text-white">
                 {confidence.breakdown.modelAgreement.toFixed(1)} / 50 pts
               </span>
-              <span className="block text-[11px] text-slate-500 mt-0.5">
-                Dispersão escalar + coerência vetorial R
-              </span>
             </div>
-
-            <div className="rounded-lg bg-white dark:bg-slate-900 p-3 border border-slate-200 dark:border-slate-800">
-              <span className="text-slate-500 dark:text-slate-400 block">
-                2. Integridade & Frescor das Fontes
-              </span>
-              <span className="text-base font-extrabold text-slate-900 dark:text-white">
+            <div className="rounded-xl bg-white dark:bg-[#132a47] p-3 border border-slate-200/70 dark:border-sky-800">
+              <span className="text-slate-500 dark:text-sky-200/75 block">Qualidade das Fontes</span>
+              <span className="text-sm font-extrabold text-slate-900 dark:text-white">
                 {confidence.breakdown.sourceIntegrity.toFixed(1)} / 30 pts
               </span>
-              <span className="block text-[11px] text-slate-500 mt-0.5">
-                Disponibilidade de modelos & idade do cache
-              </span>
             </div>
-
-            <div className="rounded-lg bg-white dark:bg-slate-900 p-3 border border-slate-200 dark:border-slate-800">
-              <span className="text-slate-500 dark:text-slate-400 block">
-                3. Horizonte Temporal
-              </span>
-              <span className="text-base font-extrabold text-slate-900 dark:text-white">
+            <div className="rounded-xl bg-white dark:bg-[#132a47] p-3 border border-slate-200/70 dark:border-sky-800">
+              <span className="text-slate-500 dark:text-sky-200/75 block">Proximidade Temporal</span>
+              <span className="text-sm font-extrabold text-slate-900 dark:text-white">
                 {confidence.breakdown.timeHorizon.toFixed(1)} / 20 pts
               </span>
-              <span className="block text-[11px] text-slate-500 mt-0.5">
-                Cheio 0–24h • Decaimento 24–72h e &gt;72h
-              </span>
             </div>
-
-            <div className="rounded-lg bg-white dark:bg-slate-900 p-3 border border-slate-200 dark:border-slate-800">
-              <span className="text-slate-500 dark:text-slate-400 block">
-                4. Penalidade de Cisalhamento (α)
-              </span>
-              <span
-                className={`text-base font-extrabold ${
-                  confidence.breakdown.shearPenalty > 0
-                    ? 'text-amber-600 dark:text-amber-400'
-                    : 'text-emerald-600 dark:text-emerald-400'
-                }`}
-              >
+            <div className="rounded-xl bg-white dark:bg-[#132a47] p-3 border border-slate-200/70 dark:border-sky-800">
+              <span className="text-slate-500 dark:text-sky-200/75 block">Gradiente Vertical</span>
+              <span className="text-sm font-extrabold text-emerald-600 dark:text-emerald-400">
                 {confidence.breakdown.shearPenalty > 0
                   ? `-${confidence.breakdown.shearPenalty.toFixed(1)} pts`
-                  : '0 pts (Normal)'}
-              </span>
-              <span className="block text-[11px] text-slate-500 mt-0.5">
-                Desconto se α fora de [0.05, 0.40]
+                  : 'Estável'}
               </span>
             </div>
           </div>
-
-          {confidence.reasons.length > 0 && (
-            <ul className="text-xs text-slate-700 dark:text-slate-300 list-disc pl-5 space-y-1">
-              {confidence.reasons.map((reason, idx) => (
-                <li key={idx}>{reason}</li>
-              ))}
-            </ul>
-          )}
         </div>
       )}
 
-      {/* Primary Weather & Marine Metrics Grid */}
+      {/* Climatempo-Style Clean Ice-Blue Summary Grid (#f4f8fb) */}
       {currentHour && (
-        <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-3">
-          {/* 1. Wind 10m & Gusts */}
-          <div className="rounded-xl border border-slate-200 dark:border-slate-800 bg-slate-50/80 dark:bg-slate-950/60 p-3.5 space-y-1">
-            <div className="flex items-center justify-between text-xs font-bold text-slate-500 dark:text-slate-400">
-              <span>Vento 10m & Rajada</span>
-              <Wind className="w-4 h-4 text-sky-500" aria-hidden="true" />
-            </div>
-            <div className="flex items-baseline gap-1.5">
-              <span className="text-xl sm:text-2xl font-extrabold text-slate-900 dark:text-white">
-                {currentHour.windSpeed10m.mean !== null
-                  ? Math.round(currentHour.windSpeed10m.mean)
-                  : '—'}
-              </span>
-              <span className="text-xs font-semibold text-slate-500">km/h</span>
-            </div>
-            <p className="text-xs font-semibold text-amber-700 dark:text-amber-400">
-              Rajadas 10m:{' '}
-              {currentHour.windGusts10m.mean !== null
-                ? `${Math.round(currentHour.windGusts10m.mean)} km/h`
-                : '—'}
-            </p>
-            <p className="text-[11px] font-mono text-slate-600 dark:text-slate-400">
-              Dir: {degreesToCardinal(currentHour.windDirection10m.degree)} • R=
-              {currentHour.windDirection10m.resultantLengthR !== null
-                ? currentHour.windDirection10m.resultantLengthR.toFixed(2)
-                : '—'}
-            </p>
-          </div>
+        <div className="rounded-2xl bg-[#f4f8fb] dark:bg-[#0d1f36]/85 border border-sky-100/80 dark:border-sky-800/60 p-4 sm:p-5">
+          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-x-8 gap-y-4">
+            {/* Block 1: Temperatura (Min in Blue, Max in Orange) + Sensação/Orvalho */}
+            {visibleParams.tempVisibility && (
+              <div className="flex items-center justify-between border-b border-slate-200/70 dark:border-sky-800/50 pb-3">
+                <div className="flex items-center gap-2.5">
+                  <Thermometer className="w-5 h-5 text-[#0080cd] dark:text-sky-400 shrink-0" />
+                  <div>
+                    <span className="text-xs font-semibold text-slate-600 dark:text-sky-200 block">
+                      Temperatura
+                    </span>
+                    <span className="text-[11px] text-slate-500 dark:text-sky-300/75">
+                      Agora:{' '}
+                      <strong className="text-slate-800 dark:text-white">
+                        {currentHour.temperature2mC.mean !== null
+                          ? `${currentHour.temperature2mC.mean.toFixed(1)}°C`
+                          : '—'}
+                      </strong>{' '}
+                      • Orvalho{' '}
+                      {currentHour.dewPoint2mC.mean !== null
+                        ? `${currentHour.dewPoint2mC.mean.toFixed(0)}°`
+                        : '—'}
+                    </span>
+                  </div>
+                </div>
 
-          {/* 2. Wind Altitude (80m / 100m / 120m) */}
-          <div className="rounded-xl border border-slate-200 dark:border-slate-800 bg-slate-50/80 dark:bg-slate-950/60 p-3.5 space-y-1">
-            <div className="flex items-center justify-between text-xs font-bold text-slate-500 dark:text-slate-400">
-              <span>Perfil Vertical (80–120m)</span>
-              <Compass className="w-4 h-4 text-indigo-500" aria-hidden="true" />
-            </div>
-            <div className="space-y-0.5 text-xs font-mono">
-              <div className="flex justify-between">
-                <span className="text-slate-500">80m:</span>
-                <span className="font-bold text-slate-900 dark:text-white">
-                  {currentHour.windSpeed80m.mean !== null
-                    ? `${Math.round(currentHour.windSpeed80m.mean)} km/h`
-                    : '—'}
-                </span>
-              </div>
-              <div className="flex justify-between">
-                <span className="text-slate-500">100m:</span>
-                <span className="font-bold text-slate-900 dark:text-white">
-                  {currentHour.windSpeed100m.mean !== null
-                    ? `${Math.round(currentHour.windSpeed100m.mean)} km/h`
-                    : '—'}
-                </span>
-              </div>
-              <div className="flex justify-between">
-                <span className="text-slate-500">120m:</span>
-                <span className="font-bold text-slate-900 dark:text-white">
-                  {currentHour.windSpeed120m.mean !== null
-                    ? `${Math.round(currentHour.windSpeed120m.mean)} km/h`
-                    : '—'}
-                </span>
-              </div>
-            </div>
-            <p className="text-[11px] text-slate-500 dark:text-slate-400">
-              Expoente α:{' '}
-              {currentHour.verticalProfile.alpha !== null
-                ? currentHour.verticalProfile.alpha.toFixed(3)
-                : 'N/A'}
-            </p>
-          </div>
-
-          {/* 3. Marine (Waves & Swell) or Continental Notice */}
-          <div className="rounded-xl border border-slate-200 dark:border-slate-800 bg-slate-50/80 dark:bg-slate-950/60 p-3.5 space-y-1">
-            <div className="flex items-center justify-between text-xs font-bold text-slate-500 dark:text-slate-400">
-              <span>Ondas & Swell</span>
-              <Waves className="w-4 h-4 text-teal-500" aria-hidden="true" />
-            </div>
-            {forecast.marineAvailable && currentHour.marine ? (
-              <>
-                <div className="flex items-baseline gap-1.5">
-                  <span className="text-xl sm:text-2xl font-extrabold text-slate-900 dark:text-white">
-                    {currentHour.marine.waveHeight !== null
-                      ? currentHour.marine.waveHeight.toFixed(1)
-                      : '—'}
+                <div className="flex items-center gap-3 text-base font-extrabold">
+                  <span
+                    title="Mínima do dia"
+                    className="inline-flex items-center gap-0.5 text-[#0080cd] dark:text-sky-400"
+                  >
+                    <ArrowDown className="w-3.5 h-3.5" />
+                    {dayTempStats.min !== null ? `${dayTempStats.min}°` : '—'}
                   </span>
-                  <span className="text-xs font-semibold text-slate-500">
-                    m ({currentHour.marine.wavePeriod ?? '—'}s)
+                  <span
+                    title="Máxima do dia"
+                    className="inline-flex items-center gap-0.5 text-orange-500 dark:text-orange-400"
+                  >
+                    <ArrowUp className="w-3.5 h-3.5" />
+                    {dayTempStats.max !== null ? `${dayTempStats.max}°` : '—'}
                   </span>
                 </div>
-                <p className="text-xs font-semibold text-teal-700 dark:text-teal-400">
-                  Swell:{' '}
-                  {currentHour.marine.swellWaveHeight !== null
-                    ? `${currentHour.marine.swellWaveHeight.toFixed(1)}m (${
-                        currentHour.marine.swellWavePeriod ?? '—'
-                      }s)`
-                    : '—'}
-                </p>
-                <p className="text-[11px] font-mono text-slate-600 dark:text-slate-400">
-                  Dir: {degreesToCardinal(currentHour.marine.waveDirection)}
-                </p>
-              </>
-            ) : (
-              <div className="pt-1 space-y-1">
-                <span className="inline-block px-2 py-0.5 rounded text-[11px] font-bold bg-slate-200 dark:bg-slate-800 text-slate-700 dark:text-slate-300">
-                  Ponto Continental
-                </span>
-                <p className="text-[11px] text-slate-500 dark:text-slate-400 leading-snug">
-                  Grade marinha não aplicável em terra firme (sem penalidade na confiança).
-                </p>
+              </div>
+            )}
+
+            {/* Block 2: Chuva (mm + % de chance) */}
+            {visibleParams.rainPressure && (
+              <div className="flex items-center justify-between border-b border-slate-200/70 dark:border-sky-800/50 pb-3">
+                <div className="flex items-center gap-2.5">
+                  <CloudRain className="w-5 h-5 text-[#0080cd] dark:text-sky-400 shrink-0" />
+                  <div>
+                    <span className="text-xs font-semibold text-slate-600 dark:text-sky-200 block">
+                      Chuva
+                    </span>
+                    <div className="flex items-center gap-1 mt-0.5">
+                      <Droplets className="w-3 h-3 text-sky-500" />
+                      <div className="w-16 h-1.5 rounded-full bg-sky-200 dark:bg-sky-900 overflow-hidden">
+                        <div
+                          className="h-full bg-[#0080cd] rounded-full"
+                          style={{
+                            width: `${Math.min(
+                              100,
+                              Math.max(0, currentHour.precipitationProbabilityPct.mean ?? 0),
+                            )}%`,
+                          }}
+                        />
+                      </div>
+                    </div>
+                  </div>
+                </div>
+
+                <div className="text-right">
+                  <span className="text-sm font-extrabold text-slate-900 dark:text-white">
+                    {currentHour.precipitationMm.mean !== null
+                      ? `${currentHour.precipitationMm.mean.toFixed(1)}mm`
+                      : '0mm'}{' '}
+                    -{' '}
+                    <span className="text-[#0080cd] dark:text-sky-300">
+                      {currentHour.precipitationProbabilityPct.mean !== null
+                        ? `${Math.round(currentHour.precipitationProbabilityPct.mean)}%`
+                        : '0%'}
+                    </span>
+                  </span>
+                </div>
+              </div>
+            )}
+
+            {/* Block 3: Vento 10m & Rajada */}
+            {visibleParams.wind10m && (
+              <div className="flex items-center justify-between border-b border-slate-200/70 dark:border-sky-800/50 pb-3">
+                <div className="flex items-center gap-2.5">
+                  <Wind className="w-5 h-5 text-[#0080cd] dark:text-sky-400 shrink-0" />
+                  <div>
+                    <span className="text-xs font-semibold text-slate-600 dark:text-sky-200 block">
+                      Vento &amp; Rajada
+                    </span>
+                    <span className="text-[11px] text-slate-500 dark:text-sky-300/75">
+                      Rajada de vento:{' '}
+                      <strong className="text-slate-800 dark:text-sky-100">
+                        {gustSpd !== null ? `${windCardDir} - ${gustSpd} km/h` : '—'}
+                      </strong>
+                    </span>
+                  </div>
+                </div>
+
+                <div className="text-right">
+                  <span className="text-sm font-extrabold text-slate-900 dark:text-white">
+                    {windSpd !== null ? `← ${windCardDir} - ${windSpd} km/h` : '—'}
+                  </span>
+                </div>
+              </div>
+            )}
+
+            {/* Block 4: Ondas & Swell */}
+            {visibleParams.waves && (
+              <div className="flex items-center justify-between border-b border-slate-200/70 dark:border-sky-800/50 pb-3">
+                <div className="flex items-center gap-2.5">
+                  <Waves className="w-5 h-5 text-[#0080cd] dark:text-sky-400 shrink-0" />
+                  <div>
+                    <span className="text-xs font-semibold text-slate-600 dark:text-sky-200 block">
+                      Ondas &amp; Swell
+                    </span>
+                    <span className="text-[11px] text-slate-500 dark:text-sky-300/75">
+                      {forecast.marineAvailable && currentHour.marine
+                        ? `Swell: ${
+                            currentHour.marine.swellWaveHeight !== null
+                              ? `${currentHour.marine.swellWaveHeight.toFixed(1)}m (${
+                                  currentHour.marine.swellWavePeriod ?? '—'
+                                }s)`
+                              : '—'
+                          }`
+                        : 'Interior / Terra Firme'}
+                    </span>
+                  </div>
+                </div>
+
+                <div className="text-right">
+                  {forecast.marineAvailable && currentHour.marine ? (
+                    <span className="text-sm font-extrabold text-slate-900 dark:text-white">
+                      {currentHour.marine.waveHeight !== null
+                        ? `${currentHour.marine.waveHeight.toFixed(1)}m`
+                        : '—'}{' '}
+                      <span className="text-xs font-semibold text-slate-500 dark:text-sky-300">
+                        ({currentHour.marine.wavePeriod ?? '—'}s •{' '}
+                        {degreesToCardinalShort(currentHour.marine.waveDirection)})
+                      </span>
+                    </span>
+                  ) : (
+                    <span className="px-2 py-0.5 rounded-full text-[11px] font-semibold bg-sky-100 dark:bg-sky-900 text-[#0070b8] dark:text-sky-200">
+                      Continental
+                    </span>
+                  )}
+                </div>
+              </div>
+            )}
+
+            {/* Block 5: Pressão & Visibilidade */}
+            {(visibleParams.rainPressure || visibleParams.tempVisibility) && (
+              <div className="flex items-center justify-between border-b border-slate-200/70 dark:border-sky-800/50 pb-3">
+                <div className="flex items-center gap-2.5">
+                  <Gauge className="w-5 h-5 text-[#0080cd] dark:text-sky-400 shrink-0" />
+                  <div>
+                    <span className="text-xs font-semibold text-slate-600 dark:text-sky-200 block">
+                      Pressão &amp; Visibilidade
+                    </span>
+                    <span className="text-[11px] text-slate-500 dark:text-sky-300/75">
+                      Visibilidade:{' '}
+                      <strong className="text-slate-700 dark:text-sky-100">
+                        {currentHour.visibilityM.mean !== null
+                          ? `${(currentHour.visibilityM.mean / 1000).toFixed(1)} km`
+                          : 'Boa'}
+                      </strong>
+                    </span>
+                  </div>
+                </div>
+
+                <div className="text-right">
+                  <span className="text-sm font-extrabold text-slate-900 dark:text-white">
+                    {currentHour.surfacePressureHpa.mean !== null
+                      ? `${Math.round(currentHour.surfacePressureHpa.mean)} hPa`
+                      : '—'}
+                  </span>
+                </div>
+              </div>
+            )}
+
+            {/* Block 6: Sol & Lua (Climatempo style) */}
+            {visibleParams.ephemeris && activeEphemeris && (
+              <div className="flex items-center justify-between border-b border-slate-200/70 dark:border-sky-800/50 pb-3">
+                <div className="flex items-center gap-2.5">
+                  <Sun className="w-5 h-5 text-amber-500 shrink-0" />
+                  <div>
+                    <span className="text-xs font-semibold text-slate-600 dark:text-sky-200 block">
+                      Sol &amp; Lua
+                    </span>
+                    <span className="text-[11px] text-slate-500 dark:text-sky-300/75 inline-flex items-center gap-1">
+                      <Moon className="w-3 h-3 text-sky-500" />
+                      {activeEphemeris.moonPhaseLabel} (
+                      {Math.round(activeEphemeris.moonIlluminationPct)}%)
+                    </span>
+                  </div>
+                </div>
+
+                <div className="text-right">
+                  <span className="text-xs sm:text-sm font-extrabold text-slate-900 dark:text-white">
+                    {formatTimeHHMM(activeEphemeris.sunriseIso, forecast.timezone)}h às{' '}
+                    {formatTimeHHMM(activeEphemeris.sunsetIso, forecast.timezone)}h
+                  </span>
+                </div>
+              </div>
+            )}
+
+            {/* Optional Block 7: Perfil Vertical (80m - 120m) when enabled */}
+            {visibleParams.verticalProfile && (
+              <div className="flex items-center justify-between border-b border-slate-200/70 dark:border-sky-800/50 pb-3 sm:col-span-2 lg:col-span-3">
+                <div className="flex items-center gap-2.5">
+                  <Compass className="w-5 h-5 text-[#0080cd] dark:text-sky-400 shrink-0" />
+                  <div>
+                    <span className="text-xs font-semibold text-slate-600 dark:text-sky-200 block">
+                      Perfil Vertical de Vento (80m / 100m / 120m)
+                    </span>
+                    <span className="text-[11px] text-slate-500 dark:text-sky-300/75">
+                      Expoente de cisalhamento α ={' '}
+                      {currentHour.verticalProfile.alpha !== null
+                        ? currentHour.verticalProfile.alpha.toFixed(3)
+                        : 'Normal'}
+                    </span>
+                  </div>
+                </div>
+
+                <div className="flex flex-wrap items-center gap-4 text-xs font-bold text-slate-800 dark:text-white">
+                  <span>
+                    80m:{' '}
+                    <strong className="text-[#0080cd] dark:text-sky-300">
+                      {currentHour.windSpeed80m.mean !== null
+                        ? `${Math.round(currentHour.windSpeed80m.mean)} km/h`
+                        : '—'}
+                    </strong>
+                  </span>
+                  <span>
+                    100m:{' '}
+                    <strong className="text-[#0080cd] dark:text-sky-300">
+                      {currentHour.windSpeed100m.mean !== null
+                        ? `${Math.round(currentHour.windSpeed100m.mean)} km/h`
+                        : '—'}
+                    </strong>
+                  </span>
+                  <span>
+                    120m:{' '}
+                    <strong className="text-[#0080cd] dark:text-sky-300">
+                      {currentHour.windSpeed120m.mean !== null
+                        ? `${Math.round(currentHour.windSpeed120m.mean)} km/h`
+                        : '—'}
+                    </strong>
+                  </span>
+                </div>
               </div>
             )}
           </div>
-
-          {/* 4. Precipitation & Probability */}
-          <div className="rounded-xl border border-slate-200 dark:border-slate-800 bg-slate-50/80 dark:bg-slate-950/60 p-3.5 space-y-1">
-            <div className="flex items-center justify-between text-xs font-bold text-slate-500 dark:text-slate-400">
-              <span>Chuva & Probabilidade</span>
-              <CloudRain className="w-4 h-4 text-sky-500" aria-hidden="true" />
-            </div>
-            <div className="flex items-baseline gap-1.5">
-              <span className="text-xl sm:text-2xl font-extrabold text-slate-900 dark:text-white">
-                {currentHour.precipitationMm.mean !== null
-                  ? currentHour.precipitationMm.mean.toFixed(1)
-                  : '0.0'}
-              </span>
-              <span className="text-xs font-semibold text-slate-500">mm/h</span>
-            </div>
-            <p className="text-xs font-semibold text-sky-700 dark:text-sky-400">
-              Probabilidade:{' '}
-              {currentHour.precipitationProbabilityPct.mean !== null
-                ? `${Math.round(currentHour.precipitationProbabilityPct.mean)}%`
-                : '—'}
-            </p>
-            <p className="text-[11px] text-slate-600 dark:text-slate-400">
-              Nuvens B/M/A: {Math.round(currentHour.cloudCover.lowPct.mean ?? 0)}% /{' '}
-              {Math.round(currentHour.cloudCover.midPct.mean ?? 0)}% /{' '}
-              {Math.round(currentHour.cloudCover.highPct.mean ?? 0)}%
-            </p>
-          </div>
-
-          {/* 5. Temperature, Dew Point & Barometric Pressure */}
-          <div className="rounded-xl border border-slate-200 dark:border-slate-800 bg-slate-50/80 dark:bg-slate-950/60 p-3.5 space-y-1 col-span-2 sm:col-span-1">
-            <div className="flex items-center justify-between text-xs font-bold text-slate-500 dark:text-slate-400">
-              <span>Temp, Orvalho & Pressão</span>
-              <Thermometer className="w-4 h-4 text-rose-500" aria-hidden="true" />
-            </div>
-            <div className="flex items-baseline gap-2">
-              <span className="text-xl sm:text-2xl font-extrabold text-slate-900 dark:text-white">
-                {currentHour.temperature2mC.mean !== null
-                  ? `${currentHour.temperature2mC.mean.toFixed(1)}°C`
-                  : '—'}
-              </span>
-              <span className="text-xs text-slate-500">
-                Orv:{' '}
-                {currentHour.dewPoint2mC.mean !== null
-                  ? `${currentHour.dewPoint2mC.mean.toFixed(1)}°C`
-                  : '—'}
-              </span>
-            </div>
-            <p className="text-xs font-semibold text-slate-700 dark:text-slate-300 flex items-center gap-1">
-              <Gauge className="w-3.5 h-3.5 text-indigo-500" aria-hidden="true" />
-              <span>
-                {currentHour.surfacePressureHpa.mean !== null
-                  ? `${Math.round(currentHour.surfacePressureHpa.mean)} hPa`
-                  : '—'}
-              </span>
-              {currentHour.pressureDelta3hHpa !== null && (
-                <span
-                  className={`font-mono text-[11px] ${
-                    currentHour.pressureDelta3hHpa <= -4
-                      ? 'text-red-600 dark:text-red-400 font-bold'
-                      : 'text-slate-500'
-                  }`}
-                >
-                  ({currentHour.pressureDelta3hHpa > 0 ? '+' : ''}
-                  {currentHour.pressureDelta3hHpa.toFixed(1)}/3h)
-                </span>
-              )}
-            </p>
-            <p className="text-[11px] text-slate-500 dark:text-slate-400">
-              Visibilidade:{' '}
-              {currentHour.visibilityM.mean !== null
-                ? `${(currentHour.visibilityM.mean / 1000).toFixed(1)} km`
-                : 'N/D'}
-            </p>
-          </div>
-        </div>
-      )}
-
-      {/* Safe Window Reasons Strip if Amber or Red */}
-      {currentHour && currentHour.safeWindowReasons.length > 0 && (
-        <div className="rounded-xl bg-slate-100 dark:bg-slate-800/70 px-3.5 py-2 text-xs text-slate-700 dark:text-slate-300 flex flex-wrap items-center justify-between gap-2">
-          <div>
-            <strong className="font-bold">Motivos do Semáforo nesta hora:</strong>{' '}
-            {currentHour.safeWindowReasons.join(' • ')}
-          </div>
-          <span className="text-[11px] font-mono text-slate-500 dark:text-slate-400">
-            Tetos ativos: Vento ≤ {forecast.thresholdsUsed.maxWindKmh} km/h | Rajada ≤{' '}
-            {forecast.thresholdsUsed.maxGustKmh} km/h | Onda ≤ {forecast.thresholdsUsed.maxWaveM}m |
-            Chuva ≤ {forecast.thresholdsUsed.maxPrecipProbPct}%
-          </span>
         </div>
       )}
     </section>

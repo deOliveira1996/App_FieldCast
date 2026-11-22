@@ -8,6 +8,7 @@ import React, {
 import L from 'leaflet';
 import 'leaflet/dist/leaflet.css';
 import {
+  Circle,
   CircleMarker,
   MapContainer,
   Marker,
@@ -30,6 +31,7 @@ import {
   Layers,
   MapPin,
   Maximize2,
+  Navigation,
   Pause,
   Play,
   Radar,
@@ -38,11 +40,16 @@ import {
   ShieldAlert,
   SkipBack,
   SkipForward,
+  Sparkles,
   Square,
   Trash2,
   XCircle,
 } from 'lucide-react';
 import { ModuleErrorBoundary } from '../common';
+import {
+  createWindyFlagPinIcon,
+  degreesToCardinal,
+} from '../common/LocationPinMapPicker';
 import {
   getSavedLocations,
   getTrackSessions,
@@ -59,6 +66,7 @@ import {
   MAX_CONCURRENT_TILE_DOWNLOADS,
   MAX_OFFLINE_TILES_PER_MISSION,
   normalizeMissionBounds,
+  type MapBaseStyle,
   type MapTileTheme,
   type OfflineCacheStats,
   type OfflineDownloadProgress,
@@ -120,6 +128,21 @@ interface InspectedCoordinate {
 
 const RADAR_OPACITY_PRESETS = [0.45, 0.7, 0.9] as const;
 const MISSION_RADIUS_PRESETS_KM = [2, 5, 10, 15] as const;
+const FORECAST_AREA_RADIUS_OPTIONS_KM = [0, 2, 5, 10, 25] as const;
+
+const BASE_MAP_STYLES: ReadonlyArray<{
+  id: MapBaseStyle;
+  label: string;
+  shortLabel: string;
+}> = [
+  { id: 'osm', label: 'Mapa Padrão (OSM)', shortLabel: 'Padrão OSM' },
+  {
+    id: 'esri_street',
+    label: 'Costeiro & Ruas (Esri)',
+    shortLabel: 'Costeiro Esri',
+  },
+  { id: 'esri_satellite', label: 'Satélite (Esri)', shortLabel: 'Satélite' },
+];
 
 function formatBytes(bytes: number): string {
   if (bytes <= 0) return '0 KB';
@@ -150,49 +173,34 @@ function formatSafeWindowLabel(status: SafeWindowStatus | null | undefined): {
 } {
   if (status === 'green') {
     return {
-      label: 'Janela Segura (Verde)',
+      label: 'Condição Favorável (Verde)',
       badgeClass:
-        'bg-emerald-500/20 text-emerald-800 dark:text-emerald-300 border-emerald-500/40',
+        'bg-emerald-50 text-emerald-800 dark:bg-emerald-950/60 dark:text-emerald-300 border-emerald-200 dark:border-emerald-700',
     };
   }
   if (status === 'red') {
     return {
-      label: 'Fora de Limite (Vermelho)',
+      label: 'Acima do Limite (Vermelho)',
       badgeClass:
-        'bg-rose-500/20 text-rose-800 dark:text-rose-300 border-rose-500/40',
+        'bg-rose-50 text-rose-800 dark:bg-rose-950/60 dark:text-rose-300 border-rose-200 dark:border-rose-700',
     };
   }
   return {
-    label: 'Atenção Operacional (Amarelo)',
+    label: 'Atenção Moderada (Amarelo)',
     badgeClass:
-      'bg-amber-500/20 text-amber-800 dark:text-amber-300 border-amber-500/40',
+      'bg-amber-50 text-amber-800 dark:bg-amber-950/60 dark:text-amber-300 border-amber-200 dark:border-amber-700',
   };
 }
 
-function createActiveLocationIcon(): L.DivIcon {
-  return L.divIcon({
-    className: 'fieldcast-active-location-marker',
-    iconSize: [36, 36],
-    iconAnchor: [18, 18],
-    popupAnchor: [0, -18],
-    html: `
-      <div style="position:relative;width:36px;height:36px;display:flex;align-items:center;justify-content:center;">
-        <span style="position:absolute;width:34px;height:34px;border-radius:9999px;background:rgba(14,165,233,0.28);border:2px solid rgba(56,189,248,0.85);"></span>
-        <span style="position:relative;width:16px;height:16px;border-radius:9999px;background:#0284c7;border:3px solid #ffffff;box-shadow:0 2px 8px rgba(2,132,199,0.65);"></span>
-      </div>
-    `,
-  });
-}
-
 function createSavedLocationIcon(isFavorite: boolean): L.DivIcon {
-  const bg = isFavorite ? '#d97706' : '#475569';
+  const bg = isFavorite ? '#0284c7' : '#38bdf8';
   return L.divIcon({
     className: 'fieldcast-saved-location-marker',
     iconSize: [28, 28],
     iconAnchor: [14, 14],
     popupAnchor: [0, -14],
     html: `
-      <div style="width:28px;height:28px;border-radius:9999px;background:${bg};border:2.5px solid #ffffff;box-shadow:0 2px 6px rgba(15,23,42,0.45);display:flex;align-items:center;justify-content:center;color:#ffffff;font-size:13px;font-weight:700;">
+      <div style="width:28px;height:28px;border-radius:9999px;background:${bg};border:2.5px solid #ffffff;box-shadow:0 2px 6px rgba(2,132,199,0.45);display:flex;align-items:center;justify-content:center;color:#ffffff;font-size:13px;font-weight:700;">
         ★
       </div>
     `,
@@ -200,7 +208,7 @@ function createSavedLocationIcon(isFavorite: boolean): L.DivIcon {
 }
 
 function createWaypointIcon(hasPhoto: boolean): L.DivIcon {
-  const bg = hasPhoto ? '#7c3aed' : '#059669';
+  const bg = hasPhoto ? '#0ea5e9' : '#10b981';
   const symbol = hasPhoto ? '📷' : '⚑';
   return L.divIcon({
     className: 'fieldcast-waypoint-marker',
@@ -208,37 +216,29 @@ function createWaypointIcon(hasPhoto: boolean): L.DivIcon {
     iconAnchor: [15, 15],
     popupAnchor: [0, -15],
     html: `
-      <div style="width:30px;height:30px;border-radius:10px;background:${bg};border:2.5px solid #ffffff;box-shadow:0 2px 6px rgba(15,23,42,0.5);display:flex;align-items:center;justify-content:center;color:#ffffff;font-size:13px;font-weight:700;">
+      <div style="width:30px;height:30px;border-radius:10px;background:${bg};border:2.5px solid #ffffff;box-shadow:0 2px 6px rgba(15,23,42,0.35);display:flex;align-items:center;justify-content:center;color:#ffffff;font-size:13px;font-weight:700;">
         ${symbol}
       </div>
     `,
   });
 }
 
-function createInspectedPointIcon(): L.DivIcon {
-  return L.divIcon({
-    className: 'fieldcast-inspected-marker',
-    iconSize: [28, 28],
-    iconAnchor: [14, 14],
-    popupAnchor: [0, -14],
-    html: `
-      <div style="width:28px;height:28px;border-radius:9999px;background:rgba(244,63,94,0.9);border:2.5px solid #ffffff;box-shadow:0 2px 6px rgba(15,23,42,0.5);display:flex;align-items:center;justify-content:center;color:#ffffff;font-size:14px;font-weight:700;">
-        +
-      </div>
-    `,
-  });
-}
-
 /**
- * Monta e sincroniza a subclasse `OfflineCartoTileLayer` (com `createTile()` lendo primeiro do Dexie)
- * diretamente na instância do mapa Leaflet.
+ * Monta e sincroniza a subclasse `OfflineCartoTileLayer` (com `createTile()` lendo primeiro do Dexie
+ * e caindo nos servidores gratuitos OpenStreetMap / Esri sem API Key).
  */
-function OfflineBaseTileLayer({ theme }: { theme: MapTileTheme }): null {
+function OfflineBaseTileLayer({
+  theme,
+  baseStyle,
+}: {
+  theme: MapTileTheme;
+  baseStyle: MapBaseStyle;
+}): null {
   const map = useMap();
   const layerRef = useRef<OfflineCartoTileLayer | null>(null);
 
   useEffect(() => {
-    const layer = createOfflineCartoTileLayer(theme);
+    const layer = createOfflineCartoTileLayer(theme, { baseStyle });
     layer.addTo(map);
     layer.bringToBack();
     layerRef.current = layer;
@@ -254,8 +254,9 @@ function OfflineBaseTileLayer({ theme }: { theme: MapTileTheme }): null {
   useEffect(() => {
     if (layerRef.current) {
       layerRef.current.setTheme(theme);
+      layerRef.current.setBaseStyle(baseStyle);
     }
-  }, [theme]);
+  }, [theme, baseStyle]);
 
   return null;
 }
@@ -347,7 +348,7 @@ function MapRadarTabContent({
   savedLocations: savedLocationsProp,
   waypoints: waypointsProp,
   tracks: tracksProp,
-  isDark = true,
+  isDark = false,
   onSelectLocation,
   onSaveLocation,
   onRadarStateChange,
@@ -355,6 +356,14 @@ function MapRadarTabContent({
   onErrorLog,
 }: MapRadarTabProps): React.ReactElement {
   const tileTheme: MapTileTheme = isDark ? 'dark' : 'light';
+
+  // Estilo de Mapa Base (100% gratuito, sem API Key)
+  const [baseStyle, setBaseStyle] = useState<MapBaseStyle>('osm');
+
+  // Modo Pin estilo Windy (quando ativo, clicar no mapa já move o Pin e carrega a previsão)
+  const [instantWindyPin, setInstantWindyPin] = useState<boolean>(true);
+  const [forecastAreaRadiusKm, setForecastAreaRadiusKm] = useState<number>(5);
+  const [customPinName, setCustomPinName] = useState<string>('');
 
   // Estado do Radar RainViewer
   const [radarState, setRadarState] = useState<RainViewerRadarState | null>(null);
@@ -534,7 +543,7 @@ function MapRadarTabContent({
     [missionBounds],
   );
 
-  // Hora atual da previsão para o popup do ponto ativo
+  // Hora atual da previsão para a bandeirinha Windy e popup do ponto ativo
   const currentForecastHour = useMemo(() => {
     if (!forecast || forecast.hours.length === 0) return null;
     const nowSec = Math.floor(Date.now() / 1000);
@@ -550,7 +559,37 @@ function MapRadarTabContent({
     return closest ?? forecast.hours[0] ?? null;
   }, [forecast]);
 
-  // Clique no mapa: ou desenha os 2 cantos da Área de Missão ou inspeciona coordenada
+  const handleSelectMapCoordinate = useCallback(
+    (
+      latitude: number,
+      longitude: number,
+      name: string,
+      origin: ActiveCoordinates['origin'] = 'search',
+    ): void => {
+      if (!onSelectLocation) return;
+      void safeAction(
+        async () => {
+          await onSelectLocation({
+            latitude,
+            longitude,
+            name,
+            origin,
+          });
+        },
+        {
+          actionKey: 'select_map_coordinate',
+          moduleName: 'MapRadarTab',
+          successTitle: `Pin de Previsão atualizado: ${name}`,
+          errorTitle: 'Não foi possível selecionar a coordenada no mapa',
+          onToast,
+          onErrorLog: handleLogError,
+        },
+      );
+    },
+    [onSelectLocation, onToast, handleLogError],
+  );
+
+  // Clique no mapa: ou desenha os 2 cantos da Área de Missão ou posiciona o Pin estilo Windy
   const handleMapClick = useCallback(
     (lat: number, lon: number) => {
       if (isDrawingMissionBox) {
@@ -584,10 +623,23 @@ function MapRadarTabContent({
         return;
       }
 
+      const roundedLat = Number(lat.toFixed(5));
+      const roundedLon = Number(lon.toFixed(5));
       setInspectedPoint({
-        latitude: Number(lat.toFixed(5)),
-        longitude: Number(lon.toFixed(5)),
+        latitude: roundedLat,
+        longitude: roundedLon,
       });
+
+      if (instantWindyPin && onSelectLocation) {
+        const trimmed = customPinName.trim();
+        const areaLabel =
+          forecastAreaRadiusKm > 0 ? ` • Área ${forecastAreaRadiusKm}km` : '';
+        const pinLabel =
+          trimmed.length > 0
+            ? `${trimmed}${areaLabel}`
+            : `Pin no Mapa (${roundedLat.toFixed(3)}, ${roundedLon.toFixed(3)}${areaLabel})`;
+        handleSelectMapCoordinate(roundedLat, roundedLon, pinLabel, 'search');
+      }
     },
     [
       isDrawingMissionBox,
@@ -595,6 +647,11 @@ function MapRadarTabContent({
       missionBounds.minZoom,
       missionBounds.maxZoom,
       onToast,
+      instantWindyPin,
+      onSelectLocation,
+      customPinName,
+      forecastAreaRadiusKm,
+      handleSelectMapCoordinate,
     ],
   );
 
@@ -693,6 +750,7 @@ function MapRadarTabContent({
         const result = await downloadOfflineMissionTiles({
           bounds: missionBounds,
           theme: tileTheme,
+          baseStyle,
           missionId,
           missionName: `${activeLocation.name} (Z${missionBounds.minZoom}-${missionBounds.maxZoom})`,
           maxConcurrent: MAX_CONCURRENT_TILE_DOWNLOADS,
@@ -705,6 +763,9 @@ function MapRadarTabContent({
 
         await refreshCacheStats();
 
+        const styleName =
+          BASE_MAP_STYLES.find((s) => s.id === baseStyle)?.label ?? 'OpenStreetMap';
+
         if (result.status === 'completed') {
           onToast?.({
             type: result.failedTiles > 0 ? 'warning' : 'success',
@@ -712,7 +773,7 @@ function MapRadarTabContent({
               result.failedTiles > 0
                 ? `Cache concluído (${result.completedTiles} salvos, ${result.failedTiles} falhas)`
                 : `Área de Missão salva offline (${result.completedTiles} tiles)`,
-            message: `Tiles CartoDB (${tileTheme === 'dark' ? 'DarkMatter' : 'Voyager'}) armazenados no IndexedDB.`,
+            message: `Tiles (${styleName}) armazenados no IndexedDB para uso sem internet.`,
           });
         } else if (result.status === 'cancelled') {
           onToast?.({
@@ -772,47 +833,26 @@ function MapRadarTabContent({
     );
   };
 
-  const handleSelectMapCoordinate = (
-    latitude: number,
-    longitude: number,
-    name: string,
-    origin: ActiveCoordinates['origin'] = 'search',
-  ): void => {
-    if (!onSelectLocation) return;
-    void safeAction(
-      async () => {
-        await onSelectLocation({
-          latitude,
-          longitude,
-          name,
-          origin,
-        });
-        setInspectedPoint(null);
-      },
-      {
-        actionKey: 'select_map_coordinate',
-        moduleName: 'MapRadarTab',
-        successTitle: `Local ativo alterado para ${name}`,
-        errorTitle: 'Não foi possível selecionar a coordenada no mapa',
-        onToast,
-        onErrorLog: handleLogError,
-      },
-    );
-  };
-
   const handleSaveInspectedCoordinate = (
     latitude: number,
     longitude: number,
   ): void => {
     if (!onSaveLocation) return;
-    const defaultName = `Ponto de Campo (${latitude.toFixed(3)}, ${longitude.toFixed(3)})`;
+    const trimmed = customPinName.trim();
+    const defaultName =
+      trimmed.length > 0
+        ? trimmed
+        : `Pin de Previsão (${latitude.toFixed(3)}, ${longitude.toFixed(3)})`;
     void safeAction(
       async () => {
         await onSaveLocation({
           name: defaultName,
           latitude,
           longitude,
-          region: 'Marcado via Mapa Interativo',
+          region:
+            forecastAreaRadiusKm > 0
+              ? `Pin no Mapa (Área ${forecastAreaRadiusKm} km)`
+              : 'Marcado via Pin Interativo',
           isFavorite: true,
         });
         const locs = await getSavedLocations();
@@ -821,7 +861,7 @@ function MapRadarTabContent({
       {
         actionKey: 'save_inspected_map_coordinate',
         moduleName: 'MapRadarTab',
-        successTitle: 'Coordenada salva nos Pontos Favoritos',
+        successTitle: 'Pin salvo nos Locais Favoritos',
         errorTitle: 'Não foi possível salvar a coordenada',
         onToast,
         onErrorLog: handleLogError,
@@ -829,9 +869,41 @@ function MapRadarTabContent({
     );
   };
 
-  // Ícones memorizados para o Leaflet
-  const activeMarkerIcon = useMemo(() => createActiveLocationIcon(), []);
-  const inspectedMarkerIcon = useMemo(() => createInspectedPointIcon(), []);
+  // Ícone de Bandeirinha Estilo Windy para o Ponto Ativo
+  const activeWindyFlagIcon = useMemo(() => {
+    const windSpeed = currentForecastHour?.windSpeed10m.mean;
+    const windDir = currentForecastHour?.windDirection10m.degree;
+    const tempC = currentForecastHour?.temperature2mC.mean;
+    const cardinal = degreesToCardinal(windDir);
+
+    const titleText =
+      windSpeed !== null && windSpeed !== undefined
+        ? `${Math.round(windSpeed)} km/h ${cardinal ? `◄ ${cardinal}` : ''}${
+            tempC !== null && tempC !== undefined ? ` • ${Math.round(tempC)}°C` : ''
+          }`
+        : `${activeLocation.latitude.toFixed(3)}°, ${activeLocation.longitude.toFixed(3)}°`;
+
+    return createWindyFlagPinIcon({
+      titleText,
+      subtitleText: activeLocation.name.slice(0, 26),
+      ctaText:
+        forecastAreaRadiusKm > 0
+          ? `Área de Previsão: ${forecastAreaRadiusKm} km`
+          : 'Previsão Ativa neste Pin',
+      isPending: false,
+    });
+  }, [currentForecastHour, activeLocation, forecastAreaRadiusKm]);
+
+  // Ícone de Bandeirinha Estilo Windy quando o usuário inspeciona outro ponto sem aplicar automaticamente
+  const inspectedWindyFlagIcon = useMemo(() => {
+    if (!inspectedPoint) return null;
+    return createWindyFlagPinIcon({
+      titleText: `${inspectedPoint.latitude.toFixed(3)}°, ${inspectedPoint.longitude.toFixed(3)}°`,
+      subtitleText: customPinName.trim() || 'Novo Pin no Mapa',
+      ctaText: 'Previsão para este local',
+      isPending: true,
+    });
+  }, [inspectedPoint, customPinName]);
 
   const progressPct =
     downloadProgress && downloadProgress.totalTiles > 0
@@ -845,58 +917,136 @@ function MapRadarTabContent({
         )
       : 0;
 
+  const activeBaseStyleLabel =
+    BASE_MAP_STYLES.find((s) => s.id === baseStyle)?.label ??
+    'Mapa Padrão (OSM)';
+
   return (
     <div className="space-y-4 pb-8">
-      {/* Cabeçalho Operacional do Mapa & Controles Rápidos de Camada */}
-      <section className="rounded-2xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900/90 p-4 shadow-sm">
+      {/* Cabeçalho Clean Azul & Branco: Seletor de Mapa Base (Sem API Key), Modo Pin Windy e Camadas */}
+      <section className="rounded-2xl border border-sky-200/80 dark:border-sky-900/60 bg-white dark:bg-slate-900/90 p-4 sm:p-5 shadow-sm space-y-3.5">
         <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-3">
           <div className="space-y-1">
             <div className="flex flex-wrap items-center gap-2">
-              <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-xs font-bold uppercase tracking-wider bg-sky-500/15 text-sky-700 dark:text-sky-300 border border-sky-500/30">
-                <Radar className="w-3.5 h-3.5" aria-hidden="true" />
-                Mapa Tático &amp; Radar RainViewer
+              <span className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-bold bg-sky-600 text-white shadow-sm">
+                <MapPin className="w-3.5 h-3.5" aria-hidden="true" />
+                Mapa de Previsão por Pin &amp; Radar
               </span>
-              <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-xs font-semibold bg-slate-100 dark:bg-slate-800 text-slate-700 dark:text-slate-300">
-                Base CORS: CartoDB {isDark ? 'DarkMatter (Noturno)' : 'Voyager (Solar)'}
+              <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-semibold bg-sky-50 dark:bg-sky-950/60 text-sky-700 dark:text-sky-300 border border-sky-200 dark:border-sky-800">
+                100% Gratuito • Sem API Key ({activeBaseStyleLabel})
               </span>
-              <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-xs font-mono bg-emerald-500/10 text-emerald-700 dark:text-emerald-300 border border-emerald-500/30">
+              <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-semibold bg-emerald-50 dark:bg-emerald-950/60 text-emerald-700 dark:text-emerald-300 border border-emerald-200 dark:border-emerald-800">
                 <HardDrive className="w-3.5 h-3.5" aria-hidden="true" />
                 Cache Offline: {cacheStats.totalTiles} tiles
               </span>
             </div>
-            <p className="text-xs sm:text-sm text-slate-600 dark:text-slate-400">
-              Ponto ativo:{' '}
-              <strong className="text-slate-900 dark:text-white">
+            <p className="text-xs sm:text-sm text-slate-600 dark:text-slate-300">
+              Pin ativo:{' '}
+              <strong className="text-sky-900 dark:text-white">
                 {activeLocation.name}
               </strong>{' '}
-              ({activeLocation.latitude.toFixed(4)}, {activeLocation.longitude.toFixed(4)})
+              ({activeLocation.latitude.toFixed(4)}°,{' '}
+              {activeLocation.longitude.toFixed(4)}°)
               {forecast ? ` • Altitude DEM: ${Math.round(forecast.elevationDemM)}m` : ''}
+              {' • '}
+              <span className="text-sky-700 dark:text-sky-300 font-medium">
+                Clique ou arraste o Pin em qualquer lugar do mapa para obter a previsão!
+              </span>
             </p>
           </div>
 
-          {/* Botões de Camadas e Centralização (todos >= 44x44px) */}
+          {/* Seletor de Estilo de Mapa Base (Padrão OSM / Costeiro Esri / Satélite Esri) */}
           <div className="flex flex-wrap items-center gap-2">
+            <div
+              className="inline-flex items-center rounded-xl bg-sky-50/90 dark:bg-slate-800 p-1 border border-sky-200/80 dark:border-slate-700"
+              role="group"
+              aria-label="Seletor de Estilo de Mapa Base"
+            >
+              {BASE_MAP_STYLES.map((style) => (
+                <button
+                  key={style.id}
+                  type="button"
+                  onClick={() => setBaseStyle(style.id)}
+                  className={`min-h-[38px] px-3 py-1.5 rounded-lg text-xs font-semibold transition-all ${
+                    baseStyle === style.id
+                      ? 'bg-sky-600 text-white shadow-sm'
+                      : 'text-slate-600 dark:text-slate-300 hover:text-sky-700 hover:bg-white/60'
+                  }`}
+                >
+                  {style.shortLabel}
+                </button>
+              ))}
+            </div>
+
             <button
               type="button"
               onClick={() => setRecenterTrigger((prev) => prev + 1)}
-              className="min-h-[44px] min-w-[44px] px-3 py-2 rounded-xl text-xs font-semibold inline-flex items-center gap-1.5 bg-sky-600 hover:bg-sky-500 text-white shadow-sm transition-colors"
-              title="Centralizar mapa no ponto ativo"
+              className="min-h-[44px] min-w-[44px] px-3.5 py-2 rounded-xl text-xs font-semibold inline-flex items-center gap-1.5 bg-sky-600 hover:bg-sky-500 text-white shadow-sm transition-colors"
+              title="Centralizar mapa no Pin ativo"
             >
               <Crosshair className="w-4 h-4" aria-hidden="true" />
-              <span>Centralizar</span>
+              <span>Centralizar Pin</span>
+            </button>
+          </div>
+        </div>
+
+        {/* Segunda Linha: Controle do Pin Estilo Windy (Raio de Área + Aplicação Instantânea) e Camadas */}
+        <div className="pt-2.5 border-t border-sky-100 dark:border-slate-800 flex flex-col xl:flex-row xl:items-center justify-between gap-2.5">
+          {/* Controles do Pin & Área de Previsão */}
+          <div className="flex flex-wrap items-center gap-2">
+            <button
+              type="button"
+              onClick={() => setInstantWindyPin((prev) => !prev)}
+              aria-pressed={instantWindyPin}
+              className={`min-h-[44px] px-3.5 py-2 rounded-xl text-xs font-semibold inline-flex items-center gap-1.5 border transition-colors ${
+                instantWindyPin
+                  ? 'bg-sky-600 text-white border-sky-600 shadow-sm'
+                  : 'bg-sky-50/70 dark:bg-slate-800 border-sky-200 dark:border-slate-700 text-sky-900 dark:text-slate-200'
+              }`}
+              title="Quando ativo, um clique em qualquer ponto do mapa posiciona o Pin e já carrega a previsão horária como no Windy"
+            >
+              <Sparkles className="w-4 h-4" aria-hidden="true" />
+              <span>
+                {instantWindyPin
+                  ? 'Pin Instantâneo (Estilo Windy): Ativo'
+                  : 'Modo Inspeção (Confirmar antes de aplicar)'}
+              </span>
             </button>
 
+            <div className="inline-flex items-center rounded-xl bg-sky-50/80 dark:bg-slate-800 p-1 border border-sky-200/80 dark:border-slate-700">
+              <span className="text-[11px] font-semibold text-sky-800 dark:text-sky-300 px-2">
+                Área do Pin:
+              </span>
+              {FORECAST_AREA_RADIUS_OPTIONS_KM.map((radiusKm) => (
+                <button
+                  key={radiusKm}
+                  type="button"
+                  onClick={() => setForecastAreaRadiusKm(radiusKm)}
+                  className={`min-h-[34px] px-2.5 py-1 rounded-lg text-xs font-semibold transition-colors ${
+                    forecastAreaRadiusKm === radiusKm
+                      ? 'bg-white dark:bg-slate-700 text-sky-700 dark:text-sky-200 shadow-sm border border-sky-200/70 dark:border-slate-600'
+                      : 'text-slate-600 dark:text-slate-400 hover:text-sky-700'
+                  }`}
+                >
+                  {radiusKm === 0 ? 'Ponto' : `${radiusKm} km`}
+                </button>
+              ))}
+            </div>
+          </div>
+
+          {/* Botões de Camadas Visíveis (todos >= 44x44px) */}
+          <div className="flex flex-wrap items-center gap-2">
             <button
               type="button"
               onClick={() => setRadarEnabled((prev) => !prev)}
               aria-pressed={radarEnabled}
               className={`min-h-[44px] min-w-[44px] px-3 py-2 rounded-xl text-xs font-semibold inline-flex items-center gap-1.5 border transition-colors ${
                 radarEnabled
-                  ? 'bg-sky-500/15 border-sky-500/40 text-sky-800 dark:text-sky-300'
-                  : 'bg-slate-100 dark:bg-slate-800 border-slate-300 dark:border-slate-700 text-slate-600 dark:text-slate-400'
+                  ? 'bg-sky-50 dark:bg-sky-950/60 border-sky-300 dark:border-sky-700 text-sky-800 dark:text-sky-200'
+                  : 'bg-white dark:bg-slate-800 border-slate-200 dark:border-slate-700 text-slate-500 dark:text-slate-400'
               }`}
             >
-              <Radar className="w-4 h-4" aria-hidden="true" />
+              <Radar className="w-4 h-4 text-sky-600" aria-hidden="true" />
               <span>Radar</span>
             </button>
 
@@ -906,11 +1056,11 @@ function MapRadarTabContent({
               aria-pressed={showSavedLocations}
               className={`min-h-[44px] min-w-[44px] px-3 py-2 rounded-xl text-xs font-semibold inline-flex items-center gap-1.5 border transition-colors ${
                 showSavedLocations
-                  ? 'bg-amber-500/15 border-amber-500/40 text-amber-800 dark:text-amber-300'
-                  : 'bg-slate-100 dark:bg-slate-800 border-slate-300 dark:border-slate-700 text-slate-600 dark:text-slate-400'
+                  ? 'bg-sky-50 dark:bg-sky-950/60 border-sky-300 dark:border-sky-700 text-sky-800 dark:text-sky-200'
+                  : 'bg-white dark:bg-slate-800 border-slate-200 dark:border-slate-700 text-slate-500 dark:text-slate-400'
               }`}
             >
-              <Bookmark className="w-4 h-4" aria-hidden="true" />
+              <Bookmark className="w-4 h-4 text-sky-600" aria-hidden="true" />
               <span>Locais ({savedLocations.length})</span>
             </button>
 
@@ -920,11 +1070,11 @@ function MapRadarTabContent({
               aria-pressed={showWaypoints}
               className={`min-h-[44px] min-w-[44px] px-3 py-2 rounded-xl text-xs font-semibold inline-flex items-center gap-1.5 border transition-colors ${
                 showWaypoints
-                  ? 'bg-violet-500/15 border-violet-500/40 text-violet-800 dark:text-violet-300'
-                  : 'bg-slate-100 dark:bg-slate-800 border-slate-300 dark:border-slate-700 text-slate-600 dark:text-slate-400'
+                  ? 'bg-sky-50 dark:bg-sky-950/60 border-sky-300 dark:border-sky-700 text-sky-800 dark:text-sky-200'
+                  : 'bg-white dark:bg-slate-800 border-slate-200 dark:border-slate-700 text-slate-500 dark:text-slate-400'
               }`}
             >
-              <Camera className="w-4 h-4" aria-hidden="true" />
+              <Camera className="w-4 h-4 text-sky-600" aria-hidden="true" />
               <span>Waypoints ({waypoints.length})</span>
             </button>
 
@@ -934,11 +1084,11 @@ function MapRadarTabContent({
               aria-pressed={showTracks}
               className={`min-h-[44px] min-w-[44px] px-3 py-2 rounded-xl text-xs font-semibold inline-flex items-center gap-1.5 border transition-colors ${
                 showTracks
-                  ? 'bg-emerald-500/15 border-emerald-500/40 text-emerald-800 dark:text-emerald-300'
-                  : 'bg-slate-100 dark:bg-slate-800 border-slate-300 dark:border-slate-700 text-slate-600 dark:text-slate-400'
+                  ? 'bg-sky-50 dark:bg-sky-950/60 border-sky-300 dark:border-sky-700 text-sky-800 dark:text-sky-200'
+                  : 'bg-white dark:bg-slate-800 border-slate-200 dark:border-slate-700 text-slate-500 dark:text-slate-400'
               }`}
             >
-              <Route className="w-4 h-4" aria-hidden="true" />
+              <Route className="w-4 h-4 text-sky-600" aria-hidden="true" />
               <span>Trilhas ({tracks.length})</span>
             </button>
 
@@ -948,35 +1098,35 @@ function MapRadarTabContent({
               aria-pressed={showMissionOverlay}
               className={`min-h-[44px] min-w-[44px] px-3 py-2 rounded-xl text-xs font-semibold inline-flex items-center gap-1.5 border transition-colors ${
                 showMissionOverlay
-                  ? 'bg-teal-500/15 border-teal-500/40 text-teal-800 dark:text-teal-300'
-                  : 'bg-slate-100 dark:bg-slate-800 border-slate-300 dark:border-slate-700 text-slate-600 dark:text-slate-400'
+                  ? 'bg-sky-50 dark:bg-sky-950/60 border-sky-300 dark:border-sky-700 text-sky-800 dark:text-sky-200'
+                  : 'bg-white dark:bg-slate-800 border-slate-200 dark:border-slate-700 text-slate-500 dark:text-slate-400'
               }`}
             >
-              <Square className="w-4 h-4" aria-hidden="true" />
+              <Square className="w-4 h-4 text-sky-600" aria-hidden="true" />
               <span>Área Offline</span>
             </button>
           </div>
         </div>
       </section>
 
-      {/* Aviso Não-Bloqueante Âmbar quando RainViewer estiver degradado ou indisponível */}
+      {/* Aviso Suave Não-Bloqueante quando RainViewer estiver degradado ou indisponível */}
       {radarState && (radarState.degraded || !radarState.available) && (
         <div
           role="status"
-          className="rounded-2xl border border-amber-500/40 bg-amber-500/10 px-4 py-3 flex flex-col sm:flex-row sm:items-center justify-between gap-3"
+          className="rounded-2xl border border-amber-200 dark:border-amber-800/60 bg-white dark:bg-slate-900 px-4 py-3.5 shadow-sm flex flex-col sm:flex-row sm:items-center justify-between gap-3"
         >
           <div className="flex items-start gap-3">
-            <AlertTriangle
-              className="w-5 h-5 text-amber-600 dark:text-amber-400 shrink-0 mt-0.5"
+            <span
+              className="w-3 h-3 rounded-full bg-amber-400 shrink-0 mt-1.5"
               aria-hidden="true"
             />
             <div className="text-xs sm:text-sm">
-              <p className="font-bold text-amber-900 dark:text-amber-200">
-                Radar RainViewer em Modo Degradado (Não-Bloqueante)
+              <p className="font-bold text-slate-800 dark:text-amber-200">
+                Radar RainViewer temporariamente indisponível
               </p>
-              <p className="text-amber-800 dark:text-amber-300/90">
-                {radarState.statusMessage}. O mapa base CartoDB, tiles salvos em cache
-                offline, waypoints e trilhas GPS permanecem 100% operacionais.
+              <p className="text-slate-600 dark:text-slate-300">
+                {radarState.statusMessage}. O mapa interativo ({activeBaseStyleLabel}),
+                o Pin de previsão estilo Windy e o cache offline funcionam normalmente.
               </p>
             </div>
           </div>
@@ -984,13 +1134,13 @@ function MapRadarTabContent({
             type="button"
             onClick={() => void loadRainViewerRadar(true)}
             disabled={isLoadingRadar}
-            className="min-h-[44px] min-w-[44px] px-3.5 py-2 rounded-xl text-xs font-semibold inline-flex items-center justify-center gap-1.5 bg-amber-600 hover:bg-amber-500 text-white shrink-0 transition-colors"
+            className="min-h-[44px] min-w-[44px] px-3.5 py-2 rounded-xl text-xs font-semibold inline-flex items-center justify-center gap-1.5 bg-sky-50 hover:bg-sky-100 text-sky-700 border border-sky-200 shrink-0 transition-colors"
           >
             <RefreshCw
               className={`w-4 h-4 ${isLoadingRadar ? 'animate-spin' : ''}`}
               aria-hidden="true"
             />
-            <span>Tentar Radar Novamente</span>
+            <span>Recarregar Radar</span>
           </button>
         </div>
       )}
@@ -999,15 +1149,15 @@ function MapRadarTabContent({
       {isDrawingMissionBox && (
         <div
           role="status"
-          className="rounded-2xl border border-sky-500/50 bg-sky-500/15 px-4 py-3 flex flex-col sm:flex-row sm:items-center justify-between gap-3"
+          className="rounded-2xl border border-sky-300 bg-sky-50/90 dark:bg-sky-950/50 px-4 py-3 flex flex-col sm:flex-row sm:items-center justify-between gap-3"
         >
           <div className="flex items-center gap-2.5 text-xs sm:text-sm text-sky-900 dark:text-sky-200">
-            <Maximize2 className="w-5 h-5 text-sky-500 shrink-0" aria-hidden="true" />
+            <Maximize2 className="w-5 h-5 text-sky-600 shrink-0" aria-hidden="true" />
             <span>
-              <strong>Modo Seleção de Retângulo Ativo:</strong>{' '}
+              <strong>Modo Seleção de Área Offline (2 Cliques):</strong>{' '}
               {!drawFirstCorner
-                ? 'Toque no Canto 1 do mapa para iniciar a Área de Missão Offline.'
-                : `Canto 1 marcado (${drawFirstCorner.latitude.toFixed(3)}, ${drawFirstCorner.longitude.toFixed(3)}). Agora toque no Canto 2 oposto.`}
+                ? 'Clique no Canto 1 do mapa para iniciar o retângulo.'
+                : `Canto 1 marcado (${drawFirstCorner.latitude.toFixed(3)}°, ${drawFirstCorner.longitude.toFixed(3)}°). Agora clique no Canto 2 oposto.`}
             </span>
           </div>
           <button
@@ -1016,7 +1166,7 @@ function MapRadarTabContent({
               setIsDrawingMissionBox(false);
               setDrawFirstCorner(null);
             }}
-            className="min-h-[44px] min-w-[44px] px-3.5 py-2 rounded-xl text-xs font-semibold inline-flex items-center justify-center gap-1.5 bg-slate-800 hover:bg-slate-700 text-white shrink-0"
+            className="min-h-[44px] min-w-[44px] px-3.5 py-2 rounded-xl text-xs font-semibold inline-flex items-center justify-center gap-1.5 bg-white hover:bg-slate-50 text-slate-700 border border-sky-200 shrink-0"
           >
             <XCircle className="w-4 h-4" aria-hidden="true" />
             <span>Cancelar Desenho</span>
@@ -1024,17 +1174,17 @@ function MapRadarTabContent({
         </div>
       )}
 
-      {/* Container Principal do Mapa Leaflet + Player RainViewer */}
-      <section className="rounded-2xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900/90 overflow-hidden shadow-sm">
-        <div className="relative w-full h-[420px] sm:h-[500px] lg:h-[540px] z-0">
+      {/* Container Principal do Mapa Leaflet + Pin Bandeirinha Windy + Player RainViewer */}
+      <section className="rounded-2xl border border-sky-200/80 dark:border-sky-900/60 bg-white dark:bg-slate-900/90 overflow-hidden shadow-sm">
+        <div className="relative w-full h-[430px] sm:h-[510px] lg:h-[550px] z-0">
           <MapContainer
             center={[activeLocation.latitude, activeLocation.longitude]}
             zoom={12}
             scrollWheelZoom={true}
             className="w-full h-full z-0"
           >
-            {/* Subclasse customizada de L.TileLayer com leitura prioritária do IndexedDB (Dexie) */}
-            <OfflineBaseTileLayer theme={tileTheme} />
+            {/* Subclasse customizada de L.TileLayer com leitura prioritária do IndexedDB (Dexie) e servidores gratuitos OSM/Esri */}
+            <OfflineBaseTileLayer theme={tileTheme} baseStyle={baseStyle} />
 
             {/* Ponte de sincronização de viewport, centro e clique no mapa */}
             <MapViewportBridge
@@ -1058,6 +1208,21 @@ function MapRadarTabContent({
               />
             )}
 
+            {/* Círculo de Área de Cobertura da Previsão ao redor do Pin Ativo */}
+            {forecastAreaRadiusKm > 0 && (
+              <Circle
+                center={[activeLocation.latitude, activeLocation.longitude]}
+                radius={forecastAreaRadiusKm * 1000}
+                pathOptions={{
+                  color: '#0284c7',
+                  weight: 2,
+                  dashArray: '6 4',
+                  fillColor: '#38bdf8',
+                  fillOpacity: 0.12,
+                }}
+              />
+            )}
+
             {/* Retângulo da Área de Missão Offline */}
             {showMissionOverlay && (
               <Rectangle
@@ -1066,11 +1231,11 @@ function MapRadarTabContent({
                   [missionBounds.north, missionBounds.east],
                 ]}
                 pathOptions={{
-                  color: tileEstimate.exceedsLimit ? '#f43f5e' : '#10b981',
-                  weight: 2.5,
+                  color: tileEstimate.exceedsLimit ? '#f43f5e' : '#0ea5e9',
+                  weight: 2,
                   dashArray: '6 4',
-                  fillColor: tileEstimate.exceedsLimit ? '#f43f5e' : '#10b981',
-                  fillOpacity: 0.12,
+                  fillColor: tileEstimate.exceedsLimit ? '#f43f5e' : '#38bdf8',
+                  fillOpacity: 0.08,
                 }}
               />
             )}
@@ -1081,7 +1246,7 @@ function MapRadarTabContent({
                 center={[drawFirstCorner.latitude, drawFirstCorner.longitude]}
                 radius={8}
                 pathOptions={{
-                  color: '#0ea5e9',
+                  color: '#0284c7',
                   fillColor: '#38bdf8',
                   fillOpacity: 0.9,
                   weight: 2,
@@ -1089,44 +1254,57 @@ function MapRadarTabContent({
               />
             )}
 
-            {/* Marcador do Ponto Ativo com Resumo Meteorológico & Oceanográfico */}
+            {/* Pin Principal Estilo Bandeirinha do Windy (Arrastável!) */}
             <Marker
               position={[activeLocation.latitude, activeLocation.longitude]}
-              icon={activeMarkerIcon}
+              icon={activeWindyFlagIcon}
+              draggable={true}
+              eventHandlers={{
+                dragend(e) {
+                  const marker = e.target as L.Marker;
+                  const pos = marker.getLatLng();
+                  handleMapClick(pos.lat, pos.lng);
+                },
+              }}
             >
               <Popup>
-                <div className="min-w-[220px] space-y-2 text-slate-900">
-                  <div className="border-b border-slate-200 pb-1.5">
-                    <span className="text-[10px] font-bold uppercase tracking-wider text-sky-700">
-                      Ponto Operacional Ativo
+                <div className="min-w-[230px] space-y-2 text-slate-800">
+                  <div className="border-b border-sky-100 pb-1.5">
+                    <span className="text-[10px] font-bold uppercase tracking-wider text-sky-600">
+                      Pin de Previsão Ativo
                     </span>
-                    <h4 className="font-bold text-sm">{activeLocation.name}</h4>
-                    <p className="text-xs font-mono text-slate-600">
-                      {activeLocation.latitude.toFixed(4)},{' '}
-                      {activeLocation.longitude.toFixed(4)}
+                    <h4 className="font-bold text-sm text-slate-900">
+                      {activeLocation.name}
+                    </h4>
+                    <p className="text-xs font-mono text-slate-500">
+                      {activeLocation.latitude.toFixed(4)}°,{' '}
+                      {activeLocation.longitude.toFixed(4)}°
+                      {forecastAreaRadiusKm > 0
+                        ? ` • Área ${forecastAreaRadiusKm} km`
+                        : ''}
                     </p>
                   </div>
 
                   {currentForecastHour && forecast ? (
                     <div className="space-y-1.5 text-xs">
                       <div className="grid grid-cols-2 gap-1.5">
-                        <div className="bg-slate-100 p-1.5 rounded">
+                        <div className="bg-sky-50/80 p-2 rounded-lg border border-sky-100">
                           <span className="text-[10px] text-slate-500 block">
                             Vento 10m / Rajada
                           </span>
-                          <strong className="font-mono">
+                          <strong className="font-bold text-sky-900">
                             {currentForecastHour.windSpeed10m.mean?.toFixed(1) ?? '—'} /{' '}
                             {currentForecastHour.windGusts10m.mean?.toFixed(1) ?? '—'}{' '}
                             km/h
                           </strong>
                         </div>
-                        <div className="bg-slate-100 p-1.5 rounded">
+                        <div className="bg-sky-50/80 p-2 rounded-lg border border-sky-100">
                           <span className="text-[10px] text-slate-500 block">
                             Direção / Temp
                           </span>
-                          <strong className="font-mono">
+                          <strong className="font-bold text-sky-900">
                             {currentForecastHour.windDirection10m.degree !== null
-                              ? `${Math.round(currentForecastHour.windDirection10m.degree)}°`
+                              ? `${degreesToCardinal(currentForecastHour.windDirection10m.degree)} (${Math.round(currentForecastHour.windDirection10m.degree)}°)`
                               : '—'}{' '}
                             •{' '}
                             {currentForecastHour.temperature2mC.mean?.toFixed(1) ?? '—'}
@@ -1135,30 +1313,32 @@ function MapRadarTabContent({
                         </div>
                       </div>
 
-                      <div className="bg-slate-100 p-1.5 rounded flex items-center justify-between">
+                      <div className="bg-sky-50/80 p-2 rounded-lg border border-sky-100 flex items-center justify-between">
                         <span className="text-[10px] text-slate-500">
                           Mar / Ondas:
                         </span>
-                        <strong className="font-mono">
+                        <strong className="font-bold text-sky-900">
                           {forecast.marineAvailable && currentForecastHour.marine
                             ? `${currentForecastHour.marine.waveHeight?.toFixed(1) ?? '—'}m (${currentForecastHour.marine.wavePeriod?.toFixed(0) ?? '—'}s)`
-                            : 'Continental (Sem grade)'}
+                            : 'Ponto Continental'}
                         </strong>
                       </div>
 
-                      <div className="flex items-center justify-between pt-1 text-[11px]">
+                      <div className="flex items-center justify-between pt-1 text-[11px] text-slate-600">
                         <span>
                           Confiança:{' '}
-                          <strong>{currentForecastHour.confidence.total}/100</strong>
+                          <strong className="text-sky-700">
+                            {currentForecastHour.confidence.total}%
+                          </strong>
                         </span>
                         <span>
-                          Alt DEM: <strong>{Math.round(forecast.elevationDemM)}m</strong>
+                          Altitude: <strong>{Math.round(forecast.elevationDemM)}m</strong>
                         </span>
                       </div>
                     </div>
                   ) : (
                     <p className="text-xs text-slate-500">
-                      Aguardando sincronização da previsão horária...
+                      Sincronizando previsão horária para este Pin...
                     </p>
                   )}
                 </div>
@@ -1182,16 +1362,16 @@ function MapRadarTabContent({
                     <Popup>
                       <div className="min-w-[200px] space-y-2 text-slate-900">
                         <div>
-                          <span className="text-[10px] font-bold uppercase tracking-wider text-amber-700">
-                            {loc.isFavorite ? '★ Ponto Favorito Salvo' : 'Ponto Salvo'}
+                          <span className="text-[10px] font-bold uppercase tracking-wider text-sky-600">
+                            {loc.isFavorite ? '★ Local Favorito' : 'Local Salvo'}
                           </span>
                           <h4 className="font-bold text-sm">{loc.name}</h4>
-                          <p className="text-xs font-mono text-slate-600">
-                            {loc.latitude.toFixed(4)}, {loc.longitude.toFixed(4)}
+                          <p className="text-xs font-mono text-slate-500">
+                            {loc.latitude.toFixed(4)}°, {loc.longitude.toFixed(4)}°
                           </p>
                           {loc.elevationM !== undefined && loc.elevationM !== null && (
-                            <p className="text-xs text-slate-600">
-                              Altitude DEM: {Math.round(loc.elevationM)} m
+                            <p className="text-xs text-slate-500">
+                              Altitude: {Math.round(loc.elevationM)} m
                             </p>
                           )}
                         </div>
@@ -1206,9 +1386,9 @@ function MapRadarTabContent({
                                 'saved',
                               )
                             }
-                            className="w-full min-h-[44px] min-w-[44px] px-3 py-2 rounded-lg bg-sky-600 hover:bg-sky-500 text-white text-xs font-semibold"
+                            className="w-full min-h-[40px] px-3 py-2 rounded-xl bg-sky-600 hover:bg-sky-500 text-white text-xs font-semibold"
                           >
-                            Tornar Ponto Ativo
+                            Previsão para este local
                           </button>
                         )}
                       </div>
@@ -1228,19 +1408,19 @@ function MapRadarTabContent({
                   >
                     <Popup>
                       <div className="min-w-[230px] max-w-[260px] space-y-2 text-slate-900">
-                        <div className="border-b border-slate-200 pb-1">
-                          <span className="text-[10px] font-bold uppercase tracking-wider text-violet-700">
-                            Waypoint Georreferenciado
+                        <div className="border-b border-sky-100 pb-1">
+                          <span className="text-[10px] font-bold uppercase tracking-wider text-sky-600">
+                            Waypoint de Campo
                           </span>
                           <h4 className="font-bold text-sm">{wp.name}</h4>
-                          <p className="text-[11px] font-mono text-slate-600">
-                            {wp.latitude.toFixed(4)}, {wp.longitude.toFixed(4)} • UTC{' '}
+                          <p className="text-[11px] font-mono text-slate-500">
+                            {wp.latitude.toFixed(4)}°, {wp.longitude.toFixed(4)}° •{' '}
                             {wp.timestampUtcIso.slice(0, 16).replace('T', ' ')}
                           </p>
                         </div>
 
                         {wp.photoDataUrl && (
-                          <div className="rounded-lg overflow-hidden border border-slate-200 bg-slate-100">
+                          <div className="rounded-lg overflow-hidden border border-sky-100 bg-sky-50">
                             <img
                               src={wp.photoDataUrl}
                               alt={`Foto do waypoint ${wp.name}`}
@@ -1255,37 +1435,46 @@ function MapRadarTabContent({
                         )}
 
                         {wp.note && (
-                          <p className="text-xs text-slate-700 bg-slate-100 p-2 rounded">
+                          <p className="text-xs text-slate-700 bg-sky-50/70 p-2 rounded-lg">
                             {wp.note}
                           </p>
                         )}
 
-                        <div className="text-[11px] bg-slate-50 border border-slate-200 rounded p-2 space-y-1">
-                          <div className="font-semibold text-slate-700">
-                            Snapshot Meteorológico:
+                        <div className="text-[11px] bg-sky-50/50 border border-sky-100 rounded-lg p-2 space-y-1">
+                          <div className="font-semibold text-sky-900">
+                            Condições no Momento:
                           </div>
-                          <div className="grid grid-cols-2 gap-1 font-mono">
+                          <div className="grid grid-cols-2 gap-1">
                             <span>
                               Vento:{' '}
-                              {wp.conditions.windSpeed10mKmh?.toFixed(1) ?? '—'} km/h
+                              <strong>
+                                {wp.conditions.windSpeed10mKmh?.toFixed(1) ?? '—'} km/h
+                              </strong>
                             </span>
                             <span>
                               Rajada:{' '}
-                              {wp.conditions.windGusts10mKmh?.toFixed(1) ?? '—'} km/h
+                              <strong>
+                                {wp.conditions.windGusts10mKmh?.toFixed(1) ?? '—'} km/h
+                              </strong>
                             </span>
                             <span>
-                              Temp: {wp.conditions.temperature2mC?.toFixed(1) ?? '—'}°C
+                              Temp:{' '}
+                              <strong>
+                                {wp.conditions.temperature2mC?.toFixed(1) ?? '—'}°C
+                              </strong>
                             </span>
                             <span>
                               Onda:{' '}
-                              {wp.conditions.waveHeightM !== null
-                                ? `${wp.conditions.waveHeightM.toFixed(1)}m`
-                                : 'Cont.'}
+                              <strong>
+                                {wp.conditions.waveHeightM !== null
+                                  ? `${wp.conditions.waveHeightM.toFixed(1)}m`
+                                  : 'Cont.'}
+                              </strong>
                             </span>
                           </div>
                           <div className="text-[10px] text-slate-600 pt-0.5">
                             {safeBadge.label} • Confiança:{' '}
-                            {wp.conditions.confidenceTotal ?? '—'}/100
+                            {wp.conditions.confidenceTotal ?? '—'}%
                           </div>
                         </div>
                       </div>
@@ -1312,7 +1501,7 @@ function MapRadarTabContent({
                         positions={positions}
                         pathOptions={{
                           color:
-                            track.status === 'recording' ? '#0ea5e9' : '#10b981',
+                            track.status === 'recording' ? '#0284c7' : '#0ea5e9',
                           weight: 4,
                           opacity: 0.9,
                         }}
@@ -1342,7 +1531,7 @@ function MapRadarTabContent({
                               {track.discardedLowAccuracyCount})
                             </p>
                             <p className="text-[11px] text-slate-500">
-                              Início UTC:{' '}
+                              Início:{' '}
                               {track.startedAtIso.slice(0, 19).replace('T', ' ')}
                             </p>
                           </div>
@@ -1365,48 +1554,113 @@ function MapRadarTabContent({
                 );
               })}
 
-            {/* Marcador de Inspeção ao Clicar no Mapa */}
-            {inspectedPoint && (
-              <Marker
-                position={[inspectedPoint.latitude, inspectedPoint.longitude]}
-                icon={inspectedMarkerIcon}
-              >
-                <Popup>
-                  <div className="min-w-[200px] space-y-2 text-slate-900">
-                    <div>
-                      <span className="text-[10px] font-bold uppercase tracking-wider text-rose-600">
-                        Coordenada Inspecionada
-                      </span>
-                      <p className="text-xs font-mono font-bold">
-                        {inspectedPoint.latitude.toFixed(5)},{' '}
-                        {inspectedPoint.longitude.toFixed(5)}
-                      </p>
-                    </div>
-                    {onSelectLocation && (
-                      <button
-                        type="button"
-                        onClick={() =>
-                          handleSelectMapCoordinate(
-                            inspectedPoint.latitude,
-                            inspectedPoint.longitude,
-                            `Ponto (${inspectedPoint.latitude.toFixed(3)}, ${inspectedPoint.longitude.toFixed(3)})`,
-                            'search',
-                          )
-                        }
-                        className="w-full min-h-[44px] min-w-[44px] px-3 py-2 rounded-lg bg-sky-600 hover:bg-sky-500 text-white text-xs font-semibold"
-                      >
-                        Carregar Previsão Aqui
-                      </button>
-                    )}
-                  </div>
-                </Popup>
-              </Marker>
-            )}
+            {/* Marcador de Pin Inspecionado (quando em modo de inspeção antes de aplicar) */}
+            {inspectedPoint &&
+              inspectedWindyFlagIcon &&
+              (Math.abs(inspectedPoint.latitude - activeLocation.latitude) >
+                0.0002 ||
+                Math.abs(inspectedPoint.longitude - activeLocation.longitude) >
+                  0.0002) && (
+                <Marker
+                  position={[inspectedPoint.latitude, inspectedPoint.longitude]}
+                  icon={inspectedWindyFlagIcon}
+                  eventHandlers={{
+                    click() {
+                      const trimmed = customPinName.trim();
+                      const label =
+                        trimmed ||
+                        `Pin (${inspectedPoint.latitude.toFixed(3)}, ${inspectedPoint.longitude.toFixed(3)})`;
+                      handleSelectMapCoordinate(
+                        inspectedPoint.latitude,
+                        inspectedPoint.longitude,
+                        label,
+                        'search',
+                      );
+                    },
+                  }}
+                />
+              )}
           </MapContainer>
         </div>
 
+        {/* Barra Inferior Flutuante Estilo Windy para o Pin Selecionado */}
+        <div className="border-t border-sky-100 dark:border-slate-800 bg-gradient-to-r from-sky-50/80 via-white to-sky-50/80 dark:from-slate-900 dark:via-slate-900 dark:to-slate-800/90 px-4 py-3 flex flex-col lg:flex-row lg:items-center justify-between gap-3">
+          <div className="flex flex-wrap items-center gap-2.5 flex-1">
+            <div className="inline-flex items-center gap-2 px-3 py-1.5 rounded-xl bg-white dark:bg-slate-800 border border-sky-200 dark:border-slate-700 text-xs font-semibold text-sky-900 dark:text-sky-200 shadow-sm">
+              <Navigation className="w-3.5 h-3.5 text-sky-600" aria-hidden="true" />
+              <span className="font-mono font-bold">
+                {(inspectedPoint?.latitude ?? activeLocation.latitude).toFixed(4)}°,{' '}
+                {(inspectedPoint?.longitude ?? activeLocation.longitude).toFixed(4)}°
+              </span>
+              {forecastAreaRadiusKm > 0 && (
+                <span className="px-2 py-0.5 rounded-full bg-sky-100 dark:bg-sky-900/60 text-sky-700 dark:text-sky-300 text-[10px] font-bold">
+                  Área {forecastAreaRadiusKm} km
+                </span>
+              )}
+            </div>
+
+            <input
+              type="text"
+              value={customPinName}
+              onChange={(e) => setCustomPinName(e.target.value)}
+              placeholder="Nome personalizado para este Pin ou Área (ex: Praia da Joaquina, Faz. Boa Vista)..."
+              aria-label="Nome personalizado para o Pin no mapa"
+              className="flex-1 min-w-[220px] min-h-[40px] px-3.5 py-1.5 rounded-xl border border-sky-200 dark:border-slate-700 bg-white dark:bg-slate-800 text-xs text-slate-800 dark:text-slate-100 placeholder:text-slate-400 focus:outline-none focus:ring-2 focus:ring-sky-500/40"
+            />
+          </div>
+
+          <div className="flex flex-wrap items-center gap-2">
+            {onSelectLocation && (
+              <button
+                type="button"
+                onClick={() => {
+                  const targetLat =
+                    inspectedPoint?.latitude ?? activeLocation.latitude;
+                  const targetLon =
+                    inspectedPoint?.longitude ?? activeLocation.longitude;
+                  const trimmed = customPinName.trim();
+                  const areaSuffix =
+                    forecastAreaRadiusKm > 0
+                      ? ` • Área ${forecastAreaRadiusKm}km`
+                      : '';
+                  const targetName =
+                    trimmed.length > 0
+                      ? `${trimmed}${areaSuffix}`
+                      : `Pin no Mapa (${targetLat.toFixed(3)}, ${targetLon.toFixed(3)}${areaSuffix})`;
+                  handleSelectMapCoordinate(
+                    targetLat,
+                    targetLon,
+                    targetName,
+                    'search',
+                  );
+                }}
+                className="min-h-[44px] min-w-[44px] px-4 py-2 rounded-xl text-xs font-bold bg-sky-600 hover:bg-sky-500 text-white shadow-sm inline-flex items-center gap-1.5 transition-colors"
+              >
+                <MapPin className="w-4 h-4" aria-hidden="true" />
+                <span>Previsão para este Pin</span>
+              </button>
+            )}
+
+            {onSaveLocation && (
+              <button
+                type="button"
+                onClick={() =>
+                  handleSaveInspectedCoordinate(
+                    inspectedPoint?.latitude ?? activeLocation.latitude,
+                    inspectedPoint?.longitude ?? activeLocation.longitude,
+                  )
+                }
+                className="min-h-[44px] min-w-[44px] px-3.5 py-2 rounded-xl text-xs font-semibold border border-sky-200 dark:border-slate-700 bg-white dark:bg-slate-800 hover:bg-sky-50 dark:hover:bg-slate-700 text-sky-800 dark:text-sky-200 inline-flex items-center gap-1.5 transition-colors"
+              >
+                <Bookmark className="w-4 h-4 text-sky-600" aria-hidden="true" />
+                <span>Salvar Pin nos Favoritos</span>
+              </button>
+            )}
+          </div>
+        </div>
+
         {/* Barra de Reprodução do Radar Animado RainViewer */}
-        <div className="border-t border-slate-200 dark:border-slate-800 bg-slate-50/90 dark:bg-slate-950/80 p-3 sm:p-4">
+        <div className="border-t border-sky-100 dark:border-slate-800 bg-sky-50/40 dark:bg-slate-950/80 p-3 sm:p-4">
           <div className="flex flex-col md:flex-row md:items-center justify-between gap-3">
             {/* Botões Play/Pause, Passo Anterior/Próximo e Opacidade (todos >= 44x44px) */}
             <div className="flex flex-wrap items-center gap-2">
@@ -1443,7 +1697,7 @@ function MapRadarTabContent({
                   );
                 }}
                 disabled={frames.length <= 1 || !radarEnabled}
-                className="min-h-[44px] min-w-[44px] p-2.5 rounded-xl border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900 hover:bg-slate-100 dark:hover:bg-slate-800 disabled:opacity-40 text-slate-700 dark:text-slate-200 inline-flex items-center justify-center"
+                className="min-h-[44px] min-w-[44px] p-2.5 rounded-xl border border-sky-200 dark:border-slate-700 bg-white dark:bg-slate-900 hover:bg-sky-50 dark:hover:bg-slate-800 disabled:opacity-40 text-sky-800 dark:text-slate-200 inline-flex items-center justify-center"
                 title="Quadro anterior do radar"
                 aria-label="Quadro anterior do radar"
               >
@@ -1459,7 +1713,7 @@ function MapRadarTabContent({
                   );
                 }}
                 disabled={frames.length <= 1 || !radarEnabled}
-                className="min-h-[44px] min-w-[44px] p-2.5 rounded-xl border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900 hover:bg-slate-100 dark:hover:bg-slate-800 disabled:opacity-40 text-slate-700 dark:text-slate-200 inline-flex items-center justify-center"
+                className="min-h-[44px] min-w-[44px] p-2.5 rounded-xl border border-sky-200 dark:border-slate-700 bg-white dark:bg-slate-900 hover:bg-sky-50 dark:hover:bg-slate-800 disabled:opacity-40 text-sky-800 dark:text-slate-200 inline-flex items-center justify-center"
                 title="Próximo quadro do radar"
                 aria-label="Próximo quadro do radar"
               >
@@ -1473,10 +1727,10 @@ function MapRadarTabContent({
                     (prev) => (prev + 1) % RADAR_OPACITY_PRESETS.length,
                   )
                 }
-                className="min-h-[44px] min-w-[44px] px-3 py-2 rounded-xl border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900 hover:bg-slate-100 dark:hover:bg-slate-800 text-xs font-semibold text-slate-700 dark:text-slate-200 inline-flex items-center gap-1.5"
+                className="min-h-[44px] min-w-[44px] px-3 py-2 rounded-xl border border-sky-200 dark:border-slate-700 bg-white dark:bg-slate-900 hover:bg-sky-50 dark:hover:bg-slate-800 text-xs font-semibold text-sky-800 dark:text-slate-200 inline-flex items-center gap-1.5"
                 title="Alternar opacidade da camada de radar"
               >
-                <Layers className="w-4 h-4 text-sky-500" aria-hidden="true" />
+                <Layers className="w-4 h-4 text-sky-600" aria-hidden="true" />
                 <span>Opacidade {Math.round(radarOpacity * 100)}%</span>
               </button>
 
@@ -1484,7 +1738,7 @@ function MapRadarTabContent({
                 type="button"
                 onClick={() => void loadRainViewerRadar(true)}
                 disabled={isLoadingRadar}
-                className="min-h-[44px] min-w-[44px] px-3 py-2 rounded-xl border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900 hover:bg-slate-100 dark:hover:bg-slate-800 text-xs font-semibold text-slate-700 dark:text-slate-200 inline-flex items-center gap-1.5"
+                className="min-h-[44px] min-w-[44px] px-3 py-2 rounded-xl border border-sky-200 dark:border-slate-700 bg-white dark:bg-slate-900 hover:bg-sky-50 dark:hover:bg-slate-800 text-xs font-semibold text-sky-800 dark:text-slate-200 inline-flex items-center gap-1.5"
                 title="Recarregar quadros do RainViewer"
               >
                 <RefreshCw
@@ -1509,7 +1763,7 @@ function MapRadarTabContent({
                     setCurrentFrameIndex(Number(e.target.value));
                   }}
                   aria-label="Linha do tempo do radar RainViewer"
-                  className="w-full min-h-[44px] accent-sky-500 cursor-pointer disabled:opacity-40"
+                  className="w-full min-h-[44px] accent-sky-600 cursor-pointer disabled:opacity-40"
                 />
               </div>
 
@@ -1517,23 +1771,23 @@ function MapRadarTabContent({
                 {activeFrame ? (
                   <>
                     <span
-                      className={`px-2.5 py-1 rounded-lg text-[11px] font-bold uppercase tracking-wider border ${
+                      className={`px-2.5 py-1 rounded-full text-[11px] font-bold border ${
                         activeFrame.isNowcast
-                          ? 'bg-violet-500/15 text-violet-700 dark:text-violet-300 border-violet-500/30'
-                          : 'bg-emerald-500/15 text-emerald-700 dark:text-emerald-300 border-emerald-500/30'
+                          ? 'bg-sky-100 text-sky-800 dark:bg-sky-950 dark:text-sky-300 border-sky-200 dark:border-sky-800'
+                          : 'bg-emerald-50 text-emerald-700 dark:bg-emerald-950 dark:text-emerald-300 border-emerald-200 dark:border-emerald-800'
                       }`}
                     >
-                      {activeFrame.isNowcast ? 'Nowcast (+30m)' : 'Observado'}
+                      {activeFrame.isNowcast ? 'Previsão (+30m)' : 'Observado'}
                     </span>
-                    <span className="font-mono text-xs sm:text-sm font-bold text-slate-900 dark:text-white bg-white dark:bg-slate-900 px-3 py-1.5 rounded-xl border border-slate-200 dark:border-slate-800">
+                    <span className="font-mono text-xs sm:text-sm font-bold text-sky-900 dark:text-white bg-white dark:bg-slate-900 px-3 py-1.5 rounded-xl border border-sky-200 dark:border-slate-800">
                       {formatFrameTimestamp(activeFrame.timeUnix)}
                     </span>
                   </>
                 ) : (
-                  <span className="text-xs font-mono text-slate-500">
+                  <span className="text-xs text-slate-500">
                     {isLoadingRadar
-                      ? 'Carregando quadros...'
-                      : 'Sem quadros ativos'}
+                      ? 'Carregando radar...'
+                      : 'Radar pronto'}
                   </span>
                 )}
               </div>
@@ -1542,98 +1796,35 @@ function MapRadarTabContent({
         </div>
       </section>
 
-      {/* Painel de Coordenada Inspecionada no Mapa (quando o usuário clica em um ponto) */}
-      {inspectedPoint && (
-        <section className="rounded-2xl border border-sky-500/40 bg-sky-500/10 p-4 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
-          <div className="flex items-center gap-3">
-            <div className="p-2.5 rounded-xl bg-sky-500/20 text-sky-600 dark:text-sky-300">
-              <MapPin className="w-5 h-5" aria-hidden="true" />
-            </div>
-            <div>
-              <h3 className="text-sm font-bold text-slate-900 dark:text-white">
-                Ponto Selecionado no Mapa:{' '}
-                <span className="font-mono">
-                  {inspectedPoint.latitude.toFixed(4)},{' '}
-                  {inspectedPoint.longitude.toFixed(4)}
-                </span>
-              </h3>
-              <p className="text-xs text-slate-600 dark:text-slate-300">
-                Você pode consultar a previsão completa de 168h para esta coordenada ou
-                salvá-la nos locais favoritos offline.
-              </p>
-            </div>
-          </div>
-          <div className="flex flex-wrap items-center gap-2">
-            {onSelectLocation && (
-              <button
-                type="button"
-                onClick={() =>
-                  handleSelectMapCoordinate(
-                    inspectedPoint.latitude,
-                    inspectedPoint.longitude,
-                    `Ponto (${inspectedPoint.latitude.toFixed(3)}, ${inspectedPoint.longitude.toFixed(3)})`,
-                    'search',
-                  )
-                }
-                className="min-h-[44px] min-w-[44px] px-4 py-2 rounded-xl text-xs font-bold bg-sky-600 hover:bg-sky-500 text-white shadow-sm"
-              >
-                Usar Esta Coordenada
-              </button>
-            )}
-            {onSaveLocation && (
-              <button
-                type="button"
-                onClick={() =>
-                  handleSaveInspectedCoordinate(
-                    inspectedPoint.latitude,
-                    inspectedPoint.longitude,
-                  )
-                }
-                className="min-h-[44px] min-w-[44px] px-3.5 py-2 rounded-xl text-xs font-semibold border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900 hover:bg-slate-100 dark:hover:bg-slate-800 text-slate-800 dark:text-slate-200"
-              >
-                Salvar Favorito
-              </button>
-            )}
-            <button
-              type="button"
-              onClick={() => setInspectedPoint(null)}
-              className="min-h-[44px] min-w-[44px] px-3 py-2 rounded-xl text-xs font-semibold text-slate-600 dark:text-slate-400 hover:bg-slate-200/60 dark:hover:bg-slate-800"
-            >
-              Fechar
-            </button>
-          </div>
-        </section>
-      )}
-
-      {/* Ferramenta: Área de Missão Offline (Cache de Tiles CORS no IndexedDB) */}
-      <section className="rounded-2xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900/90 p-4 sm:p-5 shadow-sm space-y-4">
-        <div className="flex flex-col md:flex-row md:items-center justify-between gap-3 border-b border-slate-200 dark:border-slate-800 pb-3">
+      {/* Ferramenta: Área de Missão Offline (Cache de Tiles no IndexedDB — 100% Gratuito sem API Key) */}
+      <section className="rounded-2xl border border-sky-200/80 dark:border-sky-900/60 bg-white dark:bg-slate-900/90 p-4 sm:p-5 shadow-sm space-y-4">
+        <div className="flex flex-col md:flex-row md:items-center justify-between gap-3 border-b border-sky-100 dark:border-slate-800 pb-3">
           <div className="space-y-1">
             <div className="flex flex-wrap items-center gap-2">
-              <h2 className="text-base sm:text-lg font-bold text-slate-900 dark:text-white flex items-center gap-2">
-                <HardDrive className="w-5 h-5 text-emerald-500" aria-hidden="true" />
-                <span>Área de Missão Offline (Cache IndexedDB)</span>
+              <h2 className="text-base sm:text-lg font-bold text-slate-800 dark:text-white flex items-center gap-2">
+                <HardDrive className="w-5 h-5 text-sky-600" aria-hidden="true" />
+                <span>Mapa Offline para Campo (Salvar Área no Dispositivo)</span>
               </h2>
-              <span className="px-2.5 py-0.5 rounded-md text-xs font-mono font-semibold bg-slate-100 dark:bg-slate-800 text-slate-700 dark:text-slate-300">
-                Máx {MAX_OFFLINE_TILES_PER_MISSION} tiles / missão •{' '}
-                {MAX_CONCURRENT_TILE_DOWNLOADS} downloads simultâneos
+              <span className="px-2.5 py-0.5 rounded-full text-xs font-semibold bg-sky-50 dark:bg-sky-950/60 text-sky-700 dark:text-sky-300 border border-sky-200 dark:border-sky-800">
+                Até {MAX_OFFLINE_TILES_PER_MISSION} tiles / missão •{' '}
+                {MAX_CONCURRENT_TILE_DOWNLOADS} conexões simultâneas
               </span>
             </div>
             <p className="text-xs sm:text-sm text-slate-600 dark:text-slate-400">
-              Selecione um retângulo no mapa e baixe os tiles CartoDB com CORS (
-              <code>crossOrigin: &apos;anonymous&apos;</code>) para navegação em campo
-              100% sem internet.
+              Selecione um retângulo ou raio ao redor do Pin e salve o mapa{' '}
+              <strong>{activeBaseStyleLabel}</strong> no IndexedDB para consulta em
+              campo mesmo sem sinal de celular.
             </p>
           </div>
 
           {/* Resumo do Cache Salvo & Botão de Limpeza */}
           <div className="flex flex-wrap items-center gap-2">
-            <div className="px-3 py-2 rounded-xl bg-slate-100 dark:bg-slate-800/90 border border-slate-200 dark:border-slate-700 text-xs">
-              <div className="font-bold text-slate-900 dark:text-white">
-                {cacheStats.totalTiles} tiles em cache ({formatBytes(cacheStats.totalBytes)})
+            <div className="px-3.5 py-2 rounded-xl bg-sky-50/70 dark:bg-slate-800/90 border border-sky-200/80 dark:border-slate-700 text-xs">
+              <div className="font-bold text-sky-900 dark:text-white">
+                {cacheStats.totalTiles} tiles salvos ({formatBytes(cacheStats.totalBytes)})
               </div>
               <div className="text-[11px] text-slate-500 dark:text-slate-400">
-                Claro: {cacheStats.lightTiles} • Escuro: {cacheStats.darkTiles}
+                Padrão: {cacheStats.lightTiles} • Costeiro: {cacheStats.darkTiles}
               </div>
             </div>
 
@@ -1641,10 +1832,10 @@ function MapRadarTabContent({
               type="button"
               onClick={handleClearOfflineTileCache}
               disabled={cacheStats.totalTiles === 0 || isDownloadingTiles}
-              className="min-h-[44px] min-w-[44px] px-3.5 py-2 rounded-xl text-xs font-semibold inline-flex items-center gap-1.5 border border-rose-500/40 bg-rose-500/10 hover:bg-rose-500/20 disabled:opacity-40 text-rose-700 dark:text-rose-300 transition-colors"
+              className="min-h-[44px] min-w-[44px] px-3.5 py-2 rounded-xl text-xs font-semibold inline-flex items-center gap-1.5 border border-rose-200 dark:border-rose-800 bg-rose-50/70 dark:bg-rose-950/40 hover:bg-rose-100/80 disabled:opacity-40 text-rose-700 dark:text-rose-300 transition-colors"
             >
               <Trash2 className="w-4 h-4" aria-hidden="true" />
-              <span>Limpar Cache</span>
+              <span>Limpar Mapas Salvos</span>
             </button>
           </div>
         </div>
@@ -1653,8 +1844,8 @@ function MapRadarTabContent({
         <div className="grid grid-cols-1 lg:grid-cols-12 gap-4">
           {/* Coluna 1: Seleção da Área Geográfica */}
           <div className="lg:col-span-7 space-y-3">
-            <div className="text-xs font-bold uppercase tracking-wider text-slate-500 dark:text-slate-400">
-              1. Definir Retângulo da Missão
+            <div className="text-xs font-bold text-sky-800 dark:text-sky-300">
+              1. Escolha a Área do Mapa para Salvar Offline
             </div>
 
             <div className="flex flex-wrap items-center gap-2">
@@ -1662,9 +1853,9 @@ function MapRadarTabContent({
                 type="button"
                 onClick={handleUseCurrentViewportForMission}
                 disabled={isDownloadingTiles}
-                className="min-h-[44px] min-w-[44px] px-3.5 py-2 rounded-xl text-xs font-semibold inline-flex items-center gap-1.5 bg-slate-900 dark:bg-slate-800 hover:bg-slate-800 dark:hover:bg-slate-700 text-white border border-slate-700 transition-colors"
+                className="min-h-[44px] min-w-[44px] px-3.5 py-2 rounded-xl text-xs font-semibold inline-flex items-center gap-1.5 bg-sky-600 hover:bg-sky-500 text-white shadow-sm transition-colors"
               >
-                <Compass className="w-4 h-4 text-sky-400" aria-hidden="true" />
+                <Compass className="w-4 h-4" aria-hidden="true" />
                 <span>Usar Visão Atual do Mapa</span>
               </button>
 
@@ -1678,15 +1869,15 @@ function MapRadarTabContent({
                 aria-pressed={isDrawingMissionBox}
                 className={`min-h-[44px] min-w-[44px] px-3.5 py-2 rounded-xl text-xs font-semibold inline-flex items-center gap-1.5 border transition-colors ${
                   isDrawingMissionBox
-                    ? 'bg-sky-600 text-white border-sky-500'
-                    : 'bg-white dark:bg-slate-900 text-slate-800 dark:text-slate-200 border-slate-300 dark:border-slate-700 hover:bg-slate-100 dark:hover:bg-slate-800'
+                    ? 'bg-sky-700 text-white border-sky-700'
+                    : 'bg-white dark:bg-slate-900 text-sky-800 dark:text-slate-200 border-sky-200 dark:border-slate-700 hover:bg-sky-50 dark:hover:bg-slate-800'
                 }`}
               >
                 <Maximize2 className="w-4 h-4" aria-hidden="true" />
                 <span>
                   {isDrawingMissionBox
-                    ? 'Desenhando (2 Cliques)...'
-                    : 'Desenhar no Mapa (2 Cliques)'}
+                    ? 'Desenhando no Mapa (2 Cliques)...'
+                    : 'Desenhar Retângulo (2 Cliques)'}
                 </span>
               </button>
 
@@ -1698,8 +1889,8 @@ function MapRadarTabContent({
                   disabled={isDownloadingTiles}
                   className={`min-h-[44px] min-w-[44px] px-3 py-2 rounded-xl text-xs font-semibold border transition-colors ${
                     selectedRadiusKm === radiusKm
-                      ? 'bg-emerald-500/20 border-emerald-500/50 text-emerald-800 dark:text-emerald-300'
-                      : 'bg-slate-100 dark:bg-slate-800/70 border-slate-300 dark:border-slate-700 text-slate-700 dark:text-slate-300 hover:bg-slate-200/70 dark:hover:bg-slate-800'
+                      ? 'bg-sky-100 dark:bg-sky-950/70 border-sky-400 text-sky-900 dark:text-sky-200'
+                      : 'bg-sky-50/50 dark:bg-slate-800/70 border-sky-200/80 dark:border-slate-700 text-slate-700 dark:text-slate-300 hover:bg-sky-100/60'
                   }`}
                 >
                   Raio {radiusKm} km
@@ -1708,30 +1899,38 @@ function MapRadarTabContent({
             </div>
 
             {/* Coordenadas do Retângulo */}
-            <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 text-xs font-mono bg-slate-50 dark:bg-slate-950/60 p-3 rounded-xl border border-slate-200 dark:border-slate-800">
+            <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 text-xs font-mono bg-sky-50/50 dark:bg-slate-950/60 p-3 rounded-xl border border-sky-100 dark:border-slate-800">
               <div>
-                <span className="text-[10px] uppercase text-slate-500 block">
+                <span className="text-[10px] font-sans text-slate-500 block">
                   Norte (Lat)
                 </span>
-                <strong>{missionBounds.north.toFixed(4)}°</strong>
+                <strong className="text-sky-950 dark:text-slate-200">
+                  {missionBounds.north.toFixed(4)}°
+                </strong>
               </div>
               <div>
-                <span className="text-[10px] uppercase text-slate-500 block">
+                <span className="text-[10px] font-sans text-slate-500 block">
                   Sul (Lat)
                 </span>
-                <strong>{missionBounds.south.toFixed(4)}°</strong>
+                <strong className="text-sky-950 dark:text-slate-200">
+                  {missionBounds.south.toFixed(4)}°
+                </strong>
               </div>
               <div>
-                <span className="text-[10px] uppercase text-slate-500 block">
+                <span className="text-[10px] font-sans text-slate-500 block">
                   Leste (Lon)
                 </span>
-                <strong>{missionBounds.east.toFixed(4)}°</strong>
+                <strong className="text-sky-950 dark:text-slate-200">
+                  {missionBounds.east.toFixed(4)}°
+                </strong>
               </div>
               <div>
-                <span className="text-[10px] uppercase text-slate-500 block">
+                <span className="text-[10px] font-sans text-slate-500 block">
                   Oeste (Lon)
                 </span>
-                <strong>{missionBounds.west.toFixed(4)}°</strong>
+                <strong className="text-sky-950 dark:text-slate-200">
+                  {missionBounds.west.toFixed(4)}°
+                </strong>
               </div>
             </div>
 
@@ -1747,11 +1946,11 @@ function MapRadarTabContent({
                   onChange={(e) =>
                     handleZoomRangeChange('minZoom', Number(e.target.value))
                   }
-                  className="w-full min-h-[44px] px-3 py-2 rounded-xl border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900 text-sm font-semibold text-slate-900 dark:text-white"
+                  className="w-full min-h-[44px] px-3 py-2 rounded-xl border border-sky-200 dark:border-slate-700 bg-white dark:bg-slate-900 text-sm font-semibold text-slate-800 dark:text-white"
                 >
                   {[8, 9, 10, 11, 12, 13, 14, 15, 16].map((z) => (
                     <option key={z} value={z}>
-                      Zoom {z} {z <= 10 ? '(Regional)' : z <= 13 ? '(Local)' : '(Detalhe)'}
+                      Zoom {z} {z <= 10 ? '(Visão Regional)' : z <= 13 ? '(Visão Local)' : '(Detalhe Costeiro)'}
                     </option>
                   ))}
                 </select>
@@ -1767,11 +1966,11 @@ function MapRadarTabContent({
                   onChange={(e) =>
                     handleZoomRangeChange('maxZoom', Number(e.target.value))
                   }
-                  className="w-full min-h-[44px] px-3 py-2 rounded-xl border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900 text-sm font-semibold text-slate-900 dark:text-white"
+                  className="w-full min-h-[44px] px-3 py-2 rounded-xl border border-sky-200 dark:border-slate-700 bg-white dark:bg-slate-900 text-sm font-semibold text-slate-800 dark:text-white"
                 >
                   {[8, 9, 10, 11, 12, 13, 14, 15, 16].map((z) => (
                     <option key={z} value={z}>
-                      Zoom {z} {z <= 10 ? '(Regional)' : z <= 13 ? '(Local)' : '(Detalhe)'}
+                      Zoom {z} {z <= 10 ? '(Visão Regional)' : z <= 13 ? '(Visão Local)' : '(Detalhe Costeiro)'}
                     </option>
                   ))}
                 </select>
@@ -1780,17 +1979,17 @@ function MapRadarTabContent({
           </div>
 
           {/* Coluna 2: Estimativa de Tiles, Trava de 300 Tiles e Progresso de Download */}
-          <div className="lg:col-span-5 flex flex-col justify-between rounded-2xl border border-slate-200 dark:border-slate-800 bg-slate-50/70 dark:bg-slate-950/60 p-4 space-y-4">
+          <div className="lg:col-span-5 flex flex-col justify-between rounded-2xl border border-sky-100 dark:border-slate-800 bg-sky-50/40 dark:bg-slate-950/60 p-4 space-y-4">
             <div className="space-y-3">
               <div className="flex items-center justify-between">
-                <span className="text-xs font-bold uppercase tracking-wider text-slate-500 dark:text-slate-400">
-                  2. Estimativa &amp; Trava de Segurança
+                <span className="text-xs font-bold text-sky-800 dark:text-sky-300">
+                  2. Estimativa de Armazenamento
                 </span>
                 <span
-                  className={`px-2.5 py-1 rounded-lg text-xs font-mono font-bold border ${
+                  className={`px-2.5 py-1 rounded-full text-xs font-mono font-bold border ${
                     tileEstimate.exceedsLimit
-                      ? 'bg-rose-500/15 text-rose-700 dark:text-rose-300 border-rose-500/40'
-                      : 'bg-emerald-500/15 text-emerald-700 dark:text-emerald-300 border-emerald-500/40'
+                      ? 'bg-rose-50 text-rose-700 dark:bg-rose-950 dark:text-rose-300 border-rose-200'
+                      : 'bg-emerald-50 text-emerald-700 dark:bg-emerald-950 dark:text-emerald-300 border-emerald-200'
                   }`}
                 >
                   {tileEstimate.totalTiles} / {MAX_OFFLINE_TILES_PER_MISSION} tiles
@@ -1798,14 +1997,14 @@ function MapRadarTabContent({
               </div>
 
               {/* Barra visual de ocupação do limite de 300 tiles */}
-              <div className="w-full h-2.5 rounded-full bg-slate-200 dark:bg-slate-800 overflow-hidden">
+              <div className="w-full h-2.5 rounded-full bg-sky-100 dark:bg-slate-800 overflow-hidden">
                 <div
                   className={`h-full transition-all duration-200 ${
                     tileEstimate.exceedsLimit
                       ? 'bg-rose-500'
                       : tileEstimate.totalTiles > 220
                         ? 'bg-amber-500'
-                        : 'bg-emerald-500'
+                        : 'bg-sky-600'
                   }`}
                   style={{
                     width: `${Math.min(
@@ -1824,7 +2023,7 @@ function MapRadarTabContent({
                 {tileEstimate.byZoom.map((item) => (
                   <span
                     key={item.zoom}
-                    className="px-2 py-0.5 rounded bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 text-[11px] font-mono text-slate-700 dark:text-slate-300"
+                    className="px-2 py-0.5 rounded-lg bg-white dark:bg-slate-900 border border-sky-200/80 dark:border-slate-800 text-[11px] font-mono text-sky-900 dark:text-slate-300"
                   >
                     Z{item.zoom}: <strong>{item.count}</strong>
                   </span>
@@ -1835,7 +2034,7 @@ function MapRadarTabContent({
               {tileEstimate.exceedsLimit && (
                 <div
                   role="alert"
-                  className="rounded-xl border border-rose-500/40 bg-rose-500/10 p-3 flex items-start gap-2.5 text-xs text-rose-800 dark:text-rose-200"
+                  className="rounded-xl border border-rose-200 bg-rose-50/90 dark:bg-rose-950/40 p-3 flex items-start gap-2.5 text-xs text-rose-800 dark:text-rose-200"
                 >
                   <ShieldAlert
                     className="w-5 h-5 text-rose-500 shrink-0 mt-0.5"
@@ -1847,7 +2046,7 @@ function MapRadarTabContent({
                       {tileEstimate.totalTiles} estimados)
                     </strong>
                     <span>
-                      Reduza o raio da área ou diminua o Zoom Máximo para liberar o
+                      Escolha um raio menor ou reduza o Zoom Máximo para habilitar o
                       download offline.
                     </span>
                   </div>
@@ -1856,12 +2055,12 @@ function MapRadarTabContent({
 
               {/* Barra de Progresso do Download em Tempo Real */}
               {downloadProgress && (
-                <div className="rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 p-3 space-y-2">
+                <div className="rounded-xl border border-sky-200 dark:border-slate-800 bg-white dark:bg-slate-900 p-3 space-y-2">
                   <div className="flex items-center justify-between text-xs">
                     <span className="font-semibold flex items-center gap-1.5 text-slate-800 dark:text-slate-200">
                       {downloadProgress.status === 'downloading' && (
                         <RefreshCw
-                          className="w-3.5 h-3.5 animate-spin text-sky-500"
+                          className="w-3.5 h-3.5 animate-spin text-sky-600"
                           aria-hidden="true"
                         />
                       )}
@@ -1885,31 +2084,31 @@ function MapRadarTabContent({
                       )}
                       <span>
                         {downloadProgress.status === 'downloading'
-                          ? 'Baixando tiles (máx 4 simultâneos)...'
+                          ? 'Salvando tiles offline...'
                           : downloadProgress.status === 'completed'
-                            ? 'Download finalizado'
+                            ? 'Mapa salvo com sucesso'
                             : downloadProgress.status === 'cancelled'
                               ? 'Download cancelado'
                               : 'Falha no download'}
                       </span>
                     </span>
-                    <span className="font-mono font-bold text-slate-900 dark:text-white">
+                    <span className="font-mono font-bold text-sky-900 dark:text-white">
                       {downloadProgress.completedTiles}/{downloadProgress.totalTiles}{' '}
                       ({progressPct}%)
                     </span>
                   </div>
 
-                  <div className="w-full h-2 rounded-full bg-slate-200 dark:bg-slate-800 overflow-hidden">
+                  <div className="w-full h-2 rounded-full bg-sky-100 dark:bg-slate-800 overflow-hidden">
                     <div
-                      className="h-full bg-sky-500 transition-all duration-150"
+                      className="h-full bg-sky-600 transition-all duration-150"
                       style={{ width: `${progressPct}%` }}
                     />
                   </div>
 
                   {downloadProgress.failedTiles > 0 && (
                     <p className="text-[11px] text-amber-600 dark:text-amber-400">
-                      {downloadProgress.failedTiles} tile(s) falharam por rede/CORS e
-                      foram ignorados com segurança.
+                      {downloadProgress.failedTiles} tile(s) ignorados por oscilação de
+                      rede.
                     </p>
                   )}
                   {downloadProgress.errorMessage && (
@@ -1931,13 +2130,13 @@ function MapRadarTabContent({
                   tileEstimate.exceedsLimit ||
                   tileEstimate.totalTiles === 0
                 }
-                className="flex-1 min-h-[44px] min-w-[44px] px-4 py-2.5 rounded-xl text-xs sm:text-sm font-bold inline-flex items-center justify-center gap-2 bg-emerald-600 hover:bg-emerald-500 disabled:opacity-45 disabled:cursor-not-allowed text-white shadow-sm transition-colors"
+                className="flex-1 min-h-[44px] min-w-[44px] px-4 py-2.5 rounded-xl text-xs sm:text-sm font-bold inline-flex items-center justify-center gap-2 bg-sky-600 hover:bg-sky-500 disabled:opacity-45 disabled:cursor-not-allowed text-white shadow-sm transition-colors"
               >
                 <Download className="w-4 h-4" aria-hidden="true" />
                 <span>
                   {isDownloadingTiles
-                    ? 'Baixando Missão...'
-                    : `Baixar ${tileEstimate.totalTiles} Tiles (${isDark ? 'Escuro' : 'Claro'})`}
+                    ? 'Salvando Mapa Offline...'
+                    : `Salvar ${tileEstimate.totalTiles} Tiles Offline`}
                 </span>
               </button>
 
@@ -1965,7 +2164,7 @@ function MapRadarTabContent({
 export function MapRadarTab(props: MapRadarTabProps): React.ReactElement {
   return (
     <ModuleErrorBoundary
-      moduleName="Aba Mapa Interativo, Radar RainViewer & Cache Offline"
+      moduleName="Aba Mapa Interativo, Pin Estilo Windy & Radar"
       fallbackDescription="Falha isolada no motor cartográfico Leaflet ou camada de radar. As abas Previsão e Campo & Dados continuam operacionais."
       onErrorLog={props.onErrorLog}
     >
