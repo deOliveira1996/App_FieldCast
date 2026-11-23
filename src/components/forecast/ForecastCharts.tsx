@@ -18,6 +18,13 @@ import type {
   NormalizedForecast,
   WeatherModelId,
 } from '../../types/weather';
+import { formatLocalHourBadge, useCurrentLocalHourIndex } from '../../utils/localTimeHour';
+import {
+  getSharedModelsForVariable,
+  MODEL_COLORS,
+  MODEL_DISPLAY_LABELS,
+  MODEL_SHORT_LABELS,
+} from '../../utils/modelComparison';
 import { HelpPopover } from '../common/HelpPopover';
 import type { ForecastHorizonHours } from './ModelSelectorBar';
 import {
@@ -40,16 +47,14 @@ export interface ForecastChartsProps {
   showInterpolatedProfile: boolean;
   horizonHours: ForecastHorizonHours;
   selectedHourIndex: number;
+  currentHourIndex?: number;
   onSelectHourIndex?: (index: number) => void;
+  onResetToCurrentHour?: () => void;
   isDark?: boolean;
   visibleParams?: ForecastVisibleParams;
 }
 
-const MODEL_LABELS: Record<WeatherModelId, string> = {
-  ecmwf_ifs025: 'ECMWF IFS 0.25°',
-  gfs_seamless: 'NOAA GFS',
-  icon_seamless: 'DWD ICON',
-};
+const MODEL_LABELS: Record<WeatherModelId, string> = MODEL_DISPLAY_LABELS;
 
 function formatAxisHour(timestampUnix: number, timezone: string): string {
   try {
@@ -81,13 +86,40 @@ function roundOrNull(val: number | null | undefined, decimals = 1): number | nul
   return Math.round(val * factor) / factor;
 }
 
+export function buildCurrentHourMarkLine(xLabel: string, hourBadgeLabel: string) {
+  return {
+    symbol: ['none', 'none'] as [string, string],
+    silent: true,
+    animation: false,
+    lineStyle: {
+      type: 'dashed' as const,
+      color: '#d97706',
+      width: 2,
+    },
+    label: {
+      show: true,
+      position: 'end' as const,
+      formatter: hourBadgeLabel,
+      backgroundColor: '#d97706',
+      color: '#ffffff',
+      fontWeight: 'bold' as const,
+      fontSize: 10,
+      borderRadius: 6,
+      padding: [3, 8],
+    },
+    data: [{ xAxis: xLabel }],
+  };
+}
+
 export const ForecastCharts: React.FC<ForecastChartsProps> = ({
   forecast,
   viewMode,
   showInterpolatedProfile,
   horizonHours,
   selectedHourIndex,
+  currentHourIndex,
   onSelectHourIndex,
+  onResetToCurrentHour,
   isDark = false,
   visibleParams = COMPLETE_VISIBLE_PARAMS,
 }) => {
@@ -104,6 +136,15 @@ export const ForecastCharts: React.FC<ForecastChartsProps> = ({
   );
   const activeHour: EnsembleHour | undefined = slicedHours[safeSelectedIdx];
 
+  const liveCurrentHourIndex = useCurrentLocalHourIndex(
+    currentHourIndex === undefined ? slicedHours : undefined,
+    forecast.timezone,
+  );
+  const resolvedCurrentHourIndex = currentHourIndex ?? liveCurrentHourIndex;
+
+  const isCurrentHourInRange =
+    resolvedCurrentHourIndex >= 0 && resolvedCurrentHourIndex < slicedHours.length;
+
   const textColor = isDark ? '#cbd5e1' : '#475569';
   const gridBorderColor = isDark ? 'rgba(148, 163, 184, 0.14)' : 'rgba(148, 163, 184, 0.22)';
   const tooltipBg = isDark ? 'rgba(15, 23, 42, 0.96)' : 'rgba(255, 255, 255, 0.98)';
@@ -115,15 +156,30 @@ export const ForecastCharts: React.FC<ForecastChartsProps> = ({
     [slicedHours, forecast.timezone],
   );
 
+  const currentHourXLabel = isCurrentHourInRange ? xLabels[resolvedCurrentHourIndex] : undefined;
+  const currentHourBadge =
+    isCurrentHourInRange && slicedHours[resolvedCurrentHourIndex]
+      ? formatLocalHourBadge(slicedHours[resolvedCurrentHourIndex]!.timestampUnix, forecast.timezone)
+      : undefined;
+
+  const currentHourMarkLine = useMemo(
+    () =>
+      currentHourXLabel && currentHourBadge
+        ? buildCurrentHourMarkLine(currentHourXLabel, currentHourBadge)
+        : undefined,
+    [currentHourXLabel, currentHourBadge],
+  );
+
   const includeAltitudeInWindChart =
     visibleParams.verticalProfile || focusTab === 'vertical';
 
+  const isNativeModel =
+    viewMode === 'ecmwf_ifs025' || viewMode === 'gfs_seamless' || viewMode === 'icon_seamless';
+
   // 1A. Hourly Wind & Gusts Time-Series Chart Option
   const windTimeSeriesOption: EChartsOption = useMemo(() => {
-    const isNativeModel =
-      viewMode === 'ecmwf_ifs025' || viewMode === 'gfs_seamless' || viewMode === 'icon_seamless';
     const nativeHours: NativeModelHour[] = isNativeModel
-      ? (forecast.nativeByModel[viewMode] ?? []).slice(0, horizonHours)
+      ? (forecast.nativeByModel[viewMode] ?? []).slice(0, slicedHours.length)
       : [];
 
     const series: NonNullable<EChartsOption['series']> = [];
@@ -169,6 +225,7 @@ export const ForecastCharts: React.FC<ForecastChartsProps> = ({
           lineStyle: { width: 2.5, color: '#0080cd' },
           itemStyle: { color: '#0080cd' },
           data: slicedHours.map((h) => roundOrNull(h.windSpeed10m.mean)),
+          markLine: currentHourMarkLine,
         },
         {
           name: 'Rajadas 10m (km/h)',
@@ -213,48 +270,73 @@ export const ForecastCharts: React.FC<ForecastChartsProps> = ({
         );
       }
     } else if (viewMode === 'spaghetti') {
-      const ecmwf = (forecast.nativeByModel.ecmwf_ifs025 ?? []).slice(0, horizonHours);
-      const gfs = (forecast.nativeByModel.gfs_seamless ?? []).slice(0, horizonHours);
-      const icon = (forecast.nativeByModel.icon_seamless ?? []).slice(0, horizonHours);
+      const windModels = getSharedModelsForVariable(forecast, 'windSpeed10m', slicedHours.length);
+      const gustModels = getSharedModelsForVariable(forecast, 'windGusts10m', slicedHours.length);
 
-      series.push(
-        {
-          name: 'ECMWF 10m',
+      const activeWindModels = windModels.length >= 2 ? windModels : [];
+      for (const modelId of activeWindModels) {
+        const list = (forecast.nativeByModel[modelId] ?? []).slice(0, slicedHours.length);
+        series.push({
+          name: `${MODEL_SHORT_LABELS[modelId]} Vento 10m`,
           type: 'line',
           smooth: true,
           symbol: 'none',
-          lineStyle: { width: 2, color: '#0080cd' },
-          itemStyle: { color: '#0080cd' },
-          data: ecmwf.map((h) => roundOrNull(h.windSpeed10m)),
-        },
-        {
-          name: 'GFS 10m',
-          type: 'line',
-          smooth: true,
-          symbol: 'none',
-          lineStyle: { width: 2, color: '#10b981' },
-          itemStyle: { color: '#10b981' },
-          data: gfs.map((h) => roundOrNull(h.windSpeed10m)),
-        },
-        {
-          name: 'ICON 10m',
-          type: 'line',
-          smooth: true,
-          symbol: 'none',
-          lineStyle: { width: 2, color: '#6366f1' },
-          itemStyle: { color: '#6366f1' },
-          data: icon.map((h) => roundOrNull(h.windSpeed10m)),
-        },
-        {
-          name: 'Consenso FieldCast 10m',
-          type: 'line',
-          smooth: true,
-          symbol: 'none',
-          lineStyle: { width: 2.5, type: 'dotted', color: '#f97316' },
-          itemStyle: { color: '#f97316' },
-          data: slicedHours.map((h) => roundOrNull(h.windSpeed10m.mean)),
-        },
-      );
+          lineStyle: { width: 2, color: MODEL_COLORS[modelId] },
+          itemStyle: { color: MODEL_COLORS[modelId] },
+          data: list.map((h) => roundOrNull(h.windSpeed10m)),
+        });
+      }
+
+      if (gustModels.length >= 2) {
+        for (const modelId of gustModels) {
+          const list = (forecast.nativeByModel[modelId] ?? []).slice(0, slicedHours.length);
+          series.push({
+            name: `${MODEL_SHORT_LABELS[modelId]} Rajada 10m`,
+            type: 'line',
+            smooth: true,
+            symbol: 'none',
+            lineStyle: { width: 1.5, type: 'dashed', color: MODEL_COLORS[modelId] },
+            itemStyle: { color: MODEL_COLORS[modelId] },
+            data: list.map((h) => roundOrNull(h.windGusts10m)),
+          });
+        }
+      }
+
+      if (includeAltitudeInWindChart) {
+        const altFields = [
+          { id: 'windSpeed80m' as const, label: '80m' },
+          { id: 'windSpeed100m' as const, label: '100m' },
+          { id: 'windSpeed120m' as const, label: '120m' },
+        ];
+        for (const alt of altFields) {
+          const models = getSharedModelsForVariable(forecast, alt.id, slicedHours.length);
+          if (models.length >= 2) {
+            for (const modelId of models) {
+              const list = (forecast.nativeByModel[modelId] ?? []).slice(0, slicedHours.length);
+              series.push({
+                name: `${MODEL_SHORT_LABELS[modelId]} ${alt.label}`,
+                type: 'line',
+                smooth: true,
+                symbol: 'none',
+                lineStyle: { width: 1.3, type: 'dotted', color: MODEL_COLORS[modelId] },
+                itemStyle: { color: MODEL_COLORS[modelId] },
+                data: list.map((h) => roundOrNull(h[alt.id])),
+              });
+            }
+          }
+        }
+      }
+
+      series.push({
+        name: 'Consenso FieldCast 10m',
+        type: 'line',
+        smooth: true,
+        symbol: 'none',
+        lineStyle: { width: 2.5, type: 'dotted', color: '#f97316' },
+        itemStyle: { color: '#f97316' },
+        data: slicedHours.map((h) => roundOrNull(h.windSpeed10m.mean)),
+        markLine: currentHourMarkLine,
+      });
     } else if (isNativeModel) {
       const label = MODEL_LABELS[viewMode];
       series.push(
@@ -266,6 +348,7 @@ export const ForecastCharts: React.FC<ForecastChartsProps> = ({
           lineStyle: { width: 2.5, color: '#0080cd' },
           itemStyle: { color: '#0080cd' },
           data: nativeHours.map((h) => roundOrNull(h.windSpeed10m)),
+          markLine: currentHourMarkLine,
         },
         {
           name: `${label} Rajadas 10m`,
@@ -279,7 +362,18 @@ export const ForecastCharts: React.FC<ForecastChartsProps> = ({
       );
 
       if (includeAltitudeInWindChart) {
-        if (viewMode === 'ecmwf_ifs025') {
+        if (nativeHours.some((h) => h.windSpeed80m !== null)) {
+          series.push({
+            name: `${label} Vento 80m`,
+            type: 'line',
+            smooth: true,
+            symbol: 'none',
+            lineStyle: { width: 1.8, color: '#38bdf8' },
+            itemStyle: { color: '#38bdf8' },
+            data: nativeHours.map((h) => roundOrNull(h.windSpeed80m)),
+          });
+        }
+        if (nativeHours.some((h) => h.windSpeed100m !== null)) {
           series.push({
             name: `${label} Vento 100m`,
             type: 'line',
@@ -289,27 +383,17 @@ export const ForecastCharts: React.FC<ForecastChartsProps> = ({
             itemStyle: { color: '#6366f1' },
             data: nativeHours.map((h) => roundOrNull(h.windSpeed100m)),
           });
-        } else {
-          series.push(
-            {
-              name: `${label} Vento 80m`,
-              type: 'line',
-              smooth: true,
-              symbol: 'none',
-              lineStyle: { width: 1.8, color: '#38bdf8' },
-              itemStyle: { color: '#38bdf8' },
-              data: nativeHours.map((h) => roundOrNull(h.windSpeed80m)),
-            },
-            {
-              name: `${label} Vento 120m`,
-              type: 'line',
-              smooth: true,
-              symbol: 'none',
-              lineStyle: { width: 1.8, color: '#0d9488' },
-              itemStyle: { color: '#0d9488' },
-              data: nativeHours.map((h) => roundOrNull(h.windSpeed120m)),
-            },
-          );
+        }
+        if (nativeHours.some((h) => h.windSpeed120m !== null)) {
+          series.push({
+            name: `${label} Vento 120m`,
+            type: 'line',
+            smooth: true,
+            symbol: 'none',
+            lineStyle: { width: 1.8, color: '#0d9488' },
+            itemStyle: { color: '#0d9488' },
+            data: nativeHours.map((h) => roundOrNull(h.windSpeed120m)),
+          });
         }
       }
     }
@@ -323,19 +407,21 @@ export const ForecastCharts: React.FC<ForecastChartsProps> = ({
         textStyle: { color: tooltipText, fontSize: 12 },
       },
       legend: {
+        type: 'scroll',
         top: 0,
         textStyle: { color: textColor, fontSize: 11 },
       },
       grid: {
-        top: 38,
-        left: 44,
-        right: 18,
-        bottom: 36,
+        top: 56,
+        left: 16,
+        right: 20,
+        bottom: 24,
+        containLabel: true,
       },
       xAxis: {
         type: 'category',
         data: xLabels,
-        axisLabel: { color: textColor, fontSize: 10 },
+        axisLabel: { color: textColor, fontSize: 10, hideOverlap: true },
         axisLine: { lineStyle: { color: gridBorderColor } },
       },
       yAxis: {
@@ -349,11 +435,12 @@ export const ForecastCharts: React.FC<ForecastChartsProps> = ({
     };
   }, [
     viewMode,
-    forecast.nativeByModel,
-    horizonHours,
+    isNativeModel,
+    forecast,
     slicedHours,
     isDark,
     includeAltitudeInWindChart,
+    currentHourMarkLine,
     tooltipBg,
     tooltipBorder,
     tooltipText,
@@ -362,40 +449,81 @@ export const ForecastCharts: React.FC<ForecastChartsProps> = ({
     gridBorderColor,
   ]);
 
-  // 1B. Temperature & Dew Point Chart Option (Climatempo style)
-  const temperatureOption: EChartsOption = useMemo(
-    () => ({
-      backgroundColor: 'transparent',
-      tooltip: {
-        trigger: 'axis',
-        backgroundColor: tooltipBg,
-        borderColor: tooltipBorder,
-        textStyle: { color: tooltipText, fontSize: 12 },
-      },
-      legend: {
-        top: 0,
-        textStyle: { color: textColor, fontSize: 11 },
-      },
-      grid: {
-        top: 38,
-        left: 44,
-        right: 18,
-        bottom: 36,
-      },
-      xAxis: {
-        type: 'category',
-        data: xLabels,
-        axisLabel: { color: textColor, fontSize: 10 },
-        axisLine: { lineStyle: { color: gridBorderColor } },
-      },
-      yAxis: {
-        type: 'value',
-        name: '°C',
-        nameTextStyle: { color: textColor, fontSize: 11 },
-        axisLabel: { color: textColor, fontSize: 10, formatter: '{value}°' },
-        splitLine: { lineStyle: { color: gridBorderColor } },
-      },
-      series: [
+  // 1B. Temperature & Dew Point Chart Option (supports FieldCast, Native, and Spaghetti)
+  const temperatureOption: EChartsOption = useMemo(() => {
+    const series: NonNullable<EChartsOption['series']> = [];
+
+    if (viewMode === 'spaghetti') {
+      const tempModels = getSharedModelsForVariable(forecast, 'temperature2m', slicedHours.length);
+      const dewModels = getSharedModelsForVariable(forecast, 'dewPoint2m', slicedHours.length);
+
+      if (tempModels.length >= 2) {
+        for (const modelId of tempModels) {
+          const list = (forecast.nativeByModel[modelId] ?? []).slice(0, slicedHours.length);
+          series.push({
+            name: `${MODEL_SHORT_LABELS[modelId]} Temp 2m`,
+            type: 'line',
+            smooth: true,
+            symbol: 'none',
+            lineStyle: { width: 2, color: MODEL_COLORS[modelId] },
+            itemStyle: { color: MODEL_COLORS[modelId] },
+            data: list.map((h) => roundOrNull(h.temperature2m, 1)),
+          });
+        }
+      }
+
+      if (dewModels.length >= 2) {
+        for (const modelId of dewModels) {
+          const list = (forecast.nativeByModel[modelId] ?? []).slice(0, slicedHours.length);
+          series.push({
+            name: `${MODEL_SHORT_LABELS[modelId]} Orvalho 2m`,
+            type: 'line',
+            smooth: true,
+            symbol: 'none',
+            lineStyle: { width: 1.5, type: 'dashed', color: MODEL_COLORS[modelId] },
+            itemStyle: { color: MODEL_COLORS[modelId] },
+            data: list.map((h) => roundOrNull(h.dewPoint2m, 1)),
+          });
+        }
+      }
+
+      series.push({
+        name: 'Consenso Temp 2m (°C)',
+        type: 'line',
+        smooth: true,
+        symbol: 'none',
+        lineStyle: { width: 2.5, type: 'dotted', color: '#f97316' },
+        itemStyle: { color: '#f97316' },
+        data: slicedHours.map((h) => roundOrNull(h.temperature2mC.mean, 1)),
+      });
+    } else if (isNativeModel) {
+      const label = MODEL_LABELS[viewMode];
+      const nativeHours = (forecast.nativeByModel[viewMode] ?? []).slice(0, slicedHours.length);
+      series.push(
+        {
+          name: `${label} Temperatura (2m °C)`,
+          type: 'line',
+          smooth: true,
+          symbol: 'none',
+          areaStyle: {
+            color: isDark ? 'rgba(249, 115, 22, 0.16)' : 'rgba(249, 115, 22, 0.12)',
+          },
+          lineStyle: { width: 2.5, color: '#f97316' },
+          itemStyle: { color: '#f97316' },
+          data: nativeHours.map((h) => roundOrNull(h.temperature2m, 1)),
+        },
+        {
+          name: `${label} Ponto de Orvalho (°C)`,
+          type: 'line',
+          smooth: true,
+          symbol: 'none',
+          lineStyle: { width: 2, type: 'dashed', color: '#0080cd' },
+          itemStyle: { color: '#0080cd' },
+          data: nativeHours.map((h) => roundOrNull(h.dewPoint2m, 1)),
+        },
+      );
+    } else {
+      series.push(
         {
           name: 'Temperatura (2m °C)',
           type: 'line',
@@ -417,10 +545,63 @@ export const ForecastCharts: React.FC<ForecastChartsProps> = ({
           itemStyle: { color: '#0080cd' },
           data: slicedHours.map((h) => roundOrNull(h.dewPoint2mC.mean, 1)),
         },
-      ],
-    }),
-    [slicedHours, isDark, tooltipBg, tooltipBorder, tooltipText, textColor, xLabels, gridBorderColor],
-  );
+      );
+    }
+
+    if (series[0] && currentHourMarkLine) {
+      (series[0] as { markLine?: ReturnType<typeof buildCurrentHourMarkLine> }).markLine =
+        currentHourMarkLine;
+    }
+
+    return {
+      backgroundColor: 'transparent',
+      tooltip: {
+        trigger: 'axis',
+        backgroundColor: tooltipBg,
+        borderColor: tooltipBorder,
+        textStyle: { color: tooltipText, fontSize: 12 },
+      },
+      legend: {
+        type: 'scroll',
+        top: 0,
+        textStyle: { color: textColor, fontSize: 11 },
+      },
+      grid: {
+        top: 56,
+        left: 16,
+        right: 20,
+        bottom: 24,
+        containLabel: true,
+      },
+      xAxis: {
+        type: 'category',
+        data: xLabels,
+        axisLabel: { color: textColor, fontSize: 10, hideOverlap: true },
+        axisLine: { lineStyle: { color: gridBorderColor } },
+      },
+      yAxis: {
+        type: 'value',
+        name: '°C',
+        nameTextStyle: { color: textColor, fontSize: 11 },
+        axisLabel: { color: textColor, fontSize: 10, formatter: '{value}°' },
+        splitLine: { lineStyle: { color: gridBorderColor } },
+      },
+      series,
+    };
+  }, [
+    viewMode,
+    isNativeModel,
+    forecast,
+    slicedHours,
+    isDark,
+    currentHourMarkLine,
+    tooltipBg,
+    tooltipBorder,
+    tooltipText,
+    textColor,
+    xLabels,
+    gridBorderColor,
+  ]);
 
   // 1C. Vertical Wind Profile (0-120m) Option for Selected Hour
   const verticalProfileOption: EChartsOption = useMemo(() => {
@@ -471,14 +652,16 @@ export const ForecastCharts: React.FC<ForecastChartsProps> = ({
         textStyle: { color: tooltipText, fontSize: 12 },
       },
       legend: {
+        type: 'scroll',
         top: 0,
         textStyle: { color: textColor, fontSize: 11 },
       },
       grid: {
-        top: 38,
-        left: 52,
+        top: 48,
+        left: 16,
         right: 22,
-        bottom: 36,
+        bottom: 24,
+        containLabel: true,
       },
       xAxis: {
         type: 'value',
@@ -524,19 +707,21 @@ export const ForecastCharts: React.FC<ForecastChartsProps> = ({
         textStyle: { color: tooltipText, fontSize: 12 },
       },
       legend: {
+        type: 'scroll',
         top: 0,
         textStyle: { color: textColor, fontSize: 11 },
       },
       grid: {
-        top: 38,
-        left: 44,
-        right: 44,
-        bottom: 36,
+        top: 56,
+        left: 16,
+        right: 20,
+        bottom: 24,
+        containLabel: true,
       },
       xAxis: {
         type: 'category',
         data: xLabels,
-        axisLabel: { color: textColor, fontSize: 10 },
+        axisLabel: { color: textColor, fontSize: 10, hideOverlap: true },
         axisLine: { lineStyle: { color: gridBorderColor } },
       },
       yAxis: [
@@ -567,6 +752,7 @@ export const ForecastCharts: React.FC<ForecastChartsProps> = ({
           lineStyle: { width: 2.5, color: '#0080cd' },
           itemStyle: { color: '#0080cd' },
           data: slicedHours.map((h) => roundOrNull(h.marine?.waveHeight, 2)),
+          markLine: currentHourMarkLine,
         },
         {
           name: 'Ondulação Swell (m)',
@@ -599,59 +785,110 @@ export const ForecastCharts: React.FC<ForecastChartsProps> = ({
     gridBorderColor,
     isDark,
     slicedHours,
+    currentHourMarkLine,
   ]);
 
-  // 3. Precipitation (mm/h) & Surface Pressure (hPa)
+  // 3. Precipitation (mm/h) & Surface Pressure (hPa) (supports FieldCast, Native, and Spaghetti)
   const precipPressureOption: EChartsOption = useMemo(() => {
-    const pressures = slicedHours
-      .map((h) => h.surfacePressureHpa.mean)
-      .filter((v): v is number => v !== null);
-    const minP = pressures.length > 0 ? Math.floor(Math.min(...pressures) - 3) : 995;
-    const maxP = pressures.length > 0 ? Math.ceil(Math.max(...pressures) + 3) : 1030;
+    const allPressures: number[] = [];
+    const series: NonNullable<EChartsOption['series']> = [];
 
-    return {
-      backgroundColor: 'transparent',
-      tooltip: {
-        trigger: 'axis',
-        backgroundColor: tooltipBg,
-        borderColor: tooltipBorder,
-        textStyle: { color: tooltipText, fontSize: 12 },
-      },
-      legend: {
-        top: 0,
-        textStyle: { color: textColor, fontSize: 11 },
-      },
-      grid: {
-        top: 38,
-        left: 44,
-        right: 52,
-        bottom: 36,
-      },
-      xAxis: {
-        type: 'category',
-        data: xLabels,
-        axisLabel: { color: textColor, fontSize: 10 },
-        axisLine: { lineStyle: { color: gridBorderColor } },
-      },
-      yAxis: [
-        {
-          type: 'value',
+    if (viewMode === 'spaghetti') {
+      const precipModels = getSharedModelsForVariable(forecast, 'precipitation', slicedHours.length);
+      const pressureModels = getSharedModelsForVariable(
+        forecast,
+        'surfacePressure',
+        slicedHours.length,
+      );
+
+      if (precipModels.length >= 2) {
+        for (const modelId of precipModels) {
+          const list = (forecast.nativeByModel[modelId] ?? []).slice(0, slicedHours.length);
+          series.push({
+            name: `${MODEL_SHORT_LABELS[modelId]} Chuva (mm/h)`,
+            type: 'bar',
+            itemStyle: { color: MODEL_COLORS[modelId], borderRadius: [3, 3, 0, 0] },
+            data: list.map((h) => roundOrNull(h.precipitation, 2)),
+          });
+        }
+      } else {
+        series.push({
           name: 'Chuva (mm/h)',
-          nameTextStyle: { color: textColor, fontSize: 11 },
-          axisLabel: { color: textColor, fontSize: 10 },
-          splitLine: { lineStyle: { color: gridBorderColor } },
+          type: 'bar',
+          itemStyle: { color: '#38bdf8', borderRadius: [4, 4, 0, 0] },
+          data: slicedHours.map((h) => roundOrNull(h.precipitationMm.mean, 2)),
+        });
+      }
+
+      if (pressureModels.length >= 2) {
+        for (const modelId of pressureModels) {
+          const list = (forecast.nativeByModel[modelId] ?? []).slice(0, slicedHours.length);
+          for (const h of list) {
+            if (typeof h.surfacePressure === 'number' && Number.isFinite(h.surfacePressure)) {
+              allPressures.push(h.surfacePressure);
+            }
+          }
+          series.push({
+            name: `${MODEL_SHORT_LABELS[modelId]} Pressão (hPa)`,
+            type: 'line',
+            yAxisIndex: 1,
+            smooth: true,
+            symbol: 'none',
+            lineStyle: { width: 1.8, color: MODEL_COLORS[modelId] },
+            itemStyle: { color: MODEL_COLORS[modelId] },
+            data: list.map((h) => roundOrNull(h.surfacePressure, 1)),
+          });
+        }
+      }
+
+      for (const h of slicedHours) {
+        if (h.surfacePressureHpa.mean !== null) {
+          allPressures.push(h.surfacePressureHpa.mean);
+        }
+      }
+      series.push({
+        name: 'Consenso Pressão (hPa)',
+        type: 'line',
+        yAxisIndex: 1,
+        smooth: true,
+        symbol: 'none',
+        lineStyle: { width: 2.2, type: 'dotted', color: '#0d9488' },
+        itemStyle: { color: '#0d9488' },
+        data: slicedHours.map((h) => roundOrNull(h.surfacePressureHpa.mean, 1)),
+      });
+    } else if (isNativeModel) {
+      const label = MODEL_LABELS[viewMode];
+      const nativeHours = (forecast.nativeByModel[viewMode] ?? []).slice(0, slicedHours.length);
+      for (const h of nativeHours) {
+        if (typeof h.surfacePressure === 'number' && Number.isFinite(h.surfacePressure)) {
+          allPressures.push(h.surfacePressure);
+        }
+      }
+      series.push(
+        {
+          name: `${label} Chuva (mm/h)`,
+          type: 'bar',
+          itemStyle: { color: '#38bdf8', borderRadius: [4, 4, 0, 0] },
+          data: nativeHours.map((h) => roundOrNull(h.precipitation, 2)),
         },
         {
-          type: 'value',
-          name: 'Pressão (hPa)',
-          min: minP,
-          max: maxP,
-          nameTextStyle: { color: textColor, fontSize: 11 },
-          axisLabel: { color: textColor, fontSize: 10 },
-          splitLine: { show: false },
+          name: `${label} Pressão (hPa)`,
+          type: 'line',
+          yAxisIndex: 1,
+          smooth: true,
+          symbol: 'none',
+          lineStyle: { width: 2.2, color: '#0d9488' },
+          itemStyle: { color: '#0d9488' },
+          data: nativeHours.map((h) => roundOrNull(h.surfacePressure, 1)),
         },
-      ],
-      series: [
+      );
+    } else {
+      for (const h of slicedHours) {
+        if (h.surfacePressureHpa.mean !== null) {
+          allPressures.push(h.surfacePressureHpa.mean);
+        }
+      }
+      series.push(
         {
           name: 'Chuva (mm/h)',
           type: 'bar',
@@ -676,13 +913,18 @@ export const ForecastCharts: React.FC<ForecastChartsProps> = ({
           itemStyle: { color: '#0d9488' },
           data: slicedHours.map((h) => roundOrNull(h.surfacePressureHpa.mean, 1)),
         },
-      ],
-    };
-  }, [slicedHours, tooltipBg, tooltipBorder, tooltipText, textColor, xLabels, gridBorderColor]);
+      );
+    }
 
-  // 4. Stratified Cloud Cover (Baixa, Média e Alta — %)
-  const cloudCoverOption: EChartsOption = useMemo(
-    () => ({
+    if (series[0] && currentHourMarkLine) {
+      (series[0] as { markLine?: ReturnType<typeof buildCurrentHourMarkLine> }).markLine =
+        currentHourMarkLine;
+    }
+
+    const minP = allPressures.length > 0 ? Math.floor(Math.min(...allPressures) - 3) : 995;
+    const maxP = allPressures.length > 0 ? Math.ceil(Math.max(...allPressures) + 3) : 1030;
+
+    return {
       backgroundColor: 'transparent',
       tooltip: {
         trigger: 'axis',
@@ -691,31 +933,159 @@ export const ForecastCharts: React.FC<ForecastChartsProps> = ({
         textStyle: { color: tooltipText, fontSize: 12 },
       },
       legend: {
+        type: 'scroll',
         top: 0,
         textStyle: { color: textColor, fontSize: 11 },
       },
       grid: {
-        top: 38,
-        left: 44,
-        right: 18,
-        bottom: 36,
+        top: 56,
+        left: 16,
+        right: 20,
+        bottom: 24,
+        containLabel: true,
       },
       xAxis: {
         type: 'category',
         data: xLabels,
-        axisLabel: { color: textColor, fontSize: 10 },
+        axisLabel: { color: textColor, fontSize: 10, hideOverlap: true },
         axisLine: { lineStyle: { color: gridBorderColor } },
       },
-      yAxis: {
-        type: 'value',
-        name: '% Nuvens',
-        min: 0,
-        max: 100,
-        nameTextStyle: { color: textColor, fontSize: 11 },
-        axisLabel: { color: textColor, fontSize: 10, formatter: '{value}%' },
-        splitLine: { lineStyle: { color: gridBorderColor } },
-      },
-      series: [
+      yAxis: [
+        {
+          type: 'value',
+          name: 'Chuva (mm/h)',
+          nameTextStyle: { color: textColor, fontSize: 11 },
+          axisLabel: { color: textColor, fontSize: 10 },
+          splitLine: { lineStyle: { color: gridBorderColor } },
+        },
+        {
+          type: 'value',
+          name: 'Pressão (hPa)',
+          min: minP,
+          max: maxP,
+          nameTextStyle: { color: textColor, fontSize: 11 },
+          axisLabel: { color: textColor, fontSize: 10 },
+          splitLine: { show: false },
+        },
+      ],
+      series,
+    };
+  }, [
+    viewMode,
+    isNativeModel,
+    forecast,
+    slicedHours,
+    currentHourMarkLine,
+    tooltipBg,
+    tooltipBorder,
+    tooltipText,
+    textColor,
+    xLabels,
+    gridBorderColor,
+  ]);
+
+  // 4. Stratified Cloud Cover (Baixa, Média e Alta — %) (supports FieldCast, Native, and Spaghetti)
+  const cloudCoverOption: EChartsOption = useMemo(() => {
+    const series: NonNullable<EChartsOption['series']> = [];
+
+    if (viewMode === 'spaghetti') {
+      const lowModels = getSharedModelsForVariable(forecast, 'cloudCoverLow', slicedHours.length);
+      const midModels = getSharedModelsForVariable(forecast, 'cloudCoverMid', slicedHours.length);
+      const highModels = getSharedModelsForVariable(forecast, 'cloudCoverHigh', slicedHours.length);
+
+      if (lowModels.length >= 2) {
+        for (const modelId of lowModels) {
+          const list = (forecast.nativeByModel[modelId] ?? []).slice(0, slicedHours.length);
+          series.push({
+            name: `${MODEL_SHORT_LABELS[modelId]} Nuvens Baixas`,
+            type: 'line',
+            smooth: true,
+            symbol: 'none',
+            lineStyle: { width: 2, color: MODEL_COLORS[modelId] },
+            itemStyle: { color: MODEL_COLORS[modelId] },
+            data: list.map((h) => roundOrNull(h.cloudCoverLow, 0)),
+          });
+        }
+      }
+
+      if (midModels.length >= 2) {
+        for (const modelId of midModels) {
+          const list = (forecast.nativeByModel[modelId] ?? []).slice(0, slicedHours.length);
+          series.push({
+            name: `${MODEL_SHORT_LABELS[modelId]} Nuvens Médias`,
+            type: 'line',
+            smooth: true,
+            symbol: 'none',
+            lineStyle: { width: 1.6, type: 'dashed', color: MODEL_COLORS[modelId] },
+            itemStyle: { color: MODEL_COLORS[modelId] },
+            data: list.map((h) => roundOrNull(h.cloudCoverMid, 0)),
+          });
+        }
+      }
+
+      if (highModels.length >= 2) {
+        for (const modelId of highModels) {
+          const list = (forecast.nativeByModel[modelId] ?? []).slice(0, slicedHours.length);
+          series.push({
+            name: `${MODEL_SHORT_LABELS[modelId]} Nuvens Altas`,
+            type: 'line',
+            smooth: true,
+            symbol: 'none',
+            lineStyle: { width: 1.3, type: 'dotted', color: MODEL_COLORS[modelId] },
+            itemStyle: { color: MODEL_COLORS[modelId] },
+            data: list.map((h) => roundOrNull(h.cloudCoverHigh, 0)),
+          });
+        }
+      }
+
+      if (series.length === 0) {
+        series.push({
+          name: 'Nuvens Baixas (0–2 km)',
+          type: 'line',
+          smooth: true,
+          symbol: 'none',
+          lineStyle: { width: 2, color: '#64748b' },
+          itemStyle: { color: '#64748b' },
+          data: slicedHours.map((h) => roundOrNull(h.cloudCover.lowPct.mean, 0)),
+        });
+      }
+    } else if (isNativeModel) {
+      const label = MODEL_LABELS[viewMode];
+      const nativeHours = (forecast.nativeByModel[viewMode] ?? []).slice(0, slicedHours.length);
+      series.push(
+        {
+          name: `${label} Nuvens Baixas (0–2 km)`,
+          type: 'line',
+          smooth: true,
+          symbol: 'none',
+          areaStyle: { opacity: 0.16 },
+          lineStyle: { width: 2, color: '#64748b' },
+          itemStyle: { color: '#64748b' },
+          data: nativeHours.map((h) => roundOrNull(h.cloudCoverLow, 0)),
+        },
+        {
+          name: `${label} Nuvens Médias (2–6 km)`,
+          type: 'line',
+          smooth: true,
+          symbol: 'none',
+          areaStyle: { opacity: 0.14 },
+          lineStyle: { width: 2, color: '#0080cd' },
+          itemStyle: { color: '#0080cd' },
+          data: nativeHours.map((h) => roundOrNull(h.cloudCoverMid, 0)),
+        },
+        {
+          name: `${label} Nuvens Altas (> 6 km)`,
+          type: 'line',
+          smooth: true,
+          symbol: 'none',
+          areaStyle: { opacity: 0.1 },
+          lineStyle: { width: 2, color: '#94a3b8' },
+          itemStyle: { color: '#94a3b8' },
+          data: nativeHours.map((h) => roundOrNull(h.cloudCoverHigh, 0)),
+        },
+      );
+    } else {
+      series.push(
         {
           name: 'Nuvens Baixas (0–2 km)',
           type: 'line',
@@ -746,10 +1116,64 @@ export const ForecastCharts: React.FC<ForecastChartsProps> = ({
           itemStyle: { color: '#94a3b8' },
           data: slicedHours.map((h) => roundOrNull(h.cloudCover.highPct.mean, 0)),
         },
-      ],
-    }),
-    [slicedHours, tooltipBg, tooltipBorder, tooltipText, textColor, xLabels, gridBorderColor],
-  );
+      );
+    }
+
+    if (series[0] && currentHourMarkLine) {
+      (series[0] as { markLine?: ReturnType<typeof buildCurrentHourMarkLine> }).markLine =
+        currentHourMarkLine;
+    }
+
+    return {
+      backgroundColor: 'transparent',
+      tooltip: {
+        trigger: 'axis',
+        backgroundColor: tooltipBg,
+        borderColor: tooltipBorder,
+        textStyle: { color: tooltipText, fontSize: 12 },
+      },
+      legend: {
+        type: 'scroll',
+        top: 0,
+        textStyle: { color: textColor, fontSize: 11 },
+      },
+      grid: {
+        top: 56,
+        left: 16,
+        right: 20,
+        bottom: 24,
+        containLabel: true,
+      },
+      xAxis: {
+        type: 'category',
+        data: xLabels,
+        axisLabel: { color: textColor, fontSize: 10, hideOverlap: true },
+        axisLine: { lineStyle: { color: gridBorderColor } },
+      },
+      yAxis: {
+        type: 'value',
+        name: '% Nuvens',
+        min: 0,
+        max: 100,
+        nameTextStyle: { color: textColor, fontSize: 11 },
+        axisLabel: { color: textColor, fontSize: 10, formatter: '{value}%' },
+        splitLine: { lineStyle: { color: gridBorderColor } },
+      },
+      series,
+    };
+  }, [
+    viewMode,
+    isNativeModel,
+    forecast,
+    slicedHours,
+    currentHourMarkLine,
+    tooltipBg,
+    tooltipBorder,
+    tooltipText,
+    textColor,
+    xLabels,
+    gridBorderColor,
+  ]);
 
   const showWindChart =
     focusTab === 'wind' || (focusTab === 'all' && visibleParams.wind10m);
@@ -791,7 +1215,7 @@ export const ForecastCharts: React.FC<ForecastChartsProps> = ({
           </span>
         </div>
 
-        <div className="flex items-center gap-1.5 overflow-x-auto scrollbar-thin pb-0.5">
+        <div className="flex items-center gap-1.5 overflow-x-auto scrollbar-thin pb-0.5 max-w-full">
           {focusTabs.map(({ id, label, Icon }) => {
             const isSelected = focusTab === id;
             return (
@@ -819,6 +1243,9 @@ export const ForecastCharts: React.FC<ForecastChartsProps> = ({
         <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
           {showWindChart && (
             <div
+              data-chart-id="wind"
+              data-current-hour-index={isCurrentHourInRange ? resolvedCurrentHourIndex : ''}
+              data-current-hour-label={currentHourBadge ?? ''}
               className={`${
                 showVerticalChart ? 'lg:col-span-2' : 'lg:col-span-3'
               } rounded-2xl border border-slate-200/90 dark:border-sky-800/70 bg-white dark:bg-[#132a47] p-4 shadow-sm space-y-2`}
@@ -832,7 +1259,7 @@ export const ForecastCharts: React.FC<ForecastChartsProps> = ({
                 </div>
                 <HelpPopover topic="ensemble_vs_native" />
               </div>
-              <div className="h-64 sm:h-72 w-full">
+              <div className="h-72 sm:h-80 w-full">
                 <ReactECharts
                   option={windTimeSeriesOption}
                   style={{ height: '100%', width: '100%' }}
@@ -845,13 +1272,16 @@ export const ForecastCharts: React.FC<ForecastChartsProps> = ({
 
           {showVerticalChart && (
             <div
+              data-chart-id="vertical"
+              data-current-hour-index={isCurrentHourInRange ? resolvedCurrentHourIndex : ''}
+              data-current-hour-label={currentHourBadge ?? ''}
               className={`${
                 showWindChart ? 'lg:col-span-1' : 'lg:col-span-3'
               } rounded-2xl border border-slate-200/90 dark:border-sky-800/70 bg-white dark:bg-[#132a47] p-4 shadow-sm space-y-2 flex flex-col justify-between`}
             >
               <div className="space-y-1.5">
                 <div className="flex items-center justify-between gap-2">
-                  <div className="flex items-center gap-2">
+                  <div className="flex flex-wrap items-center gap-2">
                     <Compass className="w-5 h-5 text-[#0080cd] dark:text-sky-400" aria-hidden="true" />
                     <h3 className="text-sm font-bold text-slate-900 dark:text-white">
                       Perfil Vertical (0–120m)
@@ -861,21 +1291,48 @@ export const ForecastCharts: React.FC<ForecastChartsProps> = ({
                         Estimado
                       </span>
                     )}
+                    {isCurrentHourInRange && currentHourBadge && (
+                      <span
+                        data-testid="vertical-profile-current-badge"
+                        className="px-2 py-0.5 rounded-full text-[10px] font-extrabold bg-amber-100 text-amber-900 dark:bg-amber-950/60 dark:text-amber-200 border border-amber-300 dark:border-amber-700"
+                      >
+                        Agora: {currentHourBadge}
+                      </span>
+                    )}
                   </div>
                   <HelpPopover topic="vertical_profile" />
                 </div>
 
-                <div className="flex items-center justify-between gap-2 text-xs text-slate-600 dark:text-sky-200">
+                <div className="flex flex-wrap items-center justify-between gap-2 text-xs text-slate-600 dark:text-sky-200">
                   <span>
                     Horário: <strong>{xLabels[safeSelectedIdx] ?? 'Agora'}</strong>
                   </span>
-                  <span className="font-mono">
-                    α ={' '}
-                    {activeHour?.verticalProfile.alpha !== null &&
-                    activeHour?.verticalProfile.alpha !== undefined
-                      ? activeHour.verticalProfile.alpha.toFixed(3)
-                      : 'N/A'}
-                  </span>
+                  <div className="flex items-center gap-2">
+                    {isCurrentHourInRange &&
+                      safeSelectedIdx !== resolvedCurrentHourIndex &&
+                      (onSelectHourIndex || onResetToCurrentHour) && (
+                        <button
+                          type="button"
+                          onClick={() => {
+                            if (onResetToCurrentHour) {
+                              onResetToCurrentHour();
+                            } else {
+                              onSelectHourIndex?.(resolvedCurrentHourIndex);
+                            }
+                          }}
+                          className="px-2 py-0.5 rounded-full text-[10px] font-bold bg-amber-500 hover:bg-amber-600 text-slate-950 transition-colors"
+                        >
+                          Ir para Agora
+                        </button>
+                      )}
+                    <span className="font-mono">
+                      α ={' '}
+                      {activeHour?.verticalProfile.alpha !== null &&
+                      activeHour?.verticalProfile.alpha !== undefined
+                        ? activeHour.verticalProfile.alpha.toFixed(3)
+                        : 'N/A'}
+                    </span>
+                  </div>
                 </div>
 
                 {onSelectHourIndex && slicedHours.length > 1 && (
@@ -891,7 +1348,7 @@ export const ForecastCharts: React.FC<ForecastChartsProps> = ({
                 )}
               </div>
 
-              <div className="h-56 sm:h-60 w-full">
+              <div className="h-64 sm:h-72 w-full">
                 <ReactECharts
                   option={verticalProfileOption}
                   style={{ height: '100%', width: '100%' }}
@@ -912,7 +1369,12 @@ export const ForecastCharts: React.FC<ForecastChartsProps> = ({
           } gap-4`}
         >
           {showTempChart && (
-            <div className="rounded-2xl border border-slate-200/90 dark:border-sky-800/70 bg-white dark:bg-[#132a47] p-4 shadow-sm space-y-2">
+            <div
+              data-chart-id="temperature"
+              data-current-hour-index={isCurrentHourInRange ? resolvedCurrentHourIndex : ''}
+              data-current-hour-label={currentHourBadge ?? ''}
+              className="rounded-2xl border border-slate-200/90 dark:border-sky-800/70 bg-white dark:bg-[#132a47] p-4 shadow-sm space-y-2"
+            >
               <div className="flex items-center justify-between gap-2">
                 <div className="flex items-center gap-2">
                   <Thermometer className="w-5 h-5 text-orange-500" aria-hidden="true" />
@@ -922,7 +1384,7 @@ export const ForecastCharts: React.FC<ForecastChartsProps> = ({
                 </div>
                 <HelpPopover topic="fog_risk" />
               </div>
-              <div className="h-60 sm:h-64 w-full">
+              <div className="h-72 sm:h-80 w-full">
                 <ReactECharts
                   option={temperatureOption}
                   style={{ height: '100%', width: '100%' }}
@@ -934,7 +1396,12 @@ export const ForecastCharts: React.FC<ForecastChartsProps> = ({
           )}
 
           {showRainChart && (
-            <div className="rounded-2xl border border-slate-200/90 dark:border-sky-800/70 bg-white dark:bg-[#132a47] p-4 shadow-sm space-y-2">
+            <div
+              data-chart-id="rain"
+              data-current-hour-index={isCurrentHourInRange ? resolvedCurrentHourIndex : ''}
+              data-current-hour-label={currentHourBadge ?? ''}
+              className="rounded-2xl border border-slate-200/90 dark:border-sky-800/70 bg-white dark:bg-[#132a47] p-4 shadow-sm space-y-2"
+            >
               <div className="flex items-center justify-between gap-2">
                 <div className="flex items-center gap-2">
                   <CloudRain className="w-5 h-5 text-[#0080cd] dark:text-sky-400" aria-hidden="true" />
@@ -944,7 +1411,7 @@ export const ForecastCharts: React.FC<ForecastChartsProps> = ({
                 </div>
                 <HelpPopover topic="barometric_trend" />
               </div>
-              <div className="h-60 sm:h-64 w-full">
+              <div className="h-72 sm:h-80 w-full">
                 <ReactECharts
                   option={precipPressureOption}
                   style={{ height: '100%', width: '100%' }}
@@ -965,7 +1432,12 @@ export const ForecastCharts: React.FC<ForecastChartsProps> = ({
           } gap-4`}
         >
           {showWavesChart && (
-            <div className="rounded-2xl border border-slate-200/90 dark:border-sky-800/70 bg-white dark:bg-[#132a47] p-4 shadow-sm space-y-2 flex flex-col">
+            <div
+              data-chart-id="waves"
+              data-current-hour-index={isCurrentHourInRange ? resolvedCurrentHourIndex : ''}
+              data-current-hour-label={currentHourBadge ?? ''}
+              className="rounded-2xl border border-slate-200/90 dark:border-sky-800/70 bg-white dark:bg-[#132a47] p-4 shadow-sm space-y-2 flex flex-col"
+            >
               <div className="flex items-center justify-between gap-2">
                 <div className="flex items-center gap-2">
                   <Waves className="w-5 h-5 text-[#0080cd] dark:text-sky-400" aria-hidden="true" />
@@ -977,7 +1449,7 @@ export const ForecastCharts: React.FC<ForecastChartsProps> = ({
               </div>
 
               {forecast.marineAvailable ? (
-                <div className="h-60 sm:h-64 w-full flex-1">
+                <div className="h-72 sm:h-80 w-full flex-1">
                   <ReactECharts
                     option={marineOption}
                     style={{ height: '100%', width: '100%' }}
@@ -1002,7 +1474,12 @@ export const ForecastCharts: React.FC<ForecastChartsProps> = ({
           )}
 
           {showCloudsChart && (
-            <div className="rounded-2xl border border-slate-200/90 dark:border-sky-800/70 bg-white dark:bg-[#132a47] p-4 shadow-sm space-y-2">
+            <div
+              data-chart-id="clouds"
+              data-current-hour-index={isCurrentHourInRange ? resolvedCurrentHourIndex : ''}
+              data-current-hour-label={currentHourBadge ?? ''}
+              className="rounded-2xl border border-slate-200/90 dark:border-sky-800/70 bg-white dark:bg-[#132a47] p-4 shadow-sm space-y-2"
+            >
               <div className="flex items-center justify-between gap-2">
                 <div className="flex items-center gap-2">
                   <Cloud className="w-5 h-5 text-[#0080cd] dark:text-sky-400" aria-hidden="true" />
@@ -1012,7 +1489,7 @@ export const ForecastCharts: React.FC<ForecastChartsProps> = ({
                 </div>
                 <HelpPopover topic="stratified_clouds" />
               </div>
-              <div className="h-60 sm:h-64 w-full">
+              <div className="h-72 sm:h-80 w-full">
                 <ReactECharts
                   option={cloudCoverOption}
                   style={{ height: '100%', width: '100%' }}

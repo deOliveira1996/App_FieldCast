@@ -83,7 +83,7 @@ export const ActiveAlertsBanner: React.FC<ActiveAlertsBannerProps> = ({
           return (
             <div
               key={card.id}
-              className="relative rounded-2xl border border-slate-200/90 dark:border-sky-800/70 bg-white dark:bg-[#132a47] p-4 shadow-sm flex flex-col justify-between gap-2"
+              className="relative rounded-2xl border border-slate-200/90 dark:border-sky-800/70 bg-white dark:bg-[#132a47] p-4 shadow-sm flex flex-col justify-start gap-2"
             >
               {/* Colored Status Dot in Top-Right Corner (Climatempo style) */}
               <span

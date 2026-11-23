@@ -72,45 +72,47 @@ export const ModelSelectorBar: React.FC<ModelSelectorBarProps> = ({
     >
       <div className="flex flex-col xl:flex-row xl:items-center justify-between gap-3">
         {/* Model View Selector Pills */}
-        <div className="flex items-center gap-1.5 overflow-x-auto scrollbar-thin pb-1 xl:pb-0">
-          {VIEW_MODES.map((m) => {
-            const isActive = viewMode === m.id;
-            const isEnsemble = m.id === 'fieldcast';
-            const isSpaghetti = m.id === 'spaghetti';
+        <div className="flex items-center gap-1.5 min-w-0">
+          <div className="flex items-center gap-1.5 overflow-x-auto scrollbar-thin pb-1 xl:pb-0 min-w-0">
+            {VIEW_MODES.map((m) => {
+              const isActive = viewMode === m.id;
+              const isEnsemble = m.id === 'fieldcast';
+              const isSpaghetti = m.id === 'spaghetti';
 
-            return (
-              <button
-                key={m.id}
-                type="button"
-                onClick={() => onViewModeChange(m.id)}
-                aria-pressed={isActive}
-                className={`min-h-[42px] min-w-[44px] px-3.5 py-2 rounded-xl text-left flex items-center gap-2 shrink-0 border transition-all focus:outline-none focus:ring-2 focus:ring-sky-500 ${
-                  isActive
-                    ? 'bg-sky-600 text-white border-sky-500 shadow-sm shadow-sky-500/20'
-                    : 'bg-sky-50/75 dark:bg-[#0d1f36]/80 text-slate-700 dark:text-sky-200 border-sky-200/80 dark:border-sky-800 hover:bg-sky-100/80 dark:hover:bg-sky-900/50'
-                }`}
-              >
-                {isEnsemble ? (
-                  <Sparkles className="w-4 h-4 shrink-0" aria-hidden="true" />
-                ) : isSpaghetti ? (
-                  <GitCompare className="w-4 h-4 shrink-0" aria-hidden="true" />
-                ) : (
-                  <Layers className="w-4 h-4 shrink-0" aria-hidden="true" />
-                )}
-                <div>
-                  <span className="block text-xs font-bold leading-tight">{m.label}</span>
-                  <span
-                    className={`block text-[10px] leading-tight ${
-                      isActive ? 'text-sky-100' : 'text-slate-500 dark:text-sky-300/75'
-                    }`}
-                  >
-                    {m.sublabel}
-                  </span>
-                </div>
-              </button>
-            );
-          })}
-          <HelpPopover topic="ensemble_vs_native" />
+              return (
+                <button
+                  key={m.id}
+                  type="button"
+                  onClick={() => onViewModeChange(m.id)}
+                  aria-pressed={isActive}
+                  className={`min-h-[42px] min-w-[44px] px-3.5 py-2 rounded-xl text-left flex items-center gap-2 shrink-0 border transition-all focus:outline-none focus:ring-2 focus:ring-sky-500 ${
+                    isActive
+                      ? 'bg-sky-600 text-white border-sky-500 shadow-sm shadow-sky-500/20'
+                      : 'bg-sky-50/75 dark:bg-[#0d1f36]/80 text-slate-700 dark:text-sky-200 border-sky-200/80 dark:border-sky-800 hover:bg-sky-100/80 dark:hover:bg-sky-900/50'
+                  }`}
+                >
+                  {isEnsemble ? (
+                    <Sparkles className="w-4 h-4 shrink-0" aria-hidden="true" />
+                  ) : isSpaghetti ? (
+                    <GitCompare className="w-4 h-4 shrink-0" aria-hidden="true" />
+                  ) : (
+                    <Layers className="w-4 h-4 shrink-0" aria-hidden="true" />
+                  )}
+                  <div>
+                    <span className="block text-xs font-bold leading-tight">{m.label}</span>
+                    <span
+                      className={`block text-[10px] leading-tight ${
+                        isActive ? 'text-sky-100' : 'text-slate-500 dark:text-sky-300/75'
+                      }`}
+                    >
+                      {m.sublabel}
+                    </span>
+                  </div>
+                </button>
+              );
+            })}
+          </div>
+          <HelpPopover topic="ensemble_vs_native" className="shrink-0" />
         </div>
 
         {/* Right Controls: Vertical Interpolation Toggle + Horizon Selector */}

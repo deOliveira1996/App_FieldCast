@@ -26,6 +26,11 @@ import type {
   NormalizedForecast,
   SafeWindowStatus,
 } from '../../types/weather';
+import {
+  formatLocalHourBadge,
+  formatLocalYMD,
+  useCurrentLocalHourIndex,
+} from '../../utils/localTimeHour';
 import { HelpPopover } from '../common/HelpPopover';
 import {
   COMPLETE_VISIBLE_PARAMS,
@@ -35,7 +40,8 @@ import {
 export interface CurrentSummaryCardProps {
   forecast: NormalizedForecast;
   activeLocation: ActiveCoordinates;
-  selectedHourIndex: number;
+  selectedHourIndex?: number;
+  onResetToCurrentHour?: () => void;
   onOpenThresholdModal: () => void;
   onOpenLocationsModal?: () => void;
   visibleParams?: ForecastVisibleParams;
@@ -150,6 +156,7 @@ export const CurrentSummaryCard: React.FC<CurrentSummaryCardProps> = ({
   forecast,
   activeLocation,
   selectedHourIndex,
+  onResetToCurrentHour,
   onOpenThresholdModal,
   onOpenLocationsModal,
   visibleParams = COMPLETE_VISIBLE_PARAMS,
@@ -158,11 +165,23 @@ export const CurrentSummaryCard: React.FC<CurrentSummaryCardProps> = ({
 }) => {
   const [showConfidenceDetails, setShowConfidenceDetails] = useState(false);
 
+  const currentLocalHourIndex = useCurrentLocalHourIndex(forecast.hours, forecast.timezone);
+  const resolvedHourIndex = selectedHourIndex ?? currentLocalHourIndex;
+
   const safeIndex = Math.min(
-    Math.max(0, selectedHourIndex),
+    Math.max(0, resolvedHourIndex),
     Math.max(0, forecast.hours.length - 1),
   );
   const currentHour: EnsembleHour | undefined = forecast.hours[safeIndex];
+  const isCurrentLocalHour = safeIndex === currentLocalHourIndex;
+  const displayedHourHHMM = currentHour
+    ? formatLocalHourBadge(currentHour.timestampUnix, forecast.timezone)
+    : '00:00';
+  const currentLocalHourObj = forecast.hours[currentLocalHourIndex];
+  const currentLocalHHMM = currentLocalHourObj
+    ? formatLocalHourBadge(currentLocalHourObj.timestampUnix, forecast.timezone)
+    : displayedHourHHMM;
+
   const confidence = currentHour?.confidence ?? forecast.overallConfidence;
   const confStyle = CONFIDENCE_COLOR_STYLES[confidence.badge] ?? CONFIDENCE_COLOR_STYLES.amber;
 
@@ -187,8 +206,22 @@ export const CurrentSummaryCard: React.FC<CurrentSummaryCardProps> = ({
     };
   }, [forecast.hours, safeIndex]);
 
-  const activeEphemeris =
-    forecast.ephemerisByDay[Math.floor(safeIndex / 24)] ?? forecast.ephemerisByDay[0];
+  const activeEphemeris = useMemo(() => {
+    if (currentHour) {
+      const hourYmd = formatLocalYMD(new Date(currentHour.timestampUnix * 1000), forecast.timezone);
+      const matched = forecast.ephemerisByDay.find((day) => {
+        const parsed = new Date(day.dateIso);
+        const dayYmd = Number.isNaN(parsed.getTime())
+          ? day.dateIso.slice(0, 10)
+          : formatLocalYMD(parsed, forecast.timezone);
+        return dayYmd === hourYmd || day.dateIso.slice(0, 10) === hourYmd;
+      });
+      if (matched) {
+        return matched;
+      }
+    }
+    return forecast.ephemerisByDay[Math.floor(safeIndex / 24)] ?? forecast.ephemerisByDay[0];
+  }, [currentHour, forecast.ephemerisByDay, forecast.timezone, safeIndex]);
 
   const windCardDir = degreesToCardinalShort(currentHour?.windDirection10m.degree);
   const windSpd =
@@ -206,21 +239,21 @@ export const CurrentSummaryCard: React.FC<CurrentSummaryCardProps> = ({
       className="rounded-2xl border border-slate-200/90 dark:border-sky-800/70 bg-white dark:bg-[#132a47] shadow-sm p-5 sm:p-6 space-y-5"
     >
       {/* Top Header Row: Climatempo Clean Title + Map Pin Button + Confidence & Semaphore Pills */}
-      <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-4">
-        <div className="space-y-1">
+      <div className="flex flex-col xl:flex-row xl:items-start justify-between gap-4">
+        <div className="min-w-0 flex-1 space-y-2">
           <div className="flex flex-wrap items-center gap-2.5">
             {onOpenLocationsModal ? (
               <button
                 type="button"
                 onClick={onOpenLocationsModal}
-                className="group inline-flex items-center gap-2 text-left rounded-xl hover:text-[#0080cd] transition-colors focus:outline-none focus:ring-2 focus:ring-sky-500"
+                className="group inline-flex items-center gap-2 text-left rounded-xl hover:text-[#0080cd] transition-colors focus:outline-none focus:ring-2 focus:ring-sky-500 min-w-0"
               >
-                <h1 className="text-lg sm:text-xl font-extrabold text-slate-900 dark:text-white group-hover:text-[#0080cd] dark:group-hover:text-sky-300">
+                <h1 className="text-lg sm:text-xl font-extrabold text-slate-900 dark:text-white group-hover:text-[#0080cd] dark:group-hover:text-sky-300 leading-tight">
                   Previsão para {activeLocation.name}
                 </h1>
               </button>
             ) : (
-              <h1 className="text-lg sm:text-xl font-extrabold text-slate-900 dark:text-white">
+              <h1 className="text-lg sm:text-xl font-extrabold text-slate-900 dark:text-white leading-tight">
                 Previsão para {activeLocation.name}
               </h1>
             )}
@@ -230,7 +263,7 @@ export const CurrentSummaryCard: React.FC<CurrentSummaryCardProps> = ({
                 type="button"
                 onClick={onToggleMiniMap}
                 aria-expanded={isMiniMapOpen}
-                className={`min-h-[34px] px-3 py-1 rounded-full text-xs font-bold inline-flex items-center gap-1.5 border transition-all ${
+                className={`min-h-[34px] px-3 py-1 rounded-full text-xs font-bold inline-flex items-center gap-1.5 border shrink-0 transition-all ${
                   isMiniMapOpen
                     ? 'bg-[#0080cd] text-white border-[#0080cd] shadow-sm'
                     : 'bg-sky-50 dark:bg-sky-900/50 hover:bg-sky-100 text-[#0070b8] dark:text-sky-200 border-sky-200 dark:border-sky-700'
@@ -238,6 +271,40 @@ export const CurrentSummaryCard: React.FC<CurrentSummaryCardProps> = ({
               >
                 <MapIcon className="w-3.5 h-3.5" aria-hidden="true" />
                 <span>{isMiniMapOpen ? 'Ocultar Mapa Pin' : 'Dar Pin no Mapa'}</span>
+              </button>
+            )}
+          </div>
+
+          <div className="flex flex-wrap items-center gap-2 text-xs">
+            <span
+              data-testid="current-hour-badge"
+              className={`inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full text-xs font-bold border ${
+                isCurrentLocalHour
+                  ? 'bg-amber-50 dark:bg-amber-950/50 text-amber-900 dark:text-amber-200 border-amber-300 dark:border-amber-700/70'
+                  : 'bg-sky-50 dark:bg-sky-900/60 text-[#0070b8] dark:text-sky-200 border-sky-200 dark:border-sky-700'
+              }`}
+            >
+              <span
+                className={`w-2 h-2 rounded-full ${
+                  isCurrentLocalHour ? 'bg-amber-500' : 'bg-[#0080cd]'
+                }`}
+                aria-hidden="true"
+              />
+              <span>
+                {isCurrentLocalHour
+                  ? `Agora • ${displayedHourHHMM}`
+                  : `Visualizando ${displayedHourHHMM}`}
+              </span>
+            </span>
+
+            {!isCurrentLocalHour && onResetToCurrentHour && (
+              <button
+                type="button"
+                onClick={onResetToCurrentHour}
+                data-testid="reset-current-hour-btn"
+                className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-xs font-bold bg-amber-500 hover:bg-amber-600 text-slate-950 transition-colors"
+              >
+                Voltar para Agora ({currentLocalHHMM})
               </button>
             )}
 
@@ -260,41 +327,46 @@ export const CurrentSummaryCard: React.FC<CurrentSummaryCardProps> = ({
           </p>
         </div>
 
-        {/* Right Status Pills: Confidence + Safe Window + Limits */}
-        <div className="flex flex-wrap items-center gap-2">
-          <div className="inline-flex items-center rounded-xl border border-slate-200 dark:border-sky-800 bg-[#f8fafc] dark:bg-[#0d1f36] p-1 gap-1">
+        {/* Right Status Pills: Unified-Height Single-Border Confidence + Safe Window + Limits */}
+        <div
+          data-testid="summary-header-badges"
+          className="flex flex-wrap items-center gap-2.5 shrink-0"
+        >
+          <div
+            className={`min-h-[42px] max-w-full inline-flex items-center rounded-xl border px-2 py-1 gap-1.5 ${confStyle.badge}`}
+          >
             <button
               type="button"
               onClick={() => setShowConfidenceDetails((prev) => !prev)}
               aria-expanded={showConfidenceDetails}
-              className={`min-h-[38px] px-3 py-1 rounded-lg border text-xs font-bold inline-flex items-center gap-2 transition-colors ${confStyle.badge}`}
+              className="min-h-[34px] px-1.5 py-0.5 rounded-lg text-xs font-bold inline-flex items-center gap-2 transition-colors focus:outline-none focus:ring-2 focus:ring-sky-500 min-w-0"
             >
-              <span className={`w-2.5 h-2.5 rounded-full ${confStyle.dot}`} />
-              <span>
+              <span className={`w-2.5 h-2.5 rounded-full shrink-0 ${confStyle.dot}`} />
+              <span className="sm:whitespace-nowrap text-left">
                 Confiança {Math.round(confidence.total)}% • {confStyle.label}
               </span>
               {showConfidenceDetails ? (
-                <ChevronUp className="w-3.5 h-3.5" aria-hidden="true" />
+                <ChevronUp className="w-3.5 h-3.5 shrink-0" aria-hidden="true" />
               ) : (
-                <ChevronDown className="w-3.5 h-3.5" aria-hidden="true" />
+                <ChevronDown className="w-3.5 h-3.5 shrink-0" aria-hidden="true" />
               )}
             </button>
             <HelpPopover topic="confidence" />
           </div>
 
           <div
-            className={`inline-flex items-center rounded-xl border p-1 gap-1 ${safeStyle.container}`}
+            className={`min-h-[42px] max-w-full inline-flex items-center rounded-xl border px-2 py-1 gap-1.5 ${safeStyle.container}`}
           >
-            <div className="px-2.5 py-1 flex items-center gap-2">
+            <div className="px-1.5 py-0.5 flex items-center gap-2 min-w-0">
               <span className={`w-2.5 h-2.5 rounded-full shrink-0 ${safeStyle.dot}`} />
-              <span className="text-xs font-bold">{safeStyle.title}</span>
+              <span className="text-xs font-bold sm:whitespace-nowrap">{safeStyle.title}</span>
             </div>
 
             <button
               type="button"
               onClick={onOpenThresholdModal}
               aria-label="Configurar limites do Semáforo de Janela Segura"
-              className="min-h-[36px] px-2.5 py-1 rounded-lg bg-white dark:bg-[#132a47] hover:bg-sky-50 text-slate-700 dark:text-sky-100 border border-slate-200 dark:border-sky-700 text-xs font-semibold inline-flex items-center gap-1 transition-colors"
+              className="min-h-[34px] px-2.5 py-1 rounded-lg bg-white dark:bg-[#132a47] hover:bg-sky-50 text-slate-700 dark:text-sky-100 border border-slate-200 dark:border-sky-700 text-xs font-semibold inline-flex items-center gap-1 transition-colors shrink-0"
             >
               <Sliders className="w-3.5 h-3.5 text-[#0080cd] dark:text-sky-400" aria-hidden="true" />
               <span>Limites</span>
@@ -354,20 +426,26 @@ export const CurrentSummaryCard: React.FC<CurrentSummaryCardProps> = ({
         </div>
       )}
 
-      {/* Climatempo-Style Clean Ice-Blue Summary Grid (#f4f8fb) */}
+      {/* Climatempo-Style Clean Ice-Blue Summary Grid (#f4f8fb) with Padded Responsive Cards */}
       {currentHour && (
-        <div className="rounded-2xl bg-[#f4f8fb] dark:bg-[#0d1f36]/85 border border-sky-100/80 dark:border-sky-800/60 p-4 sm:p-5">
-          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-x-8 gap-y-4">
+        <div className="rounded-2xl bg-[#f4f8fb] dark:bg-[#0d1f36]/85 border border-sky-100/80 dark:border-sky-800/60 p-3.5 sm:p-4">
+          <div
+            data-testid="summary-metrics-grid"
+            className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-3 gap-3.5"
+          >
             {/* Block 1: Temperatura (Min in Blue, Max in Orange) + Sensação/Orvalho */}
             {visibleParams.tempVisibility && (
-              <div className="flex items-center justify-between border-b border-slate-200/70 dark:border-sky-800/50 pb-3">
-                <div className="flex items-center gap-2.5">
+              <div
+                data-testid="summary-card-temperature"
+                className="rounded-xl border border-slate-200/85 dark:border-sky-800/70 bg-white dark:bg-[#132a47] p-3.5 sm:p-4 min-h-[84px] flex items-center justify-between gap-3 shadow-xs"
+              >
+                <div className="flex items-center gap-2.5 min-w-0">
                   <Thermometer className="w-5 h-5 text-[#0080cd] dark:text-sky-400 shrink-0" />
-                  <div>
+                  <div className="min-w-0">
                     <span className="text-xs font-semibold text-slate-600 dark:text-sky-200 block">
                       Temperatura
                     </span>
-                    <span className="text-[11px] text-slate-500 dark:text-sky-300/75">
+                    <span className="text-[11px] text-slate-500 dark:text-sky-300/75 block">
                       Agora:{' '}
                       <strong className="text-slate-800 dark:text-white">
                         {currentHour.temperature2mC.mean !== null
@@ -382,7 +460,7 @@ export const CurrentSummaryCard: React.FC<CurrentSummaryCardProps> = ({
                   </div>
                 </div>
 
-                <div className="flex items-center gap-3 text-base font-extrabold">
+                <div className="flex items-center gap-3 text-base font-extrabold shrink-0">
                   <span
                     title="Mínima do dia"
                     className="inline-flex items-center gap-0.5 text-[#0080cd] dark:text-sky-400"
@@ -403,15 +481,18 @@ export const CurrentSummaryCard: React.FC<CurrentSummaryCardProps> = ({
 
             {/* Block 2: Chuva (mm + % de chance) */}
             {visibleParams.rainPressure && (
-              <div className="flex items-center justify-between border-b border-slate-200/70 dark:border-sky-800/50 pb-3">
-                <div className="flex items-center gap-2.5">
+              <div
+                data-testid="summary-card-rain"
+                className="rounded-xl border border-slate-200/85 dark:border-sky-800/70 bg-white dark:bg-[#132a47] p-3.5 sm:p-4 min-h-[84px] flex items-center justify-between gap-3 shadow-xs"
+              >
+                <div className="flex items-center gap-2.5 min-w-0">
                   <CloudRain className="w-5 h-5 text-[#0080cd] dark:text-sky-400 shrink-0" />
-                  <div>
+                  <div className="min-w-0">
                     <span className="text-xs font-semibold text-slate-600 dark:text-sky-200 block">
                       Chuva
                     </span>
-                    <div className="flex items-center gap-1 mt-0.5">
-                      <Droplets className="w-3 h-3 text-sky-500" />
+                    <div className="flex items-center gap-1.5 mt-1">
+                      <Droplets className="w-3 h-3 text-sky-500 shrink-0" />
                       <div className="w-16 h-1.5 rounded-full bg-sky-200 dark:bg-sky-900 overflow-hidden">
                         <div
                           className="h-full bg-[#0080cd] rounded-full"
@@ -427,8 +508,8 @@ export const CurrentSummaryCard: React.FC<CurrentSummaryCardProps> = ({
                   </div>
                 </div>
 
-                <div className="text-right">
-                  <span className="text-sm font-extrabold text-slate-900 dark:text-white">
+                <div className="text-right shrink-0">
+                  <span className="text-sm font-extrabold text-slate-900 dark:text-white whitespace-nowrap">
                     {currentHour.precipitationMm.mean !== null
                       ? `${currentHour.precipitationMm.mean.toFixed(1)}mm`
                       : '0mm'}{' '}
@@ -445,14 +526,17 @@ export const CurrentSummaryCard: React.FC<CurrentSummaryCardProps> = ({
 
             {/* Block 3: Vento 10m & Rajada */}
             {visibleParams.wind10m && (
-              <div className="flex items-center justify-between border-b border-slate-200/70 dark:border-sky-800/50 pb-3">
-                <div className="flex items-center gap-2.5">
+              <div
+                data-testid="summary-card-wind"
+                className="rounded-xl border border-slate-200/85 dark:border-sky-800/70 bg-white dark:bg-[#132a47] p-3.5 sm:p-4 min-h-[84px] flex items-center justify-between gap-3 shadow-xs"
+              >
+                <div className="flex items-center gap-2.5 min-w-0">
                   <Wind className="w-5 h-5 text-[#0080cd] dark:text-sky-400 shrink-0" />
-                  <div>
+                  <div className="min-w-0">
                     <span className="text-xs font-semibold text-slate-600 dark:text-sky-200 block">
                       Vento &amp; Rajada
                     </span>
-                    <span className="text-[11px] text-slate-500 dark:text-sky-300/75">
+                    <span className="text-[11px] text-slate-500 dark:text-sky-300/75 block">
                       Rajada de vento:{' '}
                       <strong className="text-slate-800 dark:text-sky-100">
                         {gustSpd !== null ? `${windCardDir} - ${gustSpd} km/h` : '—'}
@@ -461,8 +545,8 @@ export const CurrentSummaryCard: React.FC<CurrentSummaryCardProps> = ({
                   </div>
                 </div>
 
-                <div className="text-right">
-                  <span className="text-sm font-extrabold text-slate-900 dark:text-white">
+                <div className="text-right shrink-0">
+                  <span className="text-sm font-extrabold text-slate-900 dark:text-white whitespace-nowrap">
                     {windSpd !== null ? `← ${windCardDir} - ${windSpd} km/h` : '—'}
                   </span>
                 </div>
@@ -471,19 +555,25 @@ export const CurrentSummaryCard: React.FC<CurrentSummaryCardProps> = ({
 
             {/* Block 4: Ondas & Swell */}
             {visibleParams.waves && (
-              <div className="flex items-center justify-between border-b border-slate-200/70 dark:border-sky-800/50 pb-3">
-                <div className="flex items-center gap-2.5">
+              <div
+                data-testid="summary-card-waves"
+                className="rounded-xl border border-slate-200/85 dark:border-sky-800/70 bg-white dark:bg-[#132a47] p-3.5 sm:p-4 min-h-[84px] flex items-center justify-between gap-3 shadow-xs"
+              >
+                <div className="flex items-center gap-2.5 min-w-0">
                   <Waves className="w-5 h-5 text-[#0080cd] dark:text-sky-400 shrink-0" />
-                  <div>
+                  <div className="min-w-0">
                     <span className="text-xs font-semibold text-slate-600 dark:text-sky-200 block">
                       Ondas &amp; Swell
                     </span>
-                    <span className="text-[11px] text-slate-500 dark:text-sky-300/75">
+                    <span className="text-[11px] text-slate-500 dark:text-sky-300/75 block">
                       {forecast.marineAvailable && currentHour.marine
                         ? `Swell: ${
                             currentHour.marine.swellWaveHeight !== null
                               ? `${currentHour.marine.swellWaveHeight.toFixed(1)}m (${
-                                  currentHour.marine.swellWavePeriod ?? '—'
+                                  currentHour.marine.swellWavePeriod !== null &&
+                                  currentHour.marine.swellWavePeriod !== undefined
+                                    ? Math.round(currentHour.marine.swellWavePeriod)
+                                    : '—'
                                 }s)`
                               : '—'
                           }`
@@ -492,15 +582,19 @@ export const CurrentSummaryCard: React.FC<CurrentSummaryCardProps> = ({
                   </div>
                 </div>
 
-                <div className="text-right">
+                <div className="text-right shrink-0">
                   {forecast.marineAvailable && currentHour.marine ? (
-                    <span className="text-sm font-extrabold text-slate-900 dark:text-white">
+                    <span className="text-sm font-extrabold text-slate-900 dark:text-white whitespace-nowrap">
                       {currentHour.marine.waveHeight !== null
                         ? `${currentHour.marine.waveHeight.toFixed(1)}m`
                         : '—'}{' '}
                       <span className="text-xs font-semibold text-slate-500 dark:text-sky-300">
-                        ({currentHour.marine.wavePeriod ?? '—'}s •{' '}
-                        {degreesToCardinalShort(currentHour.marine.waveDirection)})
+                        (
+                        {currentHour.marine.wavePeriod !== null &&
+                        currentHour.marine.wavePeriod !== undefined
+                          ? Math.round(currentHour.marine.wavePeriod)
+                          : '—'}
+                        s • {degreesToCardinalShort(currentHour.marine.waveDirection)})
                       </span>
                     </span>
                   ) : (
@@ -514,14 +608,17 @@ export const CurrentSummaryCard: React.FC<CurrentSummaryCardProps> = ({
 
             {/* Block 5: Pressão & Visibilidade */}
             {(visibleParams.rainPressure || visibleParams.tempVisibility) && (
-              <div className="flex items-center justify-between border-b border-slate-200/70 dark:border-sky-800/50 pb-3">
-                <div className="flex items-center gap-2.5">
+              <div
+                data-testid="summary-card-pressure"
+                className="rounded-xl border border-slate-200/85 dark:border-sky-800/70 bg-white dark:bg-[#132a47] p-3.5 sm:p-4 min-h-[84px] flex items-center justify-between gap-3 shadow-xs"
+              >
+                <div className="flex items-center gap-2.5 min-w-0">
                   <Gauge className="w-5 h-5 text-[#0080cd] dark:text-sky-400 shrink-0" />
-                  <div>
+                  <div className="min-w-0">
                     <span className="text-xs font-semibold text-slate-600 dark:text-sky-200 block">
                       Pressão &amp; Visibilidade
                     </span>
-                    <span className="text-[11px] text-slate-500 dark:text-sky-300/75">
+                    <span className="text-[11px] text-slate-500 dark:text-sky-300/75 block">
                       Visibilidade:{' '}
                       <strong className="text-slate-700 dark:text-sky-100">
                         {currentHour.visibilityM.mean !== null
@@ -532,8 +629,8 @@ export const CurrentSummaryCard: React.FC<CurrentSummaryCardProps> = ({
                   </div>
                 </div>
 
-                <div className="text-right">
-                  <span className="text-sm font-extrabold text-slate-900 dark:text-white">
+                <div className="text-right shrink-0">
+                  <span className="text-sm font-extrabold text-slate-900 dark:text-white whitespace-nowrap">
                     {currentHour.surfacePressureHpa.mean !== null
                       ? `${Math.round(currentHour.surfacePressureHpa.mean)} hPa`
                       : '—'}
@@ -544,23 +641,28 @@ export const CurrentSummaryCard: React.FC<CurrentSummaryCardProps> = ({
 
             {/* Block 6: Sol & Lua (Climatempo style) */}
             {visibleParams.ephemeris && activeEphemeris && (
-              <div className="flex items-center justify-between border-b border-slate-200/70 dark:border-sky-800/50 pb-3">
-                <div className="flex items-center gap-2.5">
+              <div
+                data-testid="summary-card-ephemeris"
+                className="rounded-xl border border-slate-200/85 dark:border-sky-800/70 bg-white dark:bg-[#132a47] p-3.5 sm:p-4 min-h-[84px] flex items-center justify-between gap-3 shadow-xs"
+              >
+                <div className="flex items-center gap-2.5 min-w-0">
                   <Sun className="w-5 h-5 text-amber-500 shrink-0" />
-                  <div>
+                  <div className="min-w-0">
                     <span className="text-xs font-semibold text-slate-600 dark:text-sky-200 block">
                       Sol &amp; Lua
                     </span>
-                    <span className="text-[11px] text-slate-500 dark:text-sky-300/75 inline-flex items-center gap-1">
-                      <Moon className="w-3 h-3 text-sky-500" />
-                      {activeEphemeris.moonPhaseLabel} (
-                      {Math.round(activeEphemeris.moonIlluminationPct)}%)
+                    <span className="text-[11px] text-slate-500 dark:text-sky-300/75 inline-flex items-center gap-1 flex-wrap">
+                      <Moon className="w-3 h-3 text-sky-500 shrink-0" />
+                      <span>
+                        {activeEphemeris.moonPhaseLabel} (
+                        {Math.round(activeEphemeris.moonIlluminationPct)}%)
+                      </span>
                     </span>
                   </div>
                 </div>
 
-                <div className="text-right">
-                  <span className="text-xs sm:text-sm font-extrabold text-slate-900 dark:text-white">
+                <div className="text-right shrink-0">
+                  <span className="text-xs sm:text-sm font-extrabold text-slate-900 dark:text-white whitespace-nowrap">
                     {formatTimeHHMM(activeEphemeris.sunriseIso, forecast.timezone)}h às{' '}
                     {formatTimeHHMM(activeEphemeris.sunsetIso, forecast.timezone)}h
                   </span>
@@ -570,14 +672,17 @@ export const CurrentSummaryCard: React.FC<CurrentSummaryCardProps> = ({
 
             {/* Optional Block 7: Perfil Vertical (80m - 120m) when enabled */}
             {visibleParams.verticalProfile && (
-              <div className="flex items-center justify-between border-b border-slate-200/70 dark:border-sky-800/50 pb-3 sm:col-span-2 lg:col-span-3">
-                <div className="flex items-center gap-2.5">
+              <div
+                data-testid="summary-card-vertical"
+                className="rounded-xl border border-slate-200/85 dark:border-sky-800/70 bg-white dark:bg-[#132a47] p-3.5 sm:p-4 min-h-[84px] flex flex-col sm:flex-row sm:items-center justify-between gap-3 sm:col-span-2 xl:col-span-3 shadow-xs"
+              >
+                <div className="flex items-center gap-2.5 min-w-0">
                   <Compass className="w-5 h-5 text-[#0080cd] dark:text-sky-400 shrink-0" />
-                  <div>
+                  <div className="min-w-0">
                     <span className="text-xs font-semibold text-slate-600 dark:text-sky-200 block">
                       Perfil Vertical de Vento (80m / 100m / 120m)
                     </span>
-                    <span className="text-[11px] text-slate-500 dark:text-sky-300/75">
+                    <span className="text-[11px] text-slate-500 dark:text-sky-300/75 block">
                       Expoente de cisalhamento α ={' '}
                       {currentHour.verticalProfile.alpha !== null
                         ? currentHour.verticalProfile.alpha.toFixed(3)
@@ -586,7 +691,7 @@ export const CurrentSummaryCard: React.FC<CurrentSummaryCardProps> = ({
                   </div>
                 </div>
 
-                <div className="flex flex-wrap items-center gap-4 text-xs font-bold text-slate-800 dark:text-white">
+                <div className="flex flex-wrap items-center gap-4 text-xs font-bold text-slate-800 dark:text-white shrink-0">
                   <span>
                     80m:{' '}
                     <strong className="text-[#0080cd] dark:text-sky-300">

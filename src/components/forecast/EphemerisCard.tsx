@@ -1,6 +1,7 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import { Compass, Moon, Sun, Sunrise, Sunset } from 'lucide-react';
 import type { EphemerisData } from '../../types/weather';
+import { findCurrentLocalDayIndex } from '../../utils/localTimeHour';
 import { HelpPopover } from '../common/HelpPopover';
 
 export interface EphemerisCardProps {
@@ -45,7 +46,13 @@ function formatDateTab(iso: string, timezone?: string): string {
 }
 
 export const EphemerisCard: React.FC<EphemerisCardProps> = ({ ephemerisByDay, timezone }) => {
-  const [selectedDayIndex, setSelectedDayIndex] = useState(0);
+  const [selectedDayIndex, setSelectedDayIndex] = useState<number>(() =>
+    findCurrentLocalDayIndex(ephemerisByDay, timezone),
+  );
+
+  useEffect(() => {
+    setSelectedDayIndex(findCurrentLocalDayIndex(ephemerisByDay, timezone));
+  }, [ephemerisByDay, timezone]);
 
   if (!ephemerisByDay || ephemerisByDay.length === 0) {
     return null;

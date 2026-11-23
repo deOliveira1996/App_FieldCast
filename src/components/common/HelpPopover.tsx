@@ -212,8 +212,8 @@ export const HelpPopover: React.FC<HelpPopoverProps> = ({
           role="dialog"
           aria-label={resolvedTitle}
           onClick={(e) => e.stopPropagation()}
-          className={`absolute z-50 top-full mt-1.5 w-80 sm:w-96 rounded-2xl border border-sky-200 dark:border-sky-800 bg-white dark:bg-[#132a47] text-slate-800 dark:text-sky-50 shadow-2xl p-4 space-y-3 text-left ${
-            align === 'left' ? 'left-0' : 'right-0'
+          className={`fixed inset-x-4 top-24 sm:inset-auto sm:absolute z-50 sm:top-full sm:mt-1.5 w-auto sm:w-96 max-w-[calc(100vw-2rem)] rounded-2xl border border-sky-200 dark:border-sky-800 bg-white dark:bg-[#132a47] text-slate-800 dark:text-sky-50 shadow-2xl p-4 space-y-3 text-left ${
+            align === 'left' ? 'sm:left-0' : 'sm:right-0'
           }`}
         >
           <div className="flex items-start justify-between gap-2 border-b border-sky-100 dark:border-sky-800 pb-2.5">

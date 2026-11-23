@@ -312,7 +312,7 @@ export const ForecastPinMiniMap: React.FC<ForecastPinMiniMapProps> = ({
           <div
             role="group"
             aria-label="Estilo do mapa base"
-            className="inline-flex items-center rounded-full border border-slate-200 dark:border-sky-800 bg-[#f4f8fb] dark:bg-[#0d1f36] p-0.5"
+            className="inline-flex flex-wrap items-center gap-0.5 rounded-2xl sm:rounded-full border border-slate-200 dark:border-sky-800 bg-[#f4f8fb] dark:bg-[#0d1f36] p-0.5"
           >
             <Layers className="w-3.5 h-3.5 text-[#0080cd] ml-2.5 mr-1 hidden sm:inline" aria-hidden="true" />
             {BASE_LAYERS.map((layer) => {

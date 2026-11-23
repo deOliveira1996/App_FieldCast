@@ -1,5 +1,5 @@
-import React, { useCallback, useState } from 'react';
-import { Check, Eye, EyeOff, SlidersHorizontal, Sparkles } from 'lucide-react';
+import React, { useCallback, useEffect, useState } from 'react';
+import { Check, Clock, Eye, EyeOff, SlidersHorizontal, Sparkles } from 'lucide-react';
 import type { ActiveCoordinates, SavedLocation } from '../../types/field';
 import type { ErrorLogRecord, ToastMessage } from '../../types/health';
 import type {
@@ -7,6 +7,10 @@ import type {
   NormalizedForecast,
   SafeWindowThresholds,
 } from '../../types/weather';
+import {
+  formatLocalHourBadge,
+  useCurrentLocalHourIndex,
+} from '../../utils/localTimeHour';
 import { ModuleErrorBoundary } from '../common/ModuleErrorBoundary';
 import { ForecastSkeleton } from '../common/SkeletonLoaders';
 import { useAppLocationContext } from '../layout/AppShell';
@@ -92,9 +96,33 @@ export const ForecastTab: React.FC<ForecastTabProps> = ({
   const [viewMode, setViewMode] = useState<ForecastViewMode>('fieldcast');
   const [showInterpolatedProfile, setShowInterpolatedProfile] = useState<boolean>(false);
   const [horizonHours, setHorizonHours] = useState<ForecastHorizonHours>(168);
-  const [selectedHourIndex, setSelectedHourIndex] = useState<number>(0);
+  const currentLocalHourIndex = useCurrentLocalHourIndex(forecast?.hours, forecast?.timezone);
+  const [manualHourIndex, setManualHourIndex] = useState<number | null>(null);
   const [isThresholdModalOpen, setIsThresholdModalOpen] = useState<boolean>(false);
   const [isMiniMapOpen, setIsMiniMapOpen] = useState<boolean>(true);
+
+  const forecastKey = forecast
+    ? `${forecast.locationKey}_${forecast.hours[0]?.timestampUnix ?? 0}`
+    : '';
+
+  useEffect(() => {
+    setManualHourIndex(null);
+  }, [forecastKey]);
+
+  const handleSelectHourIndex = useCallback(
+    (idx: number) => {
+      if (idx === currentLocalHourIndex) {
+        setManualHourIndex(null);
+      } else {
+        setManualHourIndex(idx);
+      }
+    },
+    [currentLocalHourIndex],
+  );
+
+  const handleResetToCurrentHour = useCallback(() => {
+    setManualHourIndex(null);
+  }, []);
 
   const [visibleParams, setVisibleParams] = useState<ForecastVisibleParams>(() =>
     loadPersistedVisibleParams(),
@@ -139,8 +167,9 @@ export const ForecastTab: React.FC<ForecastTabProps> = ({
     );
   }
 
+  const rawHourIndex = manualHourIndex ?? currentLocalHourIndex;
   const safeHourIndex = Math.min(
-    Math.max(0, selectedHourIndex),
+    Math.max(0, rawHourIndex),
     Math.max(0, forecast.hours.length - 1),
   );
   const selectedHour = forecast.hours[safeHourIndex];
@@ -153,6 +182,11 @@ export const ForecastTab: React.FC<ForecastTabProps> = ({
   const isQuickPreset =
     JSON.stringify(visibleParams) === JSON.stringify(QUICK_SUMMARY_VISIBLE_PARAMS);
 
+  const currentLocalHourObj = forecast.hours[currentLocalHourIndex];
+  const currentLocalHHMM = currentLocalHourObj
+    ? formatLocalHourBadge(currentLocalHourObj.timestampUnix, forecast.timezone)
+    : '00:00';
+
   return (
     <ModuleErrorBoundary
       moduleName="Aba Previsão (Climatempo / Windy / Windguru)"
@@ -160,11 +194,28 @@ export const ForecastTab: React.FC<ForecastTabProps> = ({
       onErrorLog={onErrorLog}
     >
       <div className="space-y-4 sm:space-y-5">
+        {manualHourIndex !== null && (
+          <div className="rounded-xl border border-amber-300 dark:border-amber-700/70 bg-amber-50/90 dark:bg-amber-950/50 px-3.5 py-2 flex flex-wrap items-center justify-between gap-2 text-xs text-amber-950 dark:text-amber-100">
+            <span className="inline-flex items-center gap-1.5 font-semibold">
+              <Clock className="w-3.5 h-3.5 text-amber-600 dark:text-amber-400" aria-hidden="true" />
+              Você está inspecionando outra janela horária ({formatLocalHourBadge(selectedHour?.timestampUnix ?? 0, forecast.timezone)}).
+            </span>
+            <button
+              type="button"
+              onClick={handleResetToCurrentHour}
+              className="min-h-[30px] px-3 py-1 rounded-full bg-amber-500 hover:bg-amber-600 text-slate-950 font-bold text-xs transition-colors"
+            >
+              Agora ({currentLocalHHMM})
+            </button>
+          </div>
+        )}
+
         {/* 1. Card de Resumo do Dia + Grau de Certeza + Janela Segura */}
         <CurrentSummaryCard
           forecast={forecast}
           activeLocation={activeLocation}
           selectedHourIndex={safeHourIndex}
+          onResetToCurrentHour={manualHourIndex !== null ? handleResetToCurrentHour : undefined}
           onOpenThresholdModal={() => setIsThresholdModalOpen(true)}
           onOpenLocationsModal={onOpenLocationsModal}
           visibleParams={visibleParams}
@@ -309,7 +360,9 @@ export const ForecastTab: React.FC<ForecastTabProps> = ({
             showInterpolatedProfile={showInterpolatedProfile}
             horizonHours={horizonHours}
             selectedHourIndex={safeHourIndex}
-            onSelectHourIndex={setSelectedHourIndex}
+            currentHourIndex={currentLocalHourIndex}
+            onSelectHourIndex={handleSelectHourIndex}
+            onResetToCurrentHour={manualHourIndex !== null ? handleResetToCurrentHour : undefined}
             isDark={isDark}
             visibleParams={visibleParams}
           />
@@ -321,8 +374,10 @@ export const ForecastTab: React.FC<ForecastTabProps> = ({
             forecast={forecast}
             viewMode={viewMode}
             showInterpolatedProfile={showInterpolatedProfile}
+            horizonHours={horizonHours}
             selectedHourIndex={safeHourIndex}
-            onSelectHourIndex={setSelectedHourIndex}
+            currentHourIndex={currentLocalHourIndex}
+            onSelectHourIndex={handleSelectHourIndex}
             visibleParams={visibleParams}
             onToggleParam={handleToggleParam}
             onOpenThresholdModal={() => setIsThresholdModalOpen(true)}

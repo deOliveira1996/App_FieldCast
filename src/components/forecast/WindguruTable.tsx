@@ -1,5 +1,14 @@
-import React, { useMemo, useState } from 'react';
-import { GitCompare, Navigation, Sliders, SlidersHorizontal, Table } from 'lucide-react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
+import {
+  ChevronDown,
+  ChevronUp,
+  Clock,
+  GitCompare,
+  Navigation,
+  Sliders,
+  SlidersHorizontal,
+  Table,
+} from 'lucide-react';
 import type {
   EnsembleHour,
   ForecastViewMode,
@@ -7,7 +16,15 @@ import type {
   NormalizedForecast,
   SafeWindowStatus,
 } from '../../types/weather';
+import { formatLocalHourBadge, useCurrentLocalHourIndex } from '../../utils/localTimeHour';
+import {
+  type ComparableVariableId,
+  detectSharedComparableVariables,
+  MODEL_SHORT_LABELS,
+  type SharedComparableVariableStatus,
+} from '../../utils/modelComparison';
 import { HelpPopover } from '../common/HelpPopover';
+import type { ForecastHorizonHours } from './ModelSelectorBar';
 import {
   COMPLETE_VISIBLE_PARAMS,
   FORECAST_PARAM_DEFINITIONS,
@@ -19,7 +36,9 @@ export interface WindguruTableProps {
   forecast: NormalizedForecast;
   viewMode: ForecastViewMode;
   showInterpolatedProfile: boolean;
+  horizonHours?: ForecastHorizonHours;
   selectedHourIndex: number;
+  currentHourIndex?: number;
   onSelectHourIndex: (index: number) => void;
   visibleParams?: ForecastVisibleParams;
   onToggleParam?: (key: ForecastParamKey) => void;
@@ -90,6 +109,19 @@ function getRainBgClass(mm: number | null): string {
   return 'bg-[#0073e6] text-white font-extrabold';
 }
 
+function getPrecipProbBgClass(pct: number | null): string {
+  if (pct === null || Number.isNaN(pct) || pct < 15) {
+    return 'bg-white dark:bg-[#132a47] text-slate-400 dark:text-slate-500';
+  }
+  if (pct < 45) {
+    return 'bg-[#e0f2fe] dark:bg-sky-950/60 text-sky-900 dark:text-sky-200';
+  }
+  if (pct < 75) {
+    return 'bg-[#bae6fd] dark:bg-sky-900/70 text-sky-950 dark:text-sky-100 font-semibold';
+  }
+  return 'bg-[#38bdf8] dark:bg-sky-700 text-slate-950 dark:text-white font-bold';
+}
+
 function getTempBgClass(tempC: number | null): string {
   if (tempC === null || Number.isNaN(tempC)) {
     return 'bg-white dark:bg-[#132a47] text-slate-400';
@@ -106,8 +138,21 @@ function getTempBgClass(tempC: number | null): string {
   return 'bg-[#fed7aa] dark:bg-orange-900/70 text-slate-950 dark:text-white font-extrabold';
 }
 
-function getCloudCellBgClass(pct: number): string {
-  if (pct < 15) {
+function getVisibilityBgClass(visMeters: number | null): string {
+  if (visMeters === null || Number.isNaN(visMeters)) {
+    return 'bg-white dark:bg-[#132a47] text-slate-400';
+  }
+  if (visMeters < 1000) {
+    return 'bg-rose-100 dark:bg-rose-900/70 text-rose-900 dark:text-rose-100 font-bold';
+  }
+  if (visMeters < 4000) {
+    return 'bg-amber-100 dark:bg-amber-900/60 text-amber-900 dark:text-amber-100 font-semibold';
+  }
+  return 'bg-white dark:bg-[#132a47] text-slate-700 dark:text-sky-100';
+}
+
+function getCloudCellBgClass(pct: number | null): string {
+  if (pct === null || Number.isNaN(pct) || pct < 15) {
     return 'bg-white dark:bg-[#132a47] text-slate-300 dark:text-slate-600';
   }
   if (pct < 45) {
@@ -171,23 +216,105 @@ export const WindguruTable: React.FC<WindguruTableProps> = ({
   forecast,
   viewMode,
   showInterpolatedProfile,
+  horizonHours,
   selectedHourIndex,
+  currentHourIndex,
   onSelectHourIndex,
   visibleParams = COMPLETE_VISIBLE_PARAMS,
   onToggleParam,
   onOpenThresholdModal,
 }) => {
-  const [isCompareMode, setIsCompareMode] = useState<boolean>(false);
+  const [expandedCompareVars, setExpandedCompareVars] = useState<
+    Partial<Record<ComparableVariableId, boolean>>
+  >({});
   const [isInlineTuneOpen, setIsInlineTuneOpen] = useState<boolean>(false);
+  const currentHourHeaderRef = useRef<HTMLTableCellElement | null>(null);
 
-  const hours: EnsembleHour[] = forecast.hours;
+  const hours: EnsembleHour[] = useMemo(
+    () => (horizonHours !== undefined ? forecast.hours.slice(0, horizonHours) : forecast.hours),
+    [forecast.hours, horizonHours],
+  );
+
+  const liveCurrentHourIndex = useCurrentLocalHourIndex(
+    currentHourIndex === undefined ? hours : undefined,
+    forecast.timezone,
+  );
+  const resolvedCurrentHourIndex = currentHourIndex ?? liveCurrentHourIndex;
+
+  const hasCurrentHourInSlice =
+    resolvedCurrentHourIndex >= 0 && resolvedCurrentHourIndex < hours.length;
+  const currentHourBadgeText = hasCurrentHourInSlice
+    ? formatLocalHourBadge(hours[resolvedCurrentHourIndex]!.timestampUnix, forecast.timezone)
+    : null;
+
+  useEffect(() => {
+    const el = currentHourHeaderRef.current;
+    if (el && typeof el.scrollIntoView === 'function') {
+      el.scrollIntoView({ behavior: 'smooth', inline: 'center', block: 'nearest' });
+    }
+  }, [forecast.locationKey, resolvedCurrentHourIndex]);
+
   const isNative =
     viewMode === 'ecmwf_ifs025' || viewMode === 'gfs_seamless' || viewMode === 'icon_seamless';
-  const nativeList: NativeModelHour[] = isNative ? forecast.nativeByModel[viewMode] ?? [] : [];
+  const nativeList: NativeModelHour[] = isNative
+    ? (forecast.nativeByModel[viewMode] ?? []).slice(0, hours.length)
+    : [];
 
-  const ecmwfList = forecast.nativeByModel.ecmwf_ifs025 ?? [];
-  const gfsList = forecast.nativeByModel.gfs_seamless ?? [];
-  const iconList = forecast.nativeByModel.icon_seamless ?? [];
+  const sharedStatuses = useMemo(
+    () => detectSharedComparableVariables(forecast, hours.length),
+    [forecast, hours.length],
+  );
+
+  const sharedById = useMemo(() => {
+    const map = {} as Record<ComparableVariableId, SharedComparableVariableStatus>;
+    for (const s of sharedStatuses) {
+      map[s.id] = s;
+    }
+    return map;
+  }, [sharedStatuses]);
+
+  const visibleComparableVarIds = useMemo(
+    () =>
+      sharedStatuses
+        .filter((status) => status.isComparable && visibleParams[status.definition.group])
+        .map((status) => status.id),
+    [sharedStatuses, visibleParams],
+  );
+
+  const expandedVisibleCount = useMemo(
+    () => visibleComparableVarIds.filter((id) => Boolean(expandedCompareVars[id])).length,
+    [visibleComparableVarIds, expandedCompareVars],
+  );
+
+  const allComparableExpanded =
+    visibleComparableVarIds.length > 0 &&
+    expandedVisibleCount === visibleComparableVarIds.length;
+  const someComparableExpanded = expandedVisibleCount > 0 && !allComparableExpanded;
+
+  const toggleVariableCompare = (varId: ComparableVariableId) => {
+    setExpandedCompareVars((prev) => ({
+      ...prev,
+      [varId]: !prev[varId],
+    }));
+  };
+
+  const handleGlobalCompareToggle = () => {
+    if (allComparableExpanded) {
+      setExpandedCompareVars({});
+      return;
+    }
+    setExpandedCompareVars((prev) => {
+      const next = { ...prev };
+      for (const id of visibleComparableVarIds) {
+        next[id] = true;
+      }
+      return next;
+    });
+  };
+
+  const handleCollapseAllCompare = () => {
+    setExpandedCompareVars({});
+  };
 
   const dayGroups = useMemo(() => {
     const groups: Array<{ dayLabel: string; count: number }> = [];
@@ -213,14 +340,116 @@ export const WindguruTable: React.FC<WindguruTableProps> = ({
     return found?.speedKmh ?? null;
   };
 
+  const getCurrentColBorderClass = (idx: number): string =>
+    idx === resolvedCurrentHourIndex
+      ? 'border-l-2 border-l-amber-500 [border-left-style:dashed]'
+      : '';
+
+  const renderVariableHeaderCell = (
+    label: string,
+    varId?: ComparableVariableId,
+    options?: {
+      thClassName?: string;
+      extraBadge?: React.ReactNode;
+    },
+  ) => {
+    const status = varId ? sharedById[varId] : undefined;
+    const isComparable = Boolean(status?.isComparable);
+    const isExpanded = Boolean(varId && expandedCompareVars[varId]);
+
+    return (
+      <th
+        className={
+          options?.thClassName ??
+          'sticky left-0 z-10 bg-white dark:bg-[#132a47] px-3 py-1.5 text-left font-bold text-slate-800 dark:text-sky-100 border-r border-slate-200 dark:border-sky-800'
+        }
+      >
+        <div className="flex items-center justify-between gap-1.5 min-w-0">
+          <div className="flex items-center gap-1.5 min-w-0">
+            <span className="truncate">{label}</span>
+            {options?.extraBadge}
+          </div>
+          {isComparable && varId && (
+            <button
+              type="button"
+              onClick={(e) => {
+                e.stopPropagation();
+                toggleVariableCompare(varId);
+              }}
+              aria-expanded={isExpanded}
+              aria-label={`${isExpanded ? 'Ocultar' : 'Expandir'} comparação de modelos para ${label}`}
+              title={`${isExpanded ? 'Ocultar' : 'Comparar'} modelos (${status?.activeModels.length ?? 0} modelos)`}
+              data-testid={`compare-toggle-${varId}`}
+              className={`min-h-[24px] min-w-[24px] p-0.5 rounded-md inline-flex items-center justify-center border transition-colors shrink-0 ${
+                isExpanded
+                  ? 'bg-[#0080cd] text-white border-[#0080cd]'
+                  : 'bg-sky-50 dark:bg-[#0d1f36] text-slate-600 dark:text-sky-200 border-slate-200 dark:border-sky-700 hover:bg-sky-100 dark:hover:bg-sky-900/50'
+              }`}
+            >
+              {isExpanded ? (
+                <ChevronUp className="w-3.5 h-3.5" aria-hidden="true" />
+              ) : (
+                <ChevronDown className="w-3.5 h-3.5" aria-hidden="true" />
+              )}
+            </button>
+          )}
+        </div>
+      </th>
+    );
+  };
+
+  const renderCompareSubRows = (
+    varId: ComparableVariableId,
+    renderValue: (hour: NativeModelHour | undefined) => React.ReactNode,
+    getCellBg: (hour: NativeModelHour | undefined) => string,
+  ) => {
+    const status = sharedById[varId];
+    if (!status?.isComparable || !expandedCompareVars[varId]) {
+      return null;
+    }
+
+    return status.activeModels.map((modelId) => {
+      const modelHours = (forecast.nativeByModel[modelId] ?? []).slice(0, hours.length);
+      return (
+        <tr
+          key={`${varId}_${modelId}`}
+          data-compare-row={`${varId}:${modelId}`}
+          className="text-[10px]"
+        >
+          <th className="sticky left-0 z-10 bg-[#f8fafc] dark:bg-[#0d1f36] pl-5 pr-3 py-1 text-left font-semibold text-slate-600 dark:text-sky-200 border-r border-slate-200 dark:border-sky-800">
+            <div className="flex items-center justify-between gap-1">
+              <span>↳ {MODEL_SHORT_LABELS[modelId]}</span>
+            </div>
+          </th>
+          {hours.map((h, idx) => {
+            const mHour = modelHours[idx];
+            const isCurrentCol = idx === resolvedCurrentHourIndex;
+            return (
+              <td
+                key={h.timestampUnix}
+                data-current-hour-cell={isCurrentCol ? 'true' : undefined}
+                onClick={() => onSelectHourIndex(idx)}
+                className={`px-1 py-1 cursor-pointer border-r border-slate-100 dark:border-sky-800/40 ${getCellBg(
+                  mHour,
+                )} ${getCurrentColBorderClass(idx)}`}
+              >
+                {renderValue(mHour)}
+              </td>
+            );
+          })}
+        </tr>
+      );
+    });
+  };
+
   return (
     <section
       aria-label="Tabela Horária Compacta Estilo Windguru (168h)"
-      className="rounded-2xl border border-slate-200/90 dark:border-sky-800/70 bg-white dark:bg-[#132a47] shadow-sm overflow-hidden"
+      className="rounded-2xl border border-slate-200/90 dark:border-sky-800/70 bg-white dark:bg-[#132a47] shadow-sm"
     >
       {/* Windguru-Style Clean Action Toolbar (Tune / Compare / Limites) */}
-      <div className="px-4 py-3 border-b border-slate-200 dark:border-sky-800/70 flex flex-wrap items-center justify-between gap-2.5 bg-white dark:bg-[#132a47]">
-        <div className="flex items-center gap-2.5">
+      <div className="px-4 py-3 rounded-t-2xl border-b border-slate-200 dark:border-sky-800/70 flex flex-wrap items-center justify-between gap-2.5 bg-white dark:bg-[#132a47]">
+        <div className="flex flex-wrap items-center gap-2.5">
           <div className="px-2.5 py-1 rounded-lg bg-[#0080cd] text-white text-xs font-extrabold tracking-tight flex items-center gap-1.5">
             <Table className="w-3.5 h-3.5" aria-hidden="true" />
             <span>FieldCast BLEND</span>
@@ -230,9 +459,25 @@ export const WindguruTable: React.FC<WindguruTableProps> = ({
               Tabela Horária de Previsão ({hours.length}h)
             </h2>
           </div>
+          {hasCurrentHourInSlice && currentHourBadgeText && (
+            <button
+              type="button"
+              onClick={() => {
+                onSelectHourIndex(resolvedCurrentHourIndex);
+                const el = currentHourHeaderRef.current;
+                if (el && typeof el.scrollIntoView === 'function') {
+                  el.scrollIntoView({ behavior: 'smooth', inline: 'center', block: 'nearest' });
+                }
+              }}
+              className="min-h-[28px] px-2.5 py-0.5 rounded-full text-[11px] font-bold bg-amber-100 hover:bg-amber-200 dark:bg-amber-950/60 dark:hover:bg-amber-900/70 text-amber-900 dark:text-amber-200 border border-amber-300 dark:border-amber-700 inline-flex items-center gap-1 transition-colors"
+            >
+              <Clock className="w-3 h-3 text-amber-600 dark:text-amber-400" aria-hidden="true" />
+              <span>Agora: {currentHourBadgeText}</span>
+            </button>
+          )}
         </div>
 
-        {/* Windguru Action Buttons: Parâmetros (Tune), Comparar Modelos (Compare), Limites */}
+        {/* Windguru Action Buttons: Parâmetros (Tune), Comparar Modelos (Expandir/Recolher Todas), Limites */}
         <div className="flex flex-wrap items-center gap-1.5">
           <button
             type="button"
@@ -250,17 +495,36 @@ export const WindguruTable: React.FC<WindguruTableProps> = ({
 
           <button
             type="button"
-            onClick={() => setIsCompareMode((prev) => !prev)}
-            aria-pressed={isCompareMode}
-            className={`min-h-[34px] px-3 py-1 rounded-lg text-xs font-bold inline-flex items-center gap-1.5 border transition-colors ${
-              isCompareMode
+            onClick={handleGlobalCompareToggle}
+            aria-pressed={allComparableExpanded}
+            data-testid="compare-all-toggle"
+            disabled={visibleComparableVarIds.length === 0}
+            className={`min-h-[34px] px-3 py-1 rounded-lg text-xs font-bold inline-flex items-center gap-1.5 border transition-colors disabled:opacity-50 ${
+              allComparableExpanded || someComparableExpanded
                 ? 'bg-[#0080cd] text-white border-[#0080cd] shadow-sm'
                 : 'bg-[#f4f8fb] dark:bg-[#0d1f36] text-slate-700 dark:text-sky-200 border-slate-200 dark:border-sky-800 hover:bg-sky-50'
             }`}
           >
             <GitCompare className="w-3.5 h-3.5" aria-hidden="true" />
-            <span>{isCompareMode ? 'Comparar Modelos: Ativo' : 'Comparar Modelos (Compare)'}</span>
+            <span>
+              {allComparableExpanded
+                ? `Recolher Todas (${expandedVisibleCount}/${visibleComparableVarIds.length})`
+                : someComparableExpanded
+                  ? `Expandir Todas (${expandedVisibleCount}/${visibleComparableVarIds.length})`
+                  : `Comparar Modelos (${visibleComparableVarIds.length})`}
+            </span>
           </button>
+
+          {someComparableExpanded && (
+            <button
+              type="button"
+              onClick={handleCollapseAllCompare}
+              data-testid="collapse-all-compare"
+              className="min-h-[34px] px-2.5 py-1 rounded-lg text-xs font-semibold inline-flex items-center gap-1 bg-slate-100 dark:bg-[#0d1f36] text-slate-700 dark:text-sky-200 border border-slate-200 dark:border-sky-800 hover:bg-slate-200 transition-colors"
+            >
+              Recolher todas
+            </button>
+          )}
 
           {onOpenThresholdModal && (
             <button
@@ -310,12 +574,12 @@ export const WindguruTable: React.FC<WindguruTableProps> = ({
       )}
 
       {/* Scrollable Table Container */}
-      <div className="overflow-x-auto scrollbar-thin bg-white dark:bg-[#132a47]">
+      <div className="overflow-x-auto scrollbar-thin rounded-b-2xl bg-white dark:bg-[#132a47]">
         <table className="w-full border-collapse text-center text-[11px] select-none">
           <thead>
             {/* Day Header Row */}
             <tr className="bg-[#f4f8fb] dark:bg-[#0d1f36] text-slate-800 dark:text-sky-100 border-b border-slate-200 dark:border-sky-800">
-              <th className="sticky left-0 z-20 bg-[#f4f8fb] dark:bg-[#0d1f36] px-3 py-1.5 text-left font-bold min-w-[164px] border-r border-slate-200 dark:border-sky-800">
+              <th className="sticky left-0 z-20 bg-[#f4f8fb] dark:bg-[#0d1f36] px-3 py-1.5 text-left font-bold min-w-[140px] sm:min-w-[180px] border-r border-slate-200 dark:border-sky-800">
                 Dia / Parâmetro
               </th>
               {dayGroups.map((g, idx) => (
@@ -336,17 +600,34 @@ export const WindguruTable: React.FC<WindguruTableProps> = ({
               </th>
               {hours.map((h, idx) => {
                 const isSelected = idx === selectedHourIndex;
+                const isCurrent = idx === resolvedCurrentHourIndex;
+                const hourOnly = formatHourOnly(h.timestampUnix, forecast.timezone);
+                const fullHHMM = formatLocalHourBadge(h.timestampUnix, forecast.timezone);
                 return (
                   <th
                     key={h.timestampUnix}
+                    ref={isCurrent ? currentHourHeaderRef : undefined}
+                    data-current-hour={isCurrent ? 'true' : undefined}
                     onClick={() => onSelectHourIndex(idx)}
-                    className={`min-w-[38px] px-1 py-1 cursor-pointer transition-colors border-r border-slate-100 dark:border-sky-800/50 ${
-                      isSelected
-                        ? 'bg-[#0080cd] text-white font-extrabold'
-                        : 'hover:bg-sky-50 dark:hover:bg-sky-900/40'
+                    className={`min-w-[42px] px-1 py-1 cursor-pointer transition-colors border-r border-slate-100 dark:border-sky-800/50 ${getCurrentColBorderClass(
+                      idx,
+                    )} ${
+                      isCurrent
+                        ? isSelected
+                          ? 'bg-amber-100 dark:bg-amber-950/60 text-amber-950 dark:text-amber-100 font-extrabold ring-2 ring-inset ring-[#0080cd]'
+                          : 'bg-amber-50 dark:bg-amber-950/50 text-amber-950 dark:text-amber-100 font-extrabold'
+                        : isSelected
+                          ? 'bg-[#0080cd] text-white font-extrabold'
+                          : 'hover:bg-sky-50 dark:hover:bg-sky-900/40'
                     }`}
                   >
-                    {formatHourOnly(h.timestampUnix, forecast.timezone)}h
+                    {isCurrent ? (
+                      <span className="inline-flex items-center justify-center px-1.5 py-0.5 rounded-full bg-amber-500 text-slate-950 text-[10px] font-extrabold leading-none">
+                        {fullHHMM}
+                      </span>
+                    ) : (
+                      <span>{hourOnly}h</span>
+                    )}
                   </th>
                 );
               })}
@@ -354,16 +635,17 @@ export const WindguruTable: React.FC<WindguruTableProps> = ({
           </thead>
 
           <tbody className="divide-y divide-slate-100 dark:divide-sky-800/50">
-            {/* 1. Wind Speed 10m + Direction + Gusts 10m */}
+            {/* 1. Wind Speed 10m + Gusts 10m + Direction 10m */}
             {visibleParams.wind10m && (
               <>
                 <tr>
-                  <th className="sticky left-0 z-10 bg-white dark:bg-[#132a47] px-3 py-1.5 text-left font-bold text-slate-800 dark:text-sky-100 border-r border-slate-200 dark:border-sky-800 flex items-center justify-between gap-1">
-                    <span>Vento (km/h)</span>
-                    <span className="px-1.5 py-0.2 rounded text-[9px] font-extrabold bg-emerald-100 text-emerald-800 dark:bg-emerald-900 dark:text-emerald-200">
-                      {Math.round(forecast.overallConfidence.total)}%
-                    </span>
-                  </th>
+                  {renderVariableHeaderCell('Vento (km/h)', 'windSpeed10m', {
+                    extraBadge: (
+                      <span className="px-1.5 py-0.2 rounded text-[9px] font-extrabold bg-emerald-100 text-emerald-800 dark:bg-emerald-900 dark:text-emerald-200 shrink-0">
+                        {Math.round(forecast.overallConfidence.total)}%
+                      </span>
+                    ),
+                  })}
                   {hours.map((h, idx) => {
                     const val = isNative
                       ? nativeList[idx]?.windSpeed10m ?? null
@@ -371,85 +653,26 @@ export const WindguruTable: React.FC<WindguruTableProps> = ({
                     return (
                       <td
                         key={h.timestampUnix}
+                        data-current-hour-cell={idx === resolvedCurrentHourIndex ? 'true' : undefined}
                         onClick={() => onSelectHourIndex(idx)}
                         className={`px-1 py-1.5 cursor-pointer border-r border-slate-100 dark:border-sky-800/40 ${getWindSpeedBgClass(
                           val,
-                        )}`}
+                        )} ${getCurrentColBorderClass(idx)}`}
                       >
                         {val !== null ? Math.round(val) : '—'}
                       </td>
                     );
                   })}
                 </tr>
-
-                {/* Windguru Compare Mode: Sub-rows for GFS, ECMWF, ICON */}
-                {isCompareMode && (
-                  <>
-                    <tr className="text-[10px]">
-                      <th className="sticky left-0 z-10 bg-[#f8fafc] dark:bg-[#0d1f36] pl-5 pr-3 py-1 text-left font-semibold text-slate-600 dark:text-sky-200 border-r border-slate-200 dark:border-sky-800">
-                        ↳ ECMWF 9 km
-                      </th>
-                      {hours.map((h, idx) => {
-                        const val = ecmwfList[idx]?.windSpeed10m ?? null;
-                        return (
-                          <td
-                            key={h.timestampUnix}
-                            onClick={() => onSelectHourIndex(idx)}
-                            className={`px-1 py-1 cursor-pointer border-r border-slate-100 dark:border-sky-800/40 ${getWindSpeedBgClass(
-                              val,
-                            )}`}
-                          >
-                            {val !== null ? Math.round(val) : '—'}
-                          </td>
-                        );
-                      })}
-                    </tr>
-                    <tr className="text-[10px]">
-                      <th className="sticky left-0 z-10 bg-[#f8fafc] dark:bg-[#0d1f36] pl-5 pr-3 py-1 text-left font-semibold text-slate-600 dark:text-sky-200 border-r border-slate-200 dark:border-sky-800">
-                        ↳ GFS 13 km
-                      </th>
-                      {hours.map((h, idx) => {
-                        const val = gfsList[idx]?.windSpeed10m ?? null;
-                        return (
-                          <td
-                            key={h.timestampUnix}
-                            onClick={() => onSelectHourIndex(idx)}
-                            className={`px-1 py-1 cursor-pointer border-r border-slate-100 dark:border-sky-800/40 ${getWindSpeedBgClass(
-                              val,
-                            )}`}
-                          >
-                            {val !== null ? Math.round(val) : '—'}
-                          </td>
-                        );
-                      })}
-                    </tr>
-                    <tr className="text-[10px]">
-                      <th className="sticky left-0 z-10 bg-[#f8fafc] dark:bg-[#0d1f36] pl-5 pr-3 py-1 text-left font-semibold text-slate-600 dark:text-sky-200 border-r border-slate-200 dark:border-sky-800">
-                        ↳ ICON 13 km
-                      </th>
-                      {hours.map((h, idx) => {
-                        const val = iconList[idx]?.windSpeed10m ?? null;
-                        return (
-                          <td
-                            key={h.timestampUnix}
-                            onClick={() => onSelectHourIndex(idx)}
-                            className={`px-1 py-1 cursor-pointer border-r border-slate-100 dark:border-sky-800/40 ${getWindSpeedBgClass(
-                              val,
-                            )}`}
-                          >
-                            {val !== null ? Math.round(val) : '—'}
-                          </td>
-                        );
-                      })}
-                    </tr>
-                  </>
+                {renderCompareSubRows(
+                  'windSpeed10m',
+                  (m) => (m?.windSpeed10m !== null && m?.windSpeed10m !== undefined ? Math.round(m.windSpeed10m) : '—'),
+                  (m) => getWindSpeedBgClass(m?.windSpeed10m ?? null),
                 )}
 
                 {/* Wind Gusts 10m */}
                 <tr>
-                  <th className="sticky left-0 z-10 bg-white dark:bg-[#132a47] px-3 py-1.5 text-left font-bold text-slate-800 dark:text-sky-100 border-r border-slate-200 dark:border-sky-800">
-                    Rajadas (km/h)
-                  </th>
+                  {renderVariableHeaderCell('Rajadas (km/h)', 'windGusts10m')}
                   {hours.map((h, idx) => {
                     const val = isNative
                       ? nativeList[idx]?.windGusts10m ?? null
@@ -457,22 +680,29 @@ export const WindguruTable: React.FC<WindguruTableProps> = ({
                     return (
                       <td
                         key={h.timestampUnix}
+                        data-current-hour-cell={idx === resolvedCurrentHourIndex ? 'true' : undefined}
                         onClick={() => onSelectHourIndex(idx)}
                         className={`px-1 py-1.5 cursor-pointer border-r border-slate-100 dark:border-sky-800/40 ${getWindSpeedBgClass(
                           val,
-                        )}`}
+                        )} ${getCurrentColBorderClass(idx)}`}
                       >
                         {val !== null ? Math.round(val) : '—'}
                       </td>
                     );
                   })}
                 </tr>
+                {renderCompareSubRows(
+                  'windGusts10m',
+                  (m) => (m?.windGusts10m !== null && m?.windGusts10m !== undefined ? Math.round(m.windGusts10m) : '—'),
+                  (m) => getWindSpeedBgClass(m?.windGusts10m ?? null),
+                )}
 
-                {/* Wind Direction 10m Arrow (Crisp dark arrows on clean white background) */}
+                {/* Wind Direction 10m Arrow */}
                 <tr>
-                  <th className="sticky left-0 z-10 bg-white dark:bg-[#132a47] px-3 py-1 text-left font-bold text-slate-700 dark:text-sky-200 border-r border-slate-200 dark:border-sky-800">
-                    Direção do vento
-                  </th>
+                  {renderVariableHeaderCell('Direção do vento', 'windDirection10m', {
+                    thClassName:
+                      'sticky left-0 z-10 bg-white dark:bg-[#132a47] px-3 py-1 text-left font-bold text-slate-700 dark:text-sky-200 border-r border-slate-200 dark:border-sky-800',
+                  })}
                   {hours.map((h, idx) => {
                     const deg = isNative
                       ? nativeList[idx]?.windDirection10m ?? null
@@ -480,31 +710,38 @@ export const WindguruTable: React.FC<WindguruTableProps> = ({
                     return (
                       <td
                         key={h.timestampUnix}
+                        data-current-hour-cell={idx === resolvedCurrentHourIndex ? 'true' : undefined}
                         onClick={() => onSelectHourIndex(idx)}
-                        className="px-1 py-1 cursor-pointer bg-white dark:bg-[#132a47] border-r border-slate-100 dark:border-sky-800/40"
+                        className={`px-1 py-1 cursor-pointer bg-white dark:bg-[#132a47] border-r border-slate-100 dark:border-sky-800/40 ${getCurrentColBorderClass(
+                          idx,
+                        )}`}
                       >
                         <DirectionArrow degree={deg} label="Direção do Vento 10m" />
                       </td>
                     );
                   })}
                 </tr>
+                {renderCompareSubRows(
+                  'windDirection10m',
+                  (m) => <DirectionArrow degree={m?.windDirection10m} label="Direção do Vento 10m" />,
+                  () => 'bg-white dark:bg-[#132a47]',
+                )}
               </>
             )}
 
-            {/* 2. Marine Waves, Period & Direction */}
+            {/* 2. Marine Waves, Period & Direction (single ocean grid -> no multi-model compare arrow) */}
             {visibleParams.waves && forecast.marineAvailable && (
               <>
                 <tr>
-                  <th className="sticky left-0 z-10 bg-white dark:bg-[#132a47] px-3 py-1.5 text-left font-bold text-slate-800 dark:text-sky-100 border-r border-slate-200 dark:border-sky-800">
-                    Ondas (m)
-                  </th>
+                  {renderVariableHeaderCell('Ondas (m)')}
                   {hours.map((h, idx) => (
                     <td
                       key={h.timestampUnix}
+                      data-current-hour-cell={idx === resolvedCurrentHourIndex ? 'true' : undefined}
                       onClick={() => onSelectHourIndex(idx)}
                       className={`px-1 py-1.5 cursor-pointer border-r border-slate-100 dark:border-sky-800/40 ${getWaveBgClass(
                         h.marine?.waveHeight,
-                      )}`}
+                      )} ${getCurrentColBorderClass(idx)}`}
                     >
                       {h.marine?.waveHeight !== null && h.marine?.waveHeight !== undefined
                         ? h.marine.waveHeight.toFixed(1)
@@ -514,14 +751,18 @@ export const WindguruTable: React.FC<WindguruTableProps> = ({
                 </tr>
 
                 <tr>
-                  <th className="sticky left-0 z-10 bg-white dark:bg-[#132a47] px-3 py-1 text-left font-semibold text-slate-600 dark:text-sky-200 border-r border-slate-200 dark:border-sky-800">
-                    Período de vaga (s)
-                  </th>
+                  {renderVariableHeaderCell('Período de vaga (s)', undefined, {
+                    thClassName:
+                      'sticky left-0 z-10 bg-white dark:bg-[#132a47] px-3 py-1 text-left font-semibold text-slate-600 dark:text-sky-200 border-r border-slate-200 dark:border-sky-800',
+                  })}
                   {hours.map((h, idx) => (
                     <td
                       key={h.timestampUnix}
+                      data-current-hour-cell={idx === resolvedCurrentHourIndex ? 'true' : undefined}
                       onClick={() => onSelectHourIndex(idx)}
-                      className="px-1 py-1 cursor-pointer bg-white dark:bg-[#132a47] text-slate-700 dark:text-sky-200 font-semibold border-r border-slate-100 dark:border-sky-800/40"
+                      className={`px-1 py-1 cursor-pointer bg-white dark:bg-[#132a47] text-slate-700 dark:text-sky-200 font-semibold border-r border-slate-100 dark:border-sky-800/40 ${getCurrentColBorderClass(
+                        idx,
+                      )}`}
                     >
                       {h.marine?.wavePeriod !== null && h.marine?.wavePeriod !== undefined
                         ? Math.round(h.marine.wavePeriod)
@@ -531,14 +772,18 @@ export const WindguruTable: React.FC<WindguruTableProps> = ({
                 </tr>
 
                 <tr>
-                  <th className="sticky left-0 z-10 bg-white dark:bg-[#132a47] px-3 py-1 text-left font-semibold text-slate-600 dark:text-sky-200 border-r border-slate-200 dark:border-sky-800">
-                    Direção das ondas
-                  </th>
+                  {renderVariableHeaderCell('Direção das ondas', undefined, {
+                    thClassName:
+                      'sticky left-0 z-10 bg-white dark:bg-[#132a47] px-3 py-1 text-left font-semibold text-slate-600 dark:text-sky-200 border-r border-slate-200 dark:border-sky-800',
+                  })}
                   {hours.map((h, idx) => (
                     <td
                       key={h.timestampUnix}
+                      data-current-hour-cell={idx === resolvedCurrentHourIndex ? 'true' : undefined}
                       onClick={() => onSelectHourIndex(idx)}
-                      className="px-1 py-1 cursor-pointer bg-white dark:bg-[#132a47] border-r border-slate-100 dark:border-sky-800/40"
+                      className={`px-1 py-1 cursor-pointer bg-white dark:bg-[#132a47] border-r border-slate-100 dark:border-sky-800/40 ${getCurrentColBorderClass(
+                        idx,
+                      )}`}
                     >
                       <DirectionArrow degree={h.marine?.waveDirection} label="Direção da Onda" />
                     </td>
@@ -547,13 +792,14 @@ export const WindguruTable: React.FC<WindguruTableProps> = ({
               </>
             )}
 
-            {/* 3. Vertical Profile Rows (80m / 100m / 120m) — Shown only when verticalProfile is enabled */}
+            {/* 3. Vertical Profile Rows (80m / 100m / 120m speed & direction) */}
             {visibleParams.verticalProfile && (
               <>
                 <tr>
-                  <th className="sticky left-0 z-10 bg-white dark:bg-[#132a47] px-3 py-1.5 text-left font-semibold text-slate-700 dark:text-sky-200 border-r border-slate-200 dark:border-sky-800">
-                    Vento 80m (km/h)
-                  </th>
+                  {renderVariableHeaderCell('Vento 80m (km/h)', 'windSpeed80m', {
+                    thClassName:
+                      'sticky left-0 z-10 bg-white dark:bg-[#132a47] px-3 py-1.5 text-left font-semibold text-slate-700 dark:text-sky-200 border-r border-slate-200 dark:border-sky-800',
+                  })}
                   {hours.map((h, idx) => {
                     const nativeVal = isNative
                       ? nativeList[idx]?.windSpeed80m ?? null
@@ -563,21 +809,57 @@ export const WindguruTable: React.FC<WindguruTableProps> = ({
                     return (
                       <td
                         key={h.timestampUnix}
+                        data-current-hour-cell={idx === resolvedCurrentHourIndex ? 'true' : undefined}
                         onClick={() => onSelectHourIndex(idx)}
                         className={`px-1 py-1.5 cursor-pointer border-r border-slate-100 dark:border-sky-800/40 ${getWindSpeedBgClass(
                           finalVal,
-                        )}`}
+                        )} ${getCurrentColBorderClass(idx)}`}
                       >
                         {finalVal !== null ? `${Math.round(finalVal)}${interpVal !== null ? '*' : ''}` : '—'}
                       </td>
                     );
                   })}
                 </tr>
+                {renderCompareSubRows(
+                  'windSpeed80m',
+                  (m) => (m?.windSpeed80m !== null && m?.windSpeed80m !== undefined ? Math.round(m.windSpeed80m) : '—'),
+                  (m) => getWindSpeedBgClass(m?.windSpeed80m ?? null),
+                )}
 
                 <tr>
-                  <th className="sticky left-0 z-10 bg-white dark:bg-[#132a47] px-3 py-1.5 text-left font-semibold text-slate-700 dark:text-sky-200 border-r border-slate-200 dark:border-sky-800">
-                    Vento 100m (km/h)
-                  </th>
+                  {renderVariableHeaderCell('Direção 80m', 'windDirection80m', {
+                    thClassName:
+                      'sticky left-0 z-10 bg-white dark:bg-[#132a47] px-3 py-1 text-left font-semibold text-slate-600 dark:text-sky-200 border-r border-slate-200 dark:border-sky-800',
+                  })}
+                  {hours.map((h, idx) => {
+                    const deg = isNative
+                      ? nativeList[idx]?.windDirection80m ?? null
+                      : h.windDirection80m.degree;
+                    return (
+                      <td
+                        key={h.timestampUnix}
+                        data-current-hour-cell={idx === resolvedCurrentHourIndex ? 'true' : undefined}
+                        onClick={() => onSelectHourIndex(idx)}
+                        className={`px-1 py-1 cursor-pointer bg-white dark:bg-[#132a47] border-r border-slate-100 dark:border-sky-800/40 ${getCurrentColBorderClass(
+                          idx,
+                        )}`}
+                      >
+                        <DirectionArrow degree={deg} label="Direção do Vento 80m" />
+                      </td>
+                    );
+                  })}
+                </tr>
+                {renderCompareSubRows(
+                  'windDirection80m',
+                  (m) => <DirectionArrow degree={m?.windDirection80m} label="Direção do Vento 80m" />,
+                  () => 'bg-white dark:bg-[#132a47]',
+                )}
+
+                <tr>
+                  {renderVariableHeaderCell('Vento 100m (km/h)', 'windSpeed100m', {
+                    thClassName:
+                      'sticky left-0 z-10 bg-white dark:bg-[#132a47] px-3 py-1.5 text-left font-semibold text-slate-700 dark:text-sky-200 border-r border-slate-200 dark:border-sky-800',
+                  })}
                   {hours.map((h, idx) => {
                     const nativeVal = isNative
                       ? nativeList[idx]?.windSpeed100m ?? null
@@ -587,21 +869,57 @@ export const WindguruTable: React.FC<WindguruTableProps> = ({
                     return (
                       <td
                         key={h.timestampUnix}
+                        data-current-hour-cell={idx === resolvedCurrentHourIndex ? 'true' : undefined}
                         onClick={() => onSelectHourIndex(idx)}
                         className={`px-1 py-1.5 cursor-pointer border-r border-slate-100 dark:border-sky-800/40 ${getWindSpeedBgClass(
                           finalVal,
-                        )}`}
+                        )} ${getCurrentColBorderClass(idx)}`}
                       >
                         {finalVal !== null ? `${Math.round(finalVal)}${interpVal !== null ? '*' : ''}` : '—'}
                       </td>
                     );
                   })}
                 </tr>
+                {renderCompareSubRows(
+                  'windSpeed100m',
+                  (m) => (m?.windSpeed100m !== null && m?.windSpeed100m !== undefined ? Math.round(m.windSpeed100m) : '—'),
+                  (m) => getWindSpeedBgClass(m?.windSpeed100m ?? null),
+                )}
 
                 <tr>
-                  <th className="sticky left-0 z-10 bg-white dark:bg-[#132a47] px-3 py-1.5 text-left font-semibold text-slate-700 dark:text-sky-200 border-r border-slate-200 dark:border-sky-800">
-                    Vento 120m (km/h)
-                  </th>
+                  {renderVariableHeaderCell('Direção 100m', 'windDirection100m', {
+                    thClassName:
+                      'sticky left-0 z-10 bg-white dark:bg-[#132a47] px-3 py-1 text-left font-semibold text-slate-600 dark:text-sky-200 border-r border-slate-200 dark:border-sky-800',
+                  })}
+                  {hours.map((h, idx) => {
+                    const deg = isNative
+                      ? nativeList[idx]?.windDirection100m ?? null
+                      : h.windDirection100m.degree;
+                    return (
+                      <td
+                        key={h.timestampUnix}
+                        data-current-hour-cell={idx === resolvedCurrentHourIndex ? 'true' : undefined}
+                        onClick={() => onSelectHourIndex(idx)}
+                        className={`px-1 py-1 cursor-pointer bg-white dark:bg-[#132a47] border-r border-slate-100 dark:border-sky-800/40 ${getCurrentColBorderClass(
+                          idx,
+                        )}`}
+                      >
+                        <DirectionArrow degree={deg} label="Direção do Vento 100m" />
+                      </td>
+                    );
+                  })}
+                </tr>
+                {renderCompareSubRows(
+                  'windDirection100m',
+                  (m) => <DirectionArrow degree={m?.windDirection100m} label="Direção do Vento 100m" />,
+                  () => 'bg-white dark:bg-[#132a47]',
+                )}
+
+                <tr>
+                  {renderVariableHeaderCell('Vento 120m (km/h)', 'windSpeed120m', {
+                    thClassName:
+                      'sticky left-0 z-10 bg-white dark:bg-[#132a47] px-3 py-1.5 text-left font-semibold text-slate-700 dark:text-sky-200 border-r border-slate-200 dark:border-sky-800',
+                  })}
                   {hours.map((h, idx) => {
                     const nativeVal = isNative
                       ? nativeList[idx]?.windSpeed120m ?? null
@@ -611,51 +929,151 @@ export const WindguruTable: React.FC<WindguruTableProps> = ({
                     return (
                       <td
                         key={h.timestampUnix}
+                        data-current-hour-cell={idx === resolvedCurrentHourIndex ? 'true' : undefined}
                         onClick={() => onSelectHourIndex(idx)}
                         className={`px-1 py-1.5 cursor-pointer border-r border-slate-100 dark:border-sky-800/40 ${getWindSpeedBgClass(
                           finalVal,
-                        )}`}
+                        )} ${getCurrentColBorderClass(idx)}`}
                       >
                         {finalVal !== null ? `${Math.round(finalVal)}${interpVal !== null ? '*' : ''}` : '—'}
                       </td>
                     );
                   })}
                 </tr>
+                {renderCompareSubRows(
+                  'windSpeed120m',
+                  (m) => (m?.windSpeed120m !== null && m?.windSpeed120m !== undefined ? Math.round(m.windSpeed120m) : '—'),
+                  (m) => getWindSpeedBgClass(m?.windSpeed120m ?? null),
+                )}
+
+                <tr>
+                  {renderVariableHeaderCell('Direção 120m', 'windDirection120m', {
+                    thClassName:
+                      'sticky left-0 z-10 bg-white dark:bg-[#132a47] px-3 py-1 text-left font-semibold text-slate-600 dark:text-sky-200 border-r border-slate-200 dark:border-sky-800',
+                  })}
+                  {hours.map((h, idx) => {
+                    const deg = isNative
+                      ? nativeList[idx]?.windDirection120m ?? null
+                      : h.windDirection120m.degree;
+                    return (
+                      <td
+                        key={h.timestampUnix}
+                        data-current-hour-cell={idx === resolvedCurrentHourIndex ? 'true' : undefined}
+                        onClick={() => onSelectHourIndex(idx)}
+                        className={`px-1 py-1 cursor-pointer bg-white dark:bg-[#132a47] border-r border-slate-100 dark:border-sky-800/40 ${getCurrentColBorderClass(
+                          idx,
+                        )}`}
+                      >
+                        <DirectionArrow degree={deg} label="Direção do Vento 120m" />
+                      </td>
+                    );
+                  })}
+                </tr>
+                {renderCompareSubRows(
+                  'windDirection120m',
+                  (m) => <DirectionArrow degree={m?.windDirection120m} label="Direção do Vento 120m" />,
+                  () => 'bg-white dark:bg-[#132a47]',
+                )}
               </>
             )}
 
-            {/* 4. Temperature 2m (°C) */}
+            {/* 4. Temperature 2m, Dew Point 2m & Visibility */}
             {visibleParams.tempVisibility && (
-              <tr>
-                <th className="sticky left-0 z-10 bg-white dark:bg-[#132a47] px-3 py-1.5 text-left font-bold text-slate-800 dark:text-sky-100 border-r border-slate-200 dark:border-sky-800">
-                  Temperatura (°C)
-                </th>
-                {hours.map((h, idx) => {
-                  const val = isNative
-                    ? nativeList[idx]?.temperature2m ?? null
-                    : h.temperature2mC.mean;
-                  return (
-                    <td
-                      key={h.timestampUnix}
-                      onClick={() => onSelectHourIndex(idx)}
-                      className={`px-1 py-1.5 cursor-pointer border-r border-slate-100 dark:border-sky-800/40 ${getTempBgClass(
-                        val,
-                      )}`}
-                    >
-                      {val !== null ? Math.round(val) : '—'}
-                    </td>
-                  );
-                })}
-              </tr>
+              <>
+                <tr>
+                  {renderVariableHeaderCell('Temperatura (°C)', 'temperature2m')}
+                  {hours.map((h, idx) => {
+                    const val = isNative
+                      ? nativeList[idx]?.temperature2m ?? null
+                      : h.temperature2mC.mean;
+                    return (
+                      <td
+                        key={h.timestampUnix}
+                        data-current-hour-cell={idx === resolvedCurrentHourIndex ? 'true' : undefined}
+                        onClick={() => onSelectHourIndex(idx)}
+                        className={`px-1 py-1.5 cursor-pointer border-r border-slate-100 dark:border-sky-800/40 ${getTempBgClass(
+                          val,
+                        )} ${getCurrentColBorderClass(idx)}`}
+                      >
+                        {val !== null ? Math.round(val) : '—'}
+                      </td>
+                    );
+                  })}
+                </tr>
+                {renderCompareSubRows(
+                  'temperature2m',
+                  (m) => (m?.temperature2m !== null && m?.temperature2m !== undefined ? Math.round(m.temperature2m) : '—'),
+                  (m) => getTempBgClass(m?.temperature2m ?? null),
+                )}
+
+                <tr>
+                  {renderVariableHeaderCell('Ponto de Orvalho (°C)', 'dewPoint2m', {
+                    thClassName:
+                      'sticky left-0 z-10 bg-white dark:bg-[#132a47] px-3 py-1 text-left font-semibold text-slate-600 dark:text-sky-200 border-r border-slate-200 dark:border-sky-800',
+                  })}
+                  {hours.map((h, idx) => {
+                    const val = isNative
+                      ? nativeList[idx]?.dewPoint2m ?? null
+                      : h.dewPoint2mC.mean;
+                    return (
+                      <td
+                        key={h.timestampUnix}
+                        data-current-hour-cell={idx === resolvedCurrentHourIndex ? 'true' : undefined}
+                        onClick={() => onSelectHourIndex(idx)}
+                        className={`px-1 py-1 cursor-pointer border-r border-slate-100 dark:border-sky-800/40 ${getTempBgClass(
+                          val,
+                        )} ${getCurrentColBorderClass(idx)}`}
+                      >
+                        {val !== null ? Math.round(val) : '—'}
+                      </td>
+                    );
+                  })}
+                </tr>
+                {renderCompareSubRows(
+                  'dewPoint2m',
+                  (m) => (m?.dewPoint2m !== null && m?.dewPoint2m !== undefined ? Math.round(m.dewPoint2m) : '—'),
+                  (m) => getTempBgClass(m?.dewPoint2m ?? null),
+                )}
+
+                <tr>
+                  {renderVariableHeaderCell('Visibilidade (km)', 'visibility', {
+                    thClassName:
+                      'sticky left-0 z-10 bg-white dark:bg-[#132a47] px-3 py-1 text-left font-semibold text-slate-600 dark:text-sky-200 border-r border-slate-200 dark:border-sky-800',
+                  })}
+                  {hours.map((h, idx) => {
+                    const val = isNative
+                      ? nativeList[idx]?.visibility ?? null
+                      : h.visibilityM.mean;
+                    return (
+                      <td
+                        key={h.timestampUnix}
+                        data-current-hour-cell={idx === resolvedCurrentHourIndex ? 'true' : undefined}
+                        onClick={() => onSelectHourIndex(idx)}
+                        className={`px-1 py-1 cursor-pointer border-r border-slate-100 dark:border-sky-800/40 ${getVisibilityBgClass(
+                          val,
+                        )} ${getCurrentColBorderClass(idx)}`}
+                      >
+                        {val !== null ? (val / 1000).toFixed(1) : '—'}
+                      </td>
+                    );
+                  })}
+                </tr>
+                {renderCompareSubRows(
+                  'visibility',
+                  (m) => (m?.visibility !== null && m?.visibility !== undefined ? (m.visibility / 1000).toFixed(1) : '—'),
+                  (m) => getVisibilityBgClass(m?.visibility ?? null),
+                )}
+              </>
             )}
 
-            {/* 5. Stratified Clouds High / Mid / Low (%) — Windguru 3-row gray shading */}
+            {/* 5. Stratified Clouds High / Mid / Low (%) */}
             {visibleParams.clouds && (
               <>
                 <tr className="text-[10px]">
-                  <th className="sticky left-0 z-10 bg-white dark:bg-[#132a47] px-3 py-1 text-left font-semibold text-slate-600 dark:text-sky-200 border-r border-slate-200 dark:border-sky-800">
-                    Nuvens Altas (%)
-                  </th>
+                  {renderVariableHeaderCell('Nuvens Altas (%)', 'cloudCoverHigh', {
+                    thClassName:
+                      'sticky left-0 z-10 bg-white dark:bg-[#132a47] px-3 py-1 text-left font-semibold text-slate-600 dark:text-sky-200 border-r border-slate-200 dark:border-sky-800',
+                  })}
                   {hours.map((h, idx) => {
                     const high = isNative
                       ? nativeList[idx]?.cloudCoverHigh ?? 0
@@ -663,20 +1081,28 @@ export const WindguruTable: React.FC<WindguruTableProps> = ({
                     return (
                       <td
                         key={h.timestampUnix}
+                        data-current-hour-cell={idx === resolvedCurrentHourIndex ? 'true' : undefined}
                         onClick={() => onSelectHourIndex(idx)}
                         className={`px-1 py-0.5 cursor-pointer border-r border-slate-100 dark:border-sky-800/40 ${getCloudCellBgClass(
                           high,
-                        )}`}
+                        )} ${getCurrentColBorderClass(idx)}`}
                       >
                         {Math.round(high) > 5 ? Math.round(high) : ''}
                       </td>
                     );
                   })}
                 </tr>
+                {renderCompareSubRows(
+                  'cloudCoverHigh',
+                  (m) => (m?.cloudCoverHigh !== null && m?.cloudCoverHigh !== undefined ? Math.round(m.cloudCoverHigh) : '—'),
+                  (m) => getCloudCellBgClass(m?.cloudCoverHigh ?? null),
+                )}
+
                 <tr className="text-[10px]">
-                  <th className="sticky left-0 z-10 bg-white dark:bg-[#132a47] px-3 py-1 text-left font-semibold text-slate-600 dark:text-sky-200 border-r border-slate-200 dark:border-sky-800">
-                    Nuvens Médias (%)
-                  </th>
+                  {renderVariableHeaderCell('Nuvens Médias (%)', 'cloudCoverMid', {
+                    thClassName:
+                      'sticky left-0 z-10 bg-white dark:bg-[#132a47] px-3 py-1 text-left font-semibold text-slate-600 dark:text-sky-200 border-r border-slate-200 dark:border-sky-800',
+                  })}
                   {hours.map((h, idx) => {
                     const mid = isNative
                       ? nativeList[idx]?.cloudCoverMid ?? 0
@@ -684,20 +1110,28 @@ export const WindguruTable: React.FC<WindguruTableProps> = ({
                     return (
                       <td
                         key={h.timestampUnix}
+                        data-current-hour-cell={idx === resolvedCurrentHourIndex ? 'true' : undefined}
                         onClick={() => onSelectHourIndex(idx)}
                         className={`px-1 py-0.5 cursor-pointer border-r border-slate-100 dark:border-sky-800/40 ${getCloudCellBgClass(
                           mid,
-                        )}`}
+                        )} ${getCurrentColBorderClass(idx)}`}
                       >
                         {Math.round(mid) > 5 ? Math.round(mid) : ''}
                       </td>
                     );
                   })}
                 </tr>
+                {renderCompareSubRows(
+                  'cloudCoverMid',
+                  (m) => (m?.cloudCoverMid !== null && m?.cloudCoverMid !== undefined ? Math.round(m.cloudCoverMid) : '—'),
+                  (m) => getCloudCellBgClass(m?.cloudCoverMid ?? null),
+                )}
+
                 <tr className="text-[10px]">
-                  <th className="sticky left-0 z-10 bg-white dark:bg-[#132a47] px-3 py-1 text-left font-semibold text-slate-600 dark:text-sky-200 border-r border-slate-200 dark:border-sky-800">
-                    Nuvens Baixas (%)
-                  </th>
+                  {renderVariableHeaderCell('Nuvens Baixas (%)', 'cloudCoverLow', {
+                    thClassName:
+                      'sticky left-0 z-10 bg-white dark:bg-[#132a47] px-3 py-1 text-left font-semibold text-slate-600 dark:text-sky-200 border-r border-slate-200 dark:border-sky-800',
+                  })}
                   {hours.map((h, idx) => {
                     const low = isNative
                       ? nativeList[idx]?.cloudCoverLow ?? 0
@@ -705,26 +1139,30 @@ export const WindguruTable: React.FC<WindguruTableProps> = ({
                     return (
                       <td
                         key={h.timestampUnix}
+                        data-current-hour-cell={idx === resolvedCurrentHourIndex ? 'true' : undefined}
                         onClick={() => onSelectHourIndex(idx)}
                         className={`px-1 py-0.5 cursor-pointer border-r border-slate-100 dark:border-sky-800/40 ${getCloudCellBgClass(
                           low,
-                        )}`}
+                        )} ${getCurrentColBorderClass(idx)}`}
                       >
                         {Math.round(low) > 5 ? Math.round(low) : ''}
                       </td>
                     );
                   })}
                 </tr>
+                {renderCompareSubRows(
+                  'cloudCoverLow',
+                  (m) => (m?.cloudCoverLow !== null && m?.cloudCoverLow !== undefined ? Math.round(m.cloudCoverLow) : '—'),
+                  (m) => getCloudCellBgClass(m?.cloudCoverLow ?? null),
+                )}
               </>
             )}
 
-            {/* 6. Precipitation (mm/h) & Surface Pressure (hPa) */}
+            {/* 6. Precipitation (mm/h), Precip Prob (%) & Surface Pressure (hPa) */}
             {visibleParams.rainPressure && (
               <>
                 <tr>
-                  <th className="sticky left-0 z-10 bg-white dark:bg-[#132a47] px-3 py-1.5 text-left font-bold text-slate-800 dark:text-sky-100 border-r border-slate-200 dark:border-sky-800">
-                    Precipitação (mm/h)
-                  </th>
+                  {renderVariableHeaderCell('Precipitação (mm/h)', 'precipitation')}
                   {hours.map((h, idx) => {
                     const val = isNative
                       ? nativeList[idx]?.precipitation ?? null
@@ -732,21 +1170,66 @@ export const WindguruTable: React.FC<WindguruTableProps> = ({
                     return (
                       <td
                         key={h.timestampUnix}
+                        data-current-hour-cell={idx === resolvedCurrentHourIndex ? 'true' : undefined}
                         onClick={() => onSelectHourIndex(idx)}
                         className={`px-1 py-1.5 cursor-pointer border-r border-slate-100 dark:border-sky-800/40 ${getRainBgClass(
                           val,
-                        )}`}
+                        )} ${getCurrentColBorderClass(idx)}`}
                       >
                         {val !== null && val > 0.05 ? val.toFixed(1) : ''}
                       </td>
                     );
                   })}
                 </tr>
+                {renderCompareSubRows(
+                  'precipitation',
+                  (m) =>
+                    m?.precipitation !== null && m?.precipitation !== undefined
+                      ? m.precipitation > 0.05
+                        ? m.precipitation.toFixed(1)
+                        : '0.0'
+                      : '—',
+                  (m) => getRainBgClass(m?.precipitation ?? null),
+                )}
 
                 <tr>
-                  <th className="sticky left-0 z-10 bg-white dark:bg-[#132a47] px-3 py-1 text-left font-semibold text-slate-600 dark:text-sky-200 border-r border-slate-200 dark:border-sky-800">
-                    Pressão (hPa)
-                  </th>
+                  {renderVariableHeaderCell('Prob. Chuva (%)', 'precipitationProbability', {
+                    thClassName:
+                      'sticky left-0 z-10 bg-white dark:bg-[#132a47] px-3 py-1 text-left font-semibold text-slate-600 dark:text-sky-200 border-r border-slate-200 dark:border-sky-800',
+                  })}
+                  {hours.map((h, idx) => {
+                    const val = isNative
+                      ? nativeList[idx]?.precipitationProbability ?? null
+                      : h.precipitationProbabilityPct.mean;
+                    return (
+                      <td
+                        key={h.timestampUnix}
+                        data-current-hour-cell={idx === resolvedCurrentHourIndex ? 'true' : undefined}
+                        onClick={() => onSelectHourIndex(idx)}
+                        className={`px-1 py-1 cursor-pointer border-r border-slate-100 dark:border-sky-800/40 ${getPrecipProbBgClass(
+                          val,
+                        )} ${getCurrentColBorderClass(idx)}`}
+                      >
+                        {val !== null ? Math.round(val) : '—'}
+                      </td>
+                    );
+                  })}
+                </tr>
+                {renderCompareSubRows(
+                  'precipitationProbability',
+                  (m) =>
+                    m?.precipitationProbability !== null &&
+                    m?.precipitationProbability !== undefined
+                      ? Math.round(m.precipitationProbability)
+                      : '—',
+                  (m) => getPrecipProbBgClass(m?.precipitationProbability ?? null),
+                )}
+
+                <tr>
+                  {renderVariableHeaderCell('Pressão (hPa)', 'surfacePressure', {
+                    thClassName:
+                      'sticky left-0 z-10 bg-white dark:bg-[#132a47] px-3 py-1 text-left font-semibold text-slate-600 dark:text-sky-200 border-r border-slate-200 dark:border-sky-800',
+                  })}
                   {hours.map((h, idx) => {
                     const val = isNative
                       ? nativeList[idx]?.surfacePressure ?? null
@@ -754,29 +1237,40 @@ export const WindguruTable: React.FC<WindguruTableProps> = ({
                     return (
                       <td
                         key={h.timestampUnix}
+                        data-current-hour-cell={idx === resolvedCurrentHourIndex ? 'true' : undefined}
                         onClick={() => onSelectHourIndex(idx)}
                         className={`px-1 py-1 cursor-pointer border-r border-slate-100 dark:border-sky-800/40 ${
                           h.barometricSquallRisk
                             ? 'bg-rose-100 text-rose-900 dark:bg-rose-900/60 dark:text-rose-100 font-bold'
                             : 'bg-white dark:bg-[#132a47] text-slate-600 dark:text-sky-200/80'
-                        }`}
+                        } ${getCurrentColBorderClass(idx)}`}
                       >
                         {val !== null ? Math.round(val) : '—'}
                       </td>
                     );
                   })}
                 </tr>
+                {renderCompareSubRows(
+                  'surfacePressure',
+                  (m) =>
+                    m?.surfacePressure !== null && m?.surfacePressure !== undefined
+                      ? Math.round(m.surfacePressure)
+                      : '—',
+                  () => 'bg-white dark:bg-[#132a47] text-slate-600 dark:text-sky-200/80',
+                )}
               </>
             )}
 
             {/* 7. Safe Window Semaphore Row */}
             <tr>
-              <th className="sticky left-0 z-10 bg-white dark:bg-[#132a47] px-3 py-1 text-left font-bold text-slate-700 dark:text-sky-200 border-r border-slate-200 dark:border-sky-800">
-                Janela Operacional
-              </th>
+              {renderVariableHeaderCell('Janela Operacional', undefined, {
+                thClassName:
+                  'sticky left-0 z-10 bg-white dark:bg-[#132a47] px-3 py-1 text-left font-bold text-slate-700 dark:text-sky-200 border-r border-slate-200 dark:border-sky-800',
+              })}
               {hours.map((h, idx) => (
                 <td
                   key={h.timestampUnix}
+                  data-current-hour-cell={idx === resolvedCurrentHourIndex ? 'true' : undefined}
                   onClick={() => onSelectHourIndex(idx)}
                   title={
                     h.safeWindowReasons.length > 0
@@ -785,7 +1279,7 @@ export const WindguruTable: React.FC<WindguruTableProps> = ({
                   }
                   className={`px-1 py-1 cursor-pointer text-[10px] border-r border-white/40 dark:border-sky-900/40 ${
                     SEMAPHORE_CELL_CLASS[h.safeWindow]
-                  }`}
+                  } ${getCurrentColBorderClass(idx)}`}
                 >
                   {h.safeWindow === 'green' ? 'OK' : h.safeWindow === 'amber' ? 'ATN' : 'LIM'}
                 </td>

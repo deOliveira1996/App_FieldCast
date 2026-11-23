@@ -201,7 +201,7 @@ export const AppShell: React.FC<AppShellProps> = ({
             </div>
 
             {/* Centered Rounded White Search & Map Pin Trigger Pill (Climatempo style) */}
-            <div className="flex-1 max-w-xl mx-auto min-w-[220px]">
+            <div className="order-3 md:order-2 w-full md:w-auto md:flex-1 max-w-xl mx-auto min-w-0 md:min-w-[220px]">
               <button
                 type="button"
                 onClick={() => setLocationsOpen(true)}
@@ -233,7 +233,7 @@ export const AppShell: React.FC<AppShellProps> = ({
             </div>
 
             {/* Right Controls: Refresh, Glossary, Theme Toggle, HealthBadge */}
-            <div className="flex items-center gap-1.5 sm:gap-2">
+            <div className="order-2 md:order-3 flex items-center gap-1.5 sm:gap-2 shrink-0">
               {onRefreshForecast && (
                 <button
                   type="button"
@@ -297,7 +297,7 @@ export const AppShell: React.FC<AppShellProps> = ({
           </div>
 
           {/* Secondary Sub-Bar: Climatempo-style Blue Bar with White Active Tab Pill */}
-          <div className="bg-[#006bb3] dark:bg-[#072842] border-t border-white/15">
+          <div className="hidden md:block bg-[#006bb3] dark:bg-[#072842] border-t border-white/15">
             <div className="max-w-[1440px] mx-auto px-3 sm:px-6 py-1.5 flex items-center justify-between gap-3 overflow-x-auto scrollbar-thin">
               <div className="hidden sm:flex items-center gap-2 text-xs text-sky-100 font-medium shrink-0">
                 <span>Tempo agora em</span>
@@ -306,7 +306,7 @@ export const AppShell: React.FC<AppShellProps> = ({
 
               <nav
                 aria-label="Navegação Principal Desktop"
-                className="flex items-center gap-1.5 mx-auto sm:mx-0"
+                className="hidden md:flex items-center gap-1.5 mx-auto sm:mx-0"
               >
                 {tabs.map(({ id, label, Icon, badgeCount }) => {
                   const isActive = activeTab === id;
