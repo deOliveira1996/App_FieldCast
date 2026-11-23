@@ -115,7 +115,6 @@ export function findCurrentLocalHourIndex(
   // match current local hour-of-day (0..23) in the target timezone.
   const targetHour = getLocalDateParts(now, timezone).hour;
   const firstUnix = hours[0]!.timestampUnix;
-  const lastUnix = hours[hours.length - 1]!.timestampUnix;
 
   let bestMatchIndex = -1;
   let bestMatchDistance = Infinity;
