@@ -24,29 +24,38 @@ import {
   getSavedLocations,
   getTrackSessions,
   getWaypoints,
+  loadPrimaryLocationPreference,
   logErrorToDb,
   renameSavedLocation,
   resetDatabaseForTests,
   saveForecastCache,
+  savePrimaryLocationPreference,
   toggleFavoriteLocation,
   upsertSavedLocation,
 } from './db/database';
 import { useSmartLocation } from './hooks/useSmartLocation';
 import { useTheme } from './hooks/useTheme';
 import { useToast } from './hooks/useToast';
-import { searchLocationsNominatim } from './services/geocodingService';
+import {
+  probeIpWhoisHealth,
+  probeNominatimHealth,
+  searchLocationsNominatim,
+} from './services/geocodingService';
 import {
   getEndpointHealthSnapshot,
   getOverallEndpointsHealthLevel,
 } from './services/httpClient';
+import { evaluateDueRecurrenceRules } from './services/historicalWeatherService';
 import {
   fetchOpenMeteoForecast,
   normalizeOpenMeteoForecast,
   reapplyThresholdsToForecast,
 } from './services/openMeteoService';
+import { probeRainViewerHealth } from './services/rainViewerService';
 import { detectRuntimePlatform } from './services/platform';
 import type {
   ActiveCoordinates,
+  PrimaryLocationPreference,
   SavedLocation,
   TrackSession,
   Waypoint,
@@ -281,11 +290,39 @@ export function App(): React.ReactElement {
     loadPersistedThresholds(),
   );
 
-  // Inicializa sincronamente com o fixture costeiro (Florianópolis) para zero tela vazia no cold-boot
+  const [primaryLocation, setPrimaryLocation] = useState<PrimaryLocationPreference | null>(() =>
+    loadPrimaryLocationPreference(),
+  );
+
+  const initialStartupCoords = useMemo<ActiveCoordinates>(() => {
+    const persistedPrimary = loadPrimaryLocationPreference();
+    if (persistedPrimary) {
+      return {
+        latitude: persistedPrimary.latitude,
+        longitude: persistedPrimary.longitude,
+        accuracyM: null,
+        name: persistedPrimary.name,
+        origin: persistedPrimary.origin,
+        isApproximateIp: persistedPrimary.origin === 'ip',
+        updatedAtIso: persistedPrimary.updatedAtIso,
+      };
+    }
+    return {
+      latitude: DEFAULT_SAVED_LOCATIONS[0]!.latitude,
+      longitude: DEFAULT_SAVED_LOCATIONS[0]!.longitude,
+      accuracyM: null,
+      name: DEFAULT_SAVED_LOCATIONS[0]!.name,
+      origin: 'saved',
+      isApproximateIp: false,
+      updatedAtIso: new Date().toISOString(),
+    };
+  }, []);
+
+  // Inicializa sincronamente com a área principal persistida (ou fallback costeiro) para zero tela vazia
   const [forecast, setForecast] = useState<NormalizedForecast | null>(() =>
     buildBundledFallbackForecast(
-      DEFAULT_SAVED_LOCATIONS[0]!.latitude,
-      DEFAULT_SAVED_LOCATIONS[0]!.longitude,
+      initialStartupCoords.latitude,
+      initialStartupCoords.longitude,
       loadPersistedThresholds(),
     ),
   );
@@ -317,15 +354,7 @@ export function App(): React.ReactElement {
   } = useSmartLocation({
     autoResolveOnMount: false,
     timeoutMs: 3500,
-    initialCoordinates: {
-      latitude: DEFAULT_SAVED_LOCATIONS[0]!.latitude,
-      longitude: DEFAULT_SAVED_LOCATIONS[0]!.longitude,
-      accuracyM: null,
-      name: DEFAULT_SAVED_LOCATIONS[0]!.name,
-      origin: 'saved',
-      isApproximateIp: false,
-      updatedAtIso: new Date().toISOString(),
-    },
+    initialCoordinates: initialStartupCoords,
   });
 
   const refreshHealthMetrics = useCallback(async () => {
@@ -506,20 +535,48 @@ export function App(): React.ReactElement {
         setTracks(initialTracks);
 
         if (!hasUserSelectedLocationRef.current) {
-          const defaultLoc =
-            initialSaved.find((loc) => loc.id === 'loc-florianopolis-sc') ??
-            initialSaved[0] ??
-            DEFAULT_SAVED_LOCATIONS[0]!;
+          const persistedPrimary = loadPrimaryLocationPreference();
+          const defaultLoc = persistedPrimary
+            ? {
+                latitude: persistedPrimary.latitude,
+                longitude: persistedPrimary.longitude,
+                name: persistedPrimary.name,
+                origin: persistedPrimary.origin,
+              }
+            : (() => {
+                const fallbackSaved =
+                  initialSaved.find((loc) => loc.id === 'loc-florianopolis-sc') ??
+                  initialSaved[0] ??
+                  DEFAULT_SAVED_LOCATIONS[0]!;
+                return {
+                  latitude: fallbackSaved.latitude,
+                  longitude: fallbackSaved.longitude,
+                  name: fallbackSaved.name,
+                  origin: 'saved' as const,
+                };
+              })();
+
           setManualLocation({
             latitude: defaultLoc.latitude,
             longitude: defaultLoc.longitude,
             name: defaultLoc.name,
-            origin: 'saved',
+            origin: defaultLoc.origin,
           });
           await loadForecastForCoordinates(defaultLoc.latitude, defaultLoc.longitude, {
             silent: true,
           });
         }
+
+        // Verifica regras de recorrência semanal vencidas sem bloquear a tela inicial
+        void evaluateDueRecurrenceRules().then(({ generatedLogs }) => {
+          if (!cancelled && generatedLogs.length > 0) {
+            addToast({
+              type: 'info',
+              title: 'Log histórico periódico atualizado',
+              message: `${generatedLogs.length} relatório(s) semanal(is) pronto(s) em Campo & Dados.`,
+            });
+          }
+        });
       } catch (err) {
         await handleErrorLog({
           timestampUtcIso: new Date().toISOString(),
@@ -735,6 +792,90 @@ export function App(): React.ReactElement {
     [refreshHealthMetrics, savedLocations],
   );
 
+  const handleSetPrimaryLocation = useCallback(
+    async (locInput?: {
+      savedLocationId?: string;
+      name: string;
+      latitude: number;
+      longitude: number;
+      region?: string;
+      origin?: ActiveCoordinates['origin'];
+    }) => {
+      const targetLat = locInput?.latitude ?? activeLocation.latitude;
+      const targetLon = locInput?.longitude ?? activeLocation.longitude;
+      const targetName = (locInput?.name ?? activeLocation.name).trim() || 'Área Principal';
+      const targetOrigin = locInput?.origin ?? activeLocation.origin;
+
+      const allSaved = await getSavedLocations();
+      const matched = allSaved.find(
+        (item) =>
+          (locInput?.savedLocationId && item.id === locInput.savedLocationId) ||
+          (Math.abs(item.latitude - targetLat) < 0.002 &&
+            Math.abs(item.longitude - targetLon) < 0.002),
+      );
+
+      let savedId = matched?.id ?? locInput?.savedLocationId;
+      if (!matched) {
+        const nowIso = new Date().toISOString();
+        savedId =
+          savedId ?? `loc-primary-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
+        await upsertSavedLocation({
+          id: savedId,
+          name: targetName,
+          latitude: targetLat,
+          longitude: targetLon,
+          region: locInput?.region ?? 'Área Principal Operacional',
+          isFavorite: true,
+          createdAtIso: nowIso,
+          lastUsedAtIso: nowIso,
+        });
+        setSavedLocations(await getSavedLocations());
+      } else {
+        await upsertSavedLocation({
+          ...matched,
+          isFavorite: true,
+          lastUsedAtIso: new Date().toISOString(),
+        });
+        setSavedLocations(await getSavedLocations());
+      }
+
+      const persisted = savePrimaryLocationPreference({
+        savedLocationId: savedId,
+        name: targetName,
+        latitude: targetLat,
+        longitude: targetLon,
+        region: locInput?.region ?? matched?.region,
+        origin: targetOrigin,
+        updatedAtIso: new Date().toISOString(),
+      });
+      setPrimaryLocation(persisted);
+      hasUserSelectedLocationRef.current = true;
+
+      if (
+        Math.abs(activeLocation.latitude - targetLat) >= 0.001 ||
+        Math.abs(activeLocation.longitude - targetLon) >= 0.001
+      ) {
+        setManualLocation({
+          latitude: targetLat,
+          longitude: targetLon,
+          name: targetName,
+          origin: targetOrigin,
+        });
+        await loadForecastForCoordinates(targetLat, targetLon, {
+          silent: true,
+          forceNetwork: true,
+        });
+      }
+
+      addToast({
+        type: 'success',
+        title: 'Área principal definida',
+        message: `"${targetName}" agora abre por padrão no aplicativo.`,
+      });
+    },
+    [activeLocation, addToast, loadForecastForCoordinates, setManualLocation],
+  );
+
   const handleRequestGps = useCallback(async () => {
     hasUserSelectedLocationRef.current = true;
     const resolution = await resolveLocation();
@@ -757,6 +898,19 @@ export function App(): React.ReactElement {
       }
     }
 
+    // Quando o GPS real é liberado e resolvido, identifica o ponto como padrão se não houver área customizada ainda
+    if (resolution.tierResolved === 1 && !loadPrimaryLocationPreference()) {
+      const persisted = savePrimaryLocationPreference({
+        name: finalCoords.name,
+        latitude: finalCoords.latitude,
+        longitude: finalCoords.longitude,
+        region: 'Área Principal via GPS',
+        origin: 'gps',
+        updatedAtIso: new Date().toISOString(),
+      });
+      setPrimaryLocation(persisted);
+    }
+
     addToast({
       type:
         resolution.tierResolved === 1
@@ -770,7 +924,7 @@ export function App(): React.ReactElement {
           : resolution.tierResolved === 2
             ? 'Localização aproximada via IP (ipwho.is)'
             : 'GPS indisponível — Usando coordenada em cache offline',
-      message: `${finalCoords.name} (${finalCoords.latitude.toFixed(4)}°, ${finalCoords.longitude.toFixed(4)}°)`,
+      message: `${finalCoords.name} (${finalCoords.latitude.toFixed(4)}°, ${finalCoords.longitude.toFixed(4)}°) • Você pode fixá-la como Área Principal no topo.`,
     });
 
     await loadForecastForCoordinates(finalCoords.latitude, finalCoords.longitude, {
@@ -806,14 +960,15 @@ export function App(): React.ReactElement {
   }, [activeLocation.latitude, activeLocation.longitude, loadForecastForCoordinates]);
 
   const handleRunHealthCheck = useCallback(async () => {
-    await loadForecastForCoordinates(
-      activeLocation.latitude,
-      activeLocation.longitude,
-      {
+    await Promise.allSettled([
+      loadForecastForCoordinates(activeLocation.latitude, activeLocation.longitude, {
         silent: true,
         forceNetwork: true,
-      },
-    );
+      }),
+      probeRainViewerHealth(),
+      probeNominatimHealth(),
+      probeIpWhoisHealth(),
+    ]);
     await refreshHealthMetrics();
   }, [
     activeLocation.latitude,
@@ -871,6 +1026,22 @@ export function App(): React.ReactElement {
     recentErrors,
   ]);
 
+  const primaryLocationKey = useMemo(() => {
+    if (!primaryLocation) return null;
+    return (
+      primaryLocation.savedLocationId ??
+      buildLocationKey(primaryLocation.latitude, primaryLocation.longitude)
+    );
+  }, [primaryLocation]);
+
+  const isActivePrimaryLocation = useMemo(() => {
+    if (!primaryLocation) return false;
+    return (
+      Math.abs(primaryLocation.latitude - activeLocation.latitude) < 0.002 &&
+      Math.abs(primaryLocation.longitude - activeLocation.longitude) < 0.002
+    );
+  }, [activeLocation.latitude, activeLocation.longitude, primaryLocation]);
+
   return (
     <GlobalErrorBoundary
       onErrorLog={handleErrorLog}
@@ -883,6 +1054,8 @@ export function App(): React.ReactElement {
         onToggleTheme={toggleTheme}
         activeLocation={activeLocation}
         savedLocations={savedLocations}
+        primaryLocationKey={primaryLocationKey}
+        onSetPrimaryLocation={handleSetPrimaryLocation}
         healthSnapshot={healthSnapshot}
         activeAlertsCount={forecast?.alerts.length ?? 0}
         isRefreshingForecast={isRefreshingForecast}
@@ -915,6 +1088,11 @@ export function App(): React.ReactElement {
               onViewModeChange={setViewMode}
               thresholds={thresholds}
               onSaveThresholds={handleSaveThresholds}
+              onSelectLocation={handleSelectLocation}
+              onSaveLocation={handleSaveLocation}
+              onRequestGps={handleRequestGps}
+              isPrimaryLocation={isActivePrimaryLocation}
+              onSetPrimaryLocation={handleSetPrimaryLocation}
               onOpenLocationsModal={() => setIsLocationsModalOpen(true)}
               onReloadForecast={handleRefreshForecast}
               onToast={addToast}
@@ -939,9 +1117,6 @@ export function App(): React.ReactElement {
               onViewModeChange={setViewMode}
               onSelectLocation={handleSelectLocation}
               onSaveLocation={handleSaveLocation}
-              onRadarStateChange={() => {
-                void refreshHealthMetrics();
-              }}
               onToast={addToast}
               onErrorLog={handleErrorLog}
             />
@@ -956,6 +1131,7 @@ export function App(): React.ReactElement {
             <FieldDataTab
               forecast={forecast}
               activeLocation={activeLocation}
+              savedLocations={savedLocations}
               waypoints={waypoints}
               tracks={tracks}
               onWaypointsChange={setWaypoints}

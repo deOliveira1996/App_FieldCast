@@ -1,9 +1,11 @@
+import type { ServiceEndpointStatus } from '../types/health';
 import {
   RainViewerResponseSchema,
   type RainViewerResponse,
 } from '../types/schemas';
 import {
   fetchWithCircuitBreaker,
+  getServiceEndpointStatus,
   markServiceDegraded,
 } from './httpClient';
 
@@ -127,4 +129,28 @@ export async function fetchRainViewerRadar(options?: {
       statusMessage: `Radar indisponível — operando em modo degradado (${reason})`,
     };
   }
+}
+
+/**
+ * Executa sonda sob demanda do serviço RainViewer para o Painel de Autodiagnóstico.
+ * Nunca lança exceção não tratada.
+ */
+export async function probeRainViewerHealth(options?: {
+  fetchImpl?: typeof fetch;
+  timeoutMs?: number;
+}): Promise<ServiceEndpointStatus> {
+  try {
+    await fetchRainViewerRadar({
+      fetchImpl: options?.fetchImpl,
+      timeoutMs: options?.timeoutMs ?? 6000,
+      maxRetries: 0,
+    });
+  } catch (err) {
+    const status = getServiceEndpointStatus('rainviewer');
+    if (status.status === 'healthy' || status.status === 'unverified') {
+      const reason = err instanceof Error ? err.message : 'Falha ao sondar RainViewer';
+      return markServiceDegraded('rainviewer', reason);
+    }
+  }
+  return getServiceEndpointStatus('rainviewer');
 }

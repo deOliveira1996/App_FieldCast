@@ -137,3 +137,20 @@
 
 3. **Documentação Final (`README.md`):**
    - `README.md` completo documentando arquitetura, motor matemático/meteorológico, stack Zero-Crash offline-first e passo a passo detalhado para: (1) execução local, (2) publicação gratuita do PWA na Vercel ou GitHub Pages, (3) compilação local do `.apk` Android via Capacitor e (4) download do `.apk` compilado automaticamente na nuvem via GitHub Actions (`.github/workflows/android-apk.yml`).
+
+---
+
+## Sprint 5 / V2 Mobile, Swarm Security & Exportacoes — **CONCLUÍDA**
+- **Agente & Governança**:
+  - Criado `AGENTS.md` na raiz, bundle em `.agents/plugins/fieldcast-ops/plugin.json`, 7 skills modulares em `.agents/skills/`, hook de segurança ativo em `.agents/hooks.json` (`safety-gate.cmd` + `safety-gate.mjs`), script único `scripts/sync-and-verify.ps1`, `prompts/prompt_swarm_mobile_v2.md` e auditoria CI em `.github/workflows/android-apk.yml`.
+- **Previsão, Modelos & Gráficos**:
+  - Integrado modelo global gratuito `gem_seamless` (`CMC GEM 15 km`) no ensemble escalar/vetorial e seletores; adicionada série costeira indicativa `sea_level_height_msl` com aviso explícito (`MSL ≠ Tábua DHN`).
+  - Adicionado painel-resumo pontual permanente nos gráficos (`charts-hour-summary`), corrigida altura do gráfico de Ondas (`minHeight: 288px` desktop/mobile), corrigido calendário local de Efemérides (`T12:00:00Z` / agrupamento por timezone local), e removido auto-centramento vertical (`scrollIntoView`) da `WindguruTable`.
+- **Mapa, Campo, Diagnóstico & Exportação**:
+  - Cache offscreen no canvas de mapa (`WeatherModelOverlayLayer`) eliminando redesenho por frame no mobile WebView + debounce e toggle seguro no `MapRadarTab`.
+  - Bússola WebView corrigida com prioridade absoluta (`AbsoluteOrientationSensor` / `deviceorientationabsolute` exclusivo + compensação 3D + ocultamento automático/manual).
+  - Persistência de **Área Principal** (`localStorage` + Dexie + botão `"Definir como Área Principal"` e salvamento inicial via GPS).
+  - Consulta sob demanda de **Séries Históricas** (`/v1/forecast` `past_days` + `archive-api.open-meteo.com`), recorrência periódica semanal em Dexie, boletim WhatsApp com hora local + temperatura + precipitação + vento médio/direção/rajadas pareados, e exportação completa incluindo **KML** e **KMZ** (Google Earth).
+  - Autodiagnóstico real dos 5 endpoints (`Nominatim`, `ipwho.is`, `RainViewer`, `Open-Meteo Forecast/Marine`) com badge inicial `Sob Demanda / Não Verificado`.
+  - Geração automática de mipmaps Android e fundo `#0F172A` em `scripts/generate-icons.mjs` para exibição do ícone FieldCast no Android.
+  - Verificado: `npx tsc --noEmit` (0 erros), `npm run test` (15/15 arquivos, 107/107 testes), `npm run build` (`dist/` + `PWA v0.21.2`) e auditoria visual Browser QA sem erros de console.

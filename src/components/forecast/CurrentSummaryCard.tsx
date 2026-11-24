@@ -14,6 +14,7 @@ import {
   Mountain,
   ShieldCheck,
   Sliders,
+  Star,
   Sun,
   Thermometer,
   Waves,
@@ -31,6 +32,7 @@ import {
   formatLocalYMD,
   useCurrentLocalHourIndex,
 } from '../../utils/localTimeHour';
+import { safeAction } from '../../utils/safeAction';
 import { HelpPopover } from '../common/HelpPopover';
 import {
   COMPLETE_VISIBLE_PARAMS,
@@ -47,6 +49,13 @@ export interface CurrentSummaryCardProps {
   visibleParams?: ForecastVisibleParams;
   isMiniMapOpen?: boolean;
   onToggleMiniMap?: () => void;
+  isPrimaryLocation?: boolean;
+  onSetPrimaryLocation?: (coords: {
+    latitude: number;
+    longitude: number;
+    name: string;
+    origin?: ActiveCoordinates['origin'];
+  }) => void | Promise<void>;
 }
 
 const CONFIDENCE_COLOR_STYLES: Record<
@@ -162,8 +171,11 @@ export const CurrentSummaryCard: React.FC<CurrentSummaryCardProps> = ({
   visibleParams = COMPLETE_VISIBLE_PARAMS,
   isMiniMapOpen,
   onToggleMiniMap,
+  isPrimaryLocation = false,
+  onSetPrimaryLocation,
 }) => {
   const [showConfidenceDetails, setShowConfidenceDetails] = useState(false);
+  const [isSettingPrimary, setIsSettingPrimary] = useState(false);
 
   const currentLocalHourIndex = useCurrentLocalHourIndex(forecast.hours, forecast.timezone);
   const resolvedHourIndex = selectedHourIndex ?? currentLocalHourIndex;
@@ -210,6 +222,9 @@ export const CurrentSummaryCard: React.FC<CurrentSummaryCardProps> = ({
     if (currentHour) {
       const hourYmd = formatLocalYMD(new Date(currentHour.timestampUnix * 1000), forecast.timezone);
       const matched = forecast.ephemerisByDay.find((day) => {
+        if (/^\d{4}-\d{2}-\d{2}$/.test(day.dateIso)) {
+          return day.dateIso === hourYmd;
+        }
         const parsed = new Date(day.dateIso);
         const dayYmd = Number.isNaN(parsed.getTime())
           ? day.dateIso.slice(0, 10)
@@ -273,6 +288,47 @@ export const CurrentSummaryCard: React.FC<CurrentSummaryCardProps> = ({
                 <span>{isMiniMapOpen ? 'Ocultar Mapa Pin' : 'Dar Pin no Mapa'}</span>
               </button>
             )}
+
+            {isPrimaryLocation ? (
+              <span
+                data-testid="primary-location-badge"
+                className="min-h-[44px] px-3.5 py-1.5 rounded-full text-xs font-bold inline-flex items-center gap-1.5 border bg-emerald-50 dark:bg-emerald-950/60 text-emerald-800 dark:text-emerald-200 border-emerald-200 dark:border-emerald-700/70 shrink-0"
+              >
+                <Star
+                  className="w-3.5 h-3.5 fill-emerald-500 text-emerald-600 dark:text-emerald-300"
+                  aria-hidden="true"
+                />
+                <span>Área Principal Salva</span>
+              </span>
+            ) : onSetPrimaryLocation ? (
+              <button
+                type="button"
+                data-testid="set-primary-location-btn"
+                disabled={isSettingPrimary}
+                onClick={() => {
+                  void safeAction(
+                    async () => {
+                      await onSetPrimaryLocation({
+                        latitude: activeLocation.latitude,
+                        longitude: activeLocation.longitude,
+                        name: activeLocation.name,
+                        origin: activeLocation.origin,
+                      });
+                    },
+                    {
+                      actionKey: 'set_primary_location_summary_card',
+                      moduleName: 'CurrentSummaryCard',
+                      errorTitle: 'Não foi possível definir a área principal',
+                      onLoadingChange: setIsSettingPrimary,
+                    },
+                  );
+                }}
+                className="min-h-[44px] min-w-[44px] px-3.5 py-1.5 rounded-full text-xs font-bold inline-flex items-center gap-1.5 border shrink-0 transition-all bg-white dark:bg-[#0d1f36] hover:bg-sky-50 dark:hover:bg-sky-900/50 text-[#0070b8] dark:text-sky-200 border-sky-200 dark:border-sky-700 disabled:opacity-60 focus:outline-none focus:ring-2 focus:ring-sky-500"
+              >
+                <Star className="w-3.5 h-3.5 text-[#0080cd] dark:text-sky-400" aria-hidden="true" />
+                <span>Definir como Área Principal</span>
+              </button>
+            ) : null}
           </div>
 
           <div className="flex flex-wrap items-center gap-2 text-xs">

@@ -10,15 +10,18 @@ import {
   exportForecastToJson,
   exportToGeoJson,
   exportToGpx,
+  exportToKml,
+  exportToKmz,
   exportTracksToCsv,
   exportWaypointsToCsv,
+  UTF8_BOM,
 } from '../../utils/exporters';
 
 export type ExportDatasetKind = 'forecast' | 'waypoints' | 'tracks' | 'mission_bundle';
 
 export interface ExportDeliveryPayload {
   filename: string;
-  content: string;
+  content: string | Uint8Array;
   format: ExportFormat;
   title?: string;
   text?: string;
@@ -67,19 +70,40 @@ export function getFileExtensionForFormat(format: ExportFormat): string {
   }
 }
 
+function uint8ArrayToBase64(bytes: Uint8Array): string {
+  const chunkSize = 0x8000;
+  let binary = '';
+  for (let i = 0; i < bytes.length; i += chunkSize) {
+    const slice = bytes.subarray(i, Math.min(i + chunkSize, bytes.length));
+    let chunk = '';
+    for (let j = 0; j < slice.length; j++) {
+      chunk += String.fromCharCode(slice[j]!);
+    }
+    binary += chunk;
+  }
+  if (typeof btoa === 'function') {
+    return btoa(binary);
+  }
+  return Buffer.from(bytes).toString('base64');
+}
+
+function toBlobPart(content: string | Uint8Array): BlobPart {
+  return typeof content === 'string' ? content : new Uint8Array(content);
+}
+
 /**
  * Dispara download local no navegador via `Blob` + `<a download>`.
  */
 export function triggerBrowserFileDownload(
   filename: string,
-  content: string,
+  content: string | Uint8Array,
   mimeType: string,
 ): void {
   if (typeof document === 'undefined' || typeof Blob === 'undefined') {
     return;
   }
 
-  const blob = new Blob([content], { type: mimeType });
+  const blob = new Blob([toBlobPart(content)], { type: mimeType });
   const hasUrlApi =
     typeof URL !== 'undefined' && typeof URL.createObjectURL === 'function';
 
@@ -113,7 +137,7 @@ function isMobileUserAgent(): boolean {
 }
 
 /**
- * Entrega um arquivo exportado (CSV, JSON, GPX ou GeoJSON):
+ * Entrega um arquivo exportado (CSV, JSON, GPX, GeoJSON, KML ou KMZ):
  * - No Android/iOS nativo (`Capacitor.isNativePlatform()`): grava no cache via `@capacitor/filesystem` e abre `@capacitor/share`.
  * - Na Web Mobile (quando `preferNativeShare === true` e `navigator.canShare` suporta arquivos): utiliza Web Share API.
  * - No Desktop (ou fallback universal): dispara download direto via `Blob` + `<a download>`.
@@ -122,7 +146,10 @@ export async function exportAndDeliverFile(
   payload: ExportDeliveryPayload,
 ): Promise<ExportDeliveryResult> {
   const mimeType = getMimeTypeForFormat(payload.format);
-  const byteLength = new TextEncoder().encode(payload.content).byteLength;
+  const byteLength =
+    typeof payload.content === 'string'
+      ? new TextEncoder().encode(payload.content).byteLength
+      : payload.content.byteLength;
 
   const isNative =
     payload.isNativePlatformFn?.() ??
@@ -136,12 +163,19 @@ export async function exportAndDeliverFile(
 
   if (isNative) {
     try {
-      const written = await Filesystem.writeFile({
-        path: payload.filename,
-        data: payload.content,
-        directory: Directory.Cache,
-        encoding: Encoding.UTF8,
-      });
+      const written =
+        typeof payload.content === 'string'
+          ? await Filesystem.writeFile({
+              path: payload.filename,
+              data: payload.content,
+              directory: Directory.Cache,
+              encoding: Encoding.UTF8,
+            })
+          : await Filesystem.writeFile({
+              path: payload.filename,
+              data: uint8ArrayToBase64(payload.content),
+              directory: Directory.Cache,
+            });
 
       await Share.share({
         title: payload.title ?? `FieldCast — ${payload.filename}`,
@@ -169,7 +203,9 @@ export async function exportAndDeliverFile(
     typeof File !== 'undefined'
   ) {
     try {
-      const file = new File([payload.content], payload.filename, { type: mimeType });
+      const file = new File([toBlobPart(payload.content)], payload.filename, {
+        type: mimeType,
+      });
       const canShareFiles =
         typeof navigator.canShare === 'function' && navigator.canShare({ files: [file] });
       if (canShareFiles) {
@@ -199,17 +235,57 @@ export async function exportAndDeliverFile(
   };
 }
 
-/**
- * Constrói o conteúdo e nome de arquivo para qualquer combinação de dataset e formato (`csv`, `json`, `gpx`, `geojson`).
- */
-export function buildExportArtifact(params: {
+export interface BuildExportArtifactParams {
   dataset: ExportDatasetKind;
   format: ExportFormat;
   forecast: NormalizedForecast | null;
   waypoints: readonly Waypoint[];
   tracks: readonly TrackSession[];
   locationName?: string;
-}): { filename: string; content: string; format: ExportFormat } {
+}
+
+function buildMissionBundleCsv(params: {
+  forecast: NormalizedForecast | null;
+  waypoints: readonly Waypoint[];
+  tracks: readonly TrackSession[];
+}): string {
+  const sections: string[] = [];
+
+  if (params.forecast) {
+    const body = exportForecastToCsv(params.forecast).replace(/^\uFEFF/, '');
+    sections.push(`# PREVISAO_HORARIA_168H\r\n${body}`);
+  }
+  if (params.waypoints.length > 0) {
+    const body = exportWaypointsToCsv(params.waypoints).replace(/^\uFEFF/, '');
+    sections.push(`# WAYPOINTS_DE_CAMPO\r\n${body}`);
+  }
+  if (params.tracks.length > 0) {
+    const body = exportTracksToCsv(params.tracks).replace(/^\uFEFF/, '');
+    sections.push(`# ROTAS_GPS_TRACKS\r\n${body}`);
+  }
+
+  if (sections.length === 0) {
+    return exportWaypointsToCsv([]);
+  }
+
+  return UTF8_BOM + sections.join('\r\n\r\n');
+}
+
+/**
+ * Constrói o conteúdo e nome de arquivo para qualquer combinação de dataset e formato (`csv`, `json`, `gpx`, `geojson`, `kml`, `kmz`).
+ */
+export function buildExportArtifact(
+  params: BuildExportArtifactParams & { format: 'kmz' },
+): { filename: string; content: Uint8Array; format: 'kmz' };
+export function buildExportArtifact(
+  params: BuildExportArtifactParams & { format: Exclude<ExportFormat, 'kmz'> },
+): { filename: string; content: string; format: Exclude<ExportFormat, 'kmz'> };
+export function buildExportArtifact(
+  params: BuildExportArtifactParams,
+): { filename: string; content: string | Uint8Array; format: ExportFormat };
+export function buildExportArtifact(
+  params: BuildExportArtifactParams,
+): { filename: string; content: string | Uint8Array; format: ExportFormat } {
   const { dataset, format, forecast, waypoints, tracks, locationName } = params;
   const dateTag = new Date().toISOString().slice(0, 10);
   const ext = getFileExtensionForFormat(format);
@@ -239,17 +315,9 @@ export function buildExportArtifact(params: {
         format,
       };
     }
-    // mission_bundle em CSV: se houver previsão exporta previsão, senão waypoints
-    if (forecast) {
-      return {
-        filename: `fieldcast-previsao-168h-${dateTag}.${ext}`,
-        content: exportForecastToCsv(forecast),
-        format,
-      };
-    }
     return {
-      filename: `fieldcast-waypoints-${dateTag}.${ext}`,
-      content: exportWaypointsToCsv(waypoints),
+      filename: `fieldcast-missao-completa-${dateTag}.${ext}`,
+      content: buildMissionBundleCsv({ forecast, waypoints, tracks }),
       format,
     };
   }
@@ -298,6 +366,32 @@ export function buildExportArtifact(params: {
     };
   }
 
+  if (format === 'kml') {
+    return {
+      filename: `fieldcast-missao-${dateTag}.${ext}`,
+      content: exportToKml({
+        waypoints: dataset === 'tracks' ? [] : waypoints,
+        tracks: dataset === 'waypoints' ? [] : tracks,
+        forecast: dataset === 'waypoints' || dataset === 'tracks' ? null : forecast,
+        name: locationName ? `FieldCast — ${locationName}` : 'FieldCast Missão',
+      }),
+      format,
+    };
+  }
+
+  if (format === 'kmz') {
+    return {
+      filename: `fieldcast-missao-${dateTag}.${ext}`,
+      content: exportToKmz({
+        waypoints: dataset === 'tracks' ? [] : waypoints,
+        tracks: dataset === 'waypoints' ? [] : tracks,
+        forecast: dataset === 'waypoints' || dataset === 'tracks' ? null : forecast,
+        name: locationName ? `FieldCast — ${locationName}` : 'FieldCast Missão',
+      }),
+      format,
+    };
+  }
+
   // format === 'geojson'
   return {
     filename: `fieldcast-missao-${dateTag}.${ext}`,
@@ -312,7 +406,7 @@ export function buildExportArtifact(params: {
 
 /**
  * Gera link `https://wa.me/?text=...` com resumo meteorológico/oceanográfico e de campo,
- * abrindo opcionalmente em nova aba no navegador.
+ * tentando `Share.share` no Android/iOS nativo ou abrindo nova aba no navegador.
  */
 export function shareBulletinViaWhatsApp(params: {
   forecast: NormalizedForecast | null;
@@ -321,7 +415,9 @@ export function shareBulletinViaWhatsApp(params: {
   longitude?: number;
   waypointsCount?: number;
   tracksCount?: number;
+  hourIndex?: number;
   openWindow?: boolean;
+  isNativePlatformFn?: () => boolean;
 }): { text: string; url: string } {
   const {
     forecast,
@@ -330,13 +426,15 @@ export function shareBulletinViaWhatsApp(params: {
     longitude,
     waypointsCount = 0,
     tracksCount = 0,
+    hourIndex,
     openWindow = false,
+    isNativePlatformFn,
   } = params;
 
   let base: { text: string; url: string };
 
   if (forecast) {
-    base = buildWhatsAppShareUrl(forecast, locationName);
+    base = buildWhatsAppShareUrl(forecast, locationName, hourIndex);
   } else {
     const latStr = typeof latitude === 'number' ? latitude.toFixed(4) : 'N/D';
     const lonStr = typeof longitude === 'number' ? longitude.toFixed(4) : 'N/D';
@@ -363,8 +461,35 @@ export function shareBulletinViaWhatsApp(params: {
     };
   }
 
-  if (openWindow && typeof window !== 'undefined' && typeof window.open === 'function') {
-    window.open(base.url, '_blank', 'noopener,noreferrer');
+  if (openWindow) {
+    const isNative =
+      isNativePlatformFn?.() ??
+      (() => {
+        try {
+          return Capacitor.isNativePlatform();
+        } catch {
+          return false;
+        }
+      })();
+
+    const openWebLink = () => {
+      if (typeof window !== 'undefined' && typeof window.open === 'function') {
+        window.open(base.url, '_blank', 'noopener,noreferrer');
+      }
+    };
+
+    if (isNative) {
+      void Share.share({
+        title: `FieldCast — ${locationName}`,
+        text: base.text,
+        url: base.url,
+        dialogTitle: 'Compartilhar Boletim via WhatsApp',
+      }).catch(() => {
+        openWebLink();
+      });
+    } else {
+      openWebLink();
+    }
   }
 
   return base;

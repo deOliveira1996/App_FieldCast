@@ -13,17 +13,32 @@ import {
   Trash2,
   X,
 } from 'lucide-react';
-import type { ActiveCoordinates, SavedLocation } from '../../types/field';
+import type {
+  ActiveCoordinates,
+  PrimaryLocationPreference,
+  SavedLocation,
+} from '../../types/field';
 import type { ToastMessage } from '../../types/health';
 import type { NominatimResult } from '../../types/schemas';
 import { safeAction } from '../../utils/safeAction';
 import { ForecastPinMiniMap } from '../forecast/ForecastPinMiniMap';
+
+const PRIMARY_LOCATION_STORAGE_KEY = 'fieldcast_primary_location_v1';
 
 export interface SavedLocationsModalProps {
   isOpen: boolean;
   onClose: () => void;
   activeLocation: ActiveCoordinates;
   savedLocations: SavedLocation[];
+  primaryLocationKey?: string | null;
+  onSetPrimaryLocation?: (loc: {
+    savedLocationId?: string;
+    name: string;
+    latitude: number;
+    longitude: number;
+    region?: string;
+    origin?: ActiveCoordinates['origin'];
+  }) => void | Promise<void>;
   onSelectLocation: (coords: {
     latitude: number;
     longitude: number;
@@ -45,11 +60,37 @@ export interface SavedLocationsModalProps {
   onToast?: (toast: Omit<ToastMessage, 'id'>) => void;
 }
 
+function makeCoordKey(latitude: number, longitude: number): string {
+  return `${latitude.toFixed(3)},${longitude.toFixed(3)}`;
+}
+
+function readStoredPrimaryKey(): string | null {
+  if (typeof window === 'undefined' || typeof window.localStorage === 'undefined') {
+    return null;
+  }
+  try {
+    const raw = window.localStorage.getItem(PRIMARY_LOCATION_STORAGE_KEY);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw) as Partial<PrimaryLocationPreference>;
+    if (
+      typeof parsed.latitude === 'number' &&
+      typeof parsed.longitude === 'number'
+    ) {
+      return parsed.savedLocationId ?? makeCoordKey(parsed.latitude, parsed.longitude);
+    }
+  } catch {
+    // Ignora
+  }
+  return null;
+}
+
 export const SavedLocationsModal: React.FC<SavedLocationsModalProps> = ({
   isOpen,
   onClose,
   activeLocation,
   savedLocations,
+  primaryLocationKey,
+  onSetPrimaryLocation,
   onSelectLocation,
   onSaveLocation,
   onRenameLocation,
@@ -59,6 +100,67 @@ export const SavedLocationsModal: React.FC<SavedLocationsModalProps> = ({
   onRequestGps,
   onToast,
 }) => {
+  const [internalPrimaryKey, setInternalPrimaryKey] = useState<string | null>(() =>
+    readStoredPrimaryKey(),
+  );
+  const effectivePrimaryKey =
+    primaryLocationKey !== undefined ? primaryLocationKey : internalPrimaryKey;
+
+  const isLocationPrimary = (
+    latitude: number,
+    longitude: number,
+    savedId?: string,
+  ): boolean => {
+    if (!effectivePrimaryKey) return false;
+    if (savedId && effectivePrimaryKey === savedId) return true;
+    return (
+      effectivePrimaryKey === makeCoordKey(latitude, longitude) ||
+      effectivePrimaryKey === `${latitude.toFixed(4)},${longitude.toFixed(4)}`
+    );
+  };
+
+  const handleSetPrimary = (loc: {
+    savedLocationId?: string;
+    name: string;
+    latitude: number;
+    longitude: number;
+    region?: string;
+    origin?: ActiveCoordinates['origin'];
+  }) => {
+    void safeAction(
+      async () => {
+        const key = loc.savedLocationId ?? makeCoordKey(loc.latitude, loc.longitude);
+        setInternalPrimaryKey(key);
+        if (typeof window !== 'undefined' && typeof window.localStorage !== 'undefined') {
+          try {
+            const pref: PrimaryLocationPreference = {
+              savedLocationId: loc.savedLocationId,
+              name: loc.name,
+              latitude: loc.latitude,
+              longitude: loc.longitude,
+              region: loc.region,
+              origin: loc.origin ?? 'saved',
+              updatedAtIso: new Date().toISOString(),
+            };
+            window.localStorage.setItem(
+              PRIMARY_LOCATION_STORAGE_KEY,
+              JSON.stringify(pref),
+            );
+          } catch {
+            // Ignora
+          }
+        }
+        await onSetPrimaryLocation?.(loc);
+      },
+      {
+        actionKey: `set_primary_${loc.savedLocationId ?? makeCoordKey(loc.latitude, loc.longitude)}`,
+        moduleName: 'SavedLocationsModal',
+        successTitle: `Área Principal definida: ${loc.name}`,
+        errorTitle: 'Erro ao definir área principal',
+        onToast,
+      },
+    );
+  };
   const [searchQuery, setSearchQuery] = useState('');
   const [searchResults, setSearchResults] = useState<NominatimResult[]>([]);
   const [isSearching, setIsSearching] = useState(false);
@@ -290,9 +392,19 @@ export const SavedLocationsModal: React.FC<SavedLocationsModalProps> = ({
           {/* Active Location Banner + Quick GPS & Save Buttons */}
           <div className="rounded-2xl border border-sky-200/90 dark:border-sky-700/70 bg-sky-50/80 dark:bg-[#0d1f36]/80 p-3.5 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
             <div className="space-y-0.5">
-              <span className="text-[11px] font-semibold text-sky-700 dark:text-sky-300">
-                Localização Ativa da Previsão
-              </span>
+              <div className="flex flex-wrap items-center gap-2">
+                <span className="text-[11px] font-semibold text-sky-700 dark:text-sky-300">
+                  Localização Ativa da Previsão
+                </span>
+                {isLocationPrimary(activeLocation.latitude, activeLocation.longitude) && (
+                  <span
+                    data-testid="active-location-primary-badge"
+                    className="px-2 py-0.5 rounded-full text-[10px] font-bold bg-emerald-600 text-white"
+                  >
+                    Principal
+                  </span>
+                )}
+              </div>
               <p className="text-sm font-bold text-slate-900 dark:text-white">
                 {activeLocation.name}
               </p>
@@ -304,6 +416,31 @@ export const SavedLocationsModal: React.FC<SavedLocationsModalProps> = ({
             </div>
 
             <div className="flex flex-wrap items-center gap-2">
+              <button
+                type="button"
+                data-testid="set-active-primary-btn"
+                onClick={() =>
+                  handleSetPrimary({
+                    name: activeLocation.name || 'Ponto Ativo',
+                    latitude: activeLocation.latitude,
+                    longitude: activeLocation.longitude,
+                    origin: activeLocation.origin,
+                  })
+                }
+                className={`min-h-[42px] min-w-[44px] px-3.5 py-2 rounded-xl text-xs font-bold inline-flex items-center gap-1.5 border transition-colors ${
+                  isLocationPrimary(activeLocation.latitude, activeLocation.longitude)
+                    ? 'bg-emerald-600 text-white border-emerald-600 shadow-sm'
+                    : 'bg-white dark:bg-[#132a47] hover:bg-emerald-50 dark:hover:bg-emerald-950/40 text-emerald-700 dark:text-emerald-300 border-emerald-300 dark:border-emerald-700'
+                }`}
+              >
+                <Star className="w-4 h-4" aria-hidden="true" />
+                <span>
+                  {isLocationPrimary(activeLocation.latitude, activeLocation.longitude)
+                    ? 'Principal'
+                    : 'Definir como Principal'}
+                </span>
+              </button>
+
               <button
                 type="button"
                 onClick={() => setShowPinMap((prev) => !prev)}
@@ -597,6 +734,11 @@ export const SavedLocationsModal: React.FC<SavedLocationsModalProps> = ({
                   const isCurrent =
                     Math.abs(loc.latitude - activeLocation.latitude) < 0.001 &&
                     Math.abs(loc.longitude - activeLocation.longitude) < 0.001;
+                  const isPrimary = isLocationPrimary(
+                    loc.latitude,
+                    loc.longitude,
+                    loc.id,
+                  );
 
                   return (
                     <div
@@ -640,13 +782,21 @@ export const SavedLocationsModal: React.FC<SavedLocationsModalProps> = ({
                             onClick={() => handleSelectSaved(loc)}
                             className="w-full text-left group focus:outline-none"
                           >
-                            <div className="flex items-center gap-2">
+                            <div className="flex flex-wrap items-center gap-2">
                               <span className="text-sm font-bold text-slate-800 dark:text-white group-hover:text-sky-600 dark:group-hover:text-sky-300 transition-colors truncate">
                                 {loc.name}
                               </span>
                               {isCurrent && (
                                 <span className="px-2 py-0.5 rounded-full text-[10px] font-bold bg-sky-600 text-white">
                                   Ativo
+                                </span>
+                              )}
+                              {isPrimary && (
+                                <span
+                                  data-testid={`saved-location-primary-badge-${loc.id}`}
+                                  className="px-2 py-0.5 rounded-full text-[10px] font-bold bg-emerald-600 text-white"
+                                >
+                                  Principal
                                 </span>
                               )}
                             </div>
@@ -658,13 +808,35 @@ export const SavedLocationsModal: React.FC<SavedLocationsModalProps> = ({
                         )}
                       </div>
 
-                      <div className="flex items-center gap-1.5 shrink-0">
+                      <div className="flex flex-wrap items-center gap-1.5 shrink-0">
                         <button
                           type="button"
                           onClick={() => handleSelectSaved(loc)}
                           className="min-h-[40px] min-w-[44px] px-3.5 py-1.5 rounded-xl text-xs font-bold bg-sky-600 hover:bg-sky-500 text-white shadow-sm transition-colors"
                         >
                           Selecionar
+                        </button>
+
+                        <button
+                          type="button"
+                          data-testid={`set-primary-btn-${loc.id}`}
+                          onClick={() =>
+                            handleSetPrimary({
+                              savedLocationId: loc.id,
+                              name: loc.name,
+                              latitude: loc.latitude,
+                              longitude: loc.longitude,
+                              region: loc.region,
+                              origin: 'saved',
+                            })
+                          }
+                          className={`min-h-[40px] min-w-[44px] px-3 py-1.5 rounded-xl text-xs font-semibold border transition-colors ${
+                            isPrimary
+                              ? 'bg-emerald-600 text-white border-emerald-600'
+                              : 'bg-white dark:bg-[#132a47] hover:bg-emerald-50 dark:hover:bg-emerald-950/40 text-emerald-700 dark:text-emerald-300 border-emerald-200 dark:border-emerald-700'
+                          }`}
+                        >
+                          {isPrimary ? 'Principal' : 'Definir como Principal'}
                         </button>
 
                         {onToggleFavorite && (

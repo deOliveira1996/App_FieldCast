@@ -1,8 +1,10 @@
-import React, { useCallback, useEffect, useState } from 'react';
-import { Compass, Navigation, ShieldCheck, Waves, Wind } from 'lucide-react';
-import type { CompassReading } from '../../types/field';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
+import { Compass, Eye, EyeOff, Navigation, ShieldCheck, Waves, Wind } from 'lucide-react';
+import type { CompassPreference, CompassReading } from '../../types/field';
 import type { ErrorLogRecord, ToastMessage } from '../../types/health';
 import { safeAction } from '../../utils/safeAction';
+
+export const COMPASS_PREF_STORAGE_KEY = 'fieldcast_compass_pref_v1';
 
 export interface DeviceOrientationEventWithWebkit extends DeviceOrientationEvent {
   webkitCompassHeading?: number;
@@ -12,6 +14,17 @@ export interface DeviceOrientationEventWithWebkit extends DeviceOrientationEvent
 export interface DeviceOrientationConstructorWithPermission {
   requestPermission?: () => Promise<'granted' | 'denied' | 'default'>;
 }
+
+interface AbsoluteOrientationSensorLike extends EventTarget {
+  quaternion?: readonly number[] | null;
+  start?: () => void;
+  stop?: () => void;
+}
+
+type AbsoluteOrientationSensorConstructor = new (options?: {
+  frequency?: number;
+  referenceFrame?: 'device' | 'screen';
+}) => AbsoluteOrientationSensorLike;
 
 /**
  * Normaliza qualquer ângulo em graus para o intervalo `[0, 360)`.
@@ -35,14 +48,131 @@ export function computeRelativeBearingDeg(
 }
 
 /**
+ * Obtém o ângulo de rotação da tela atual (`0, 90, 180, 270`).
+ */
+export function getScreenOrientationAngle(): number {
+  if (typeof window === 'undefined') {
+    return 0;
+  }
+  try {
+    const screenAngle = window.screen?.orientation?.angle;
+    if (typeof screenAngle === 'number' && Number.isFinite(screenAngle)) {
+      return screenAngle;
+    }
+    const legacyAngle = (window as unknown as { orientation?: number }).orientation;
+    if (typeof legacyAngle === 'number' && Number.isFinite(legacyAngle)) {
+      return legacyAngle;
+    }
+  } catch {
+    // Ignora
+  }
+  return 0;
+}
+
+/**
+ * Calcula a proa magnética compensada por inclinação 3D (pitch `beta` e roll `gamma`)
+ * a partir da matriz de rotação W3C Z-X'-Y'' (`R = Rz(alpha) * Rx(beta) * Ry(gamma)`),
+ * evitando que inclinar o celular misture os eixos X/Z no Android (ex.: Moto G35).
+ * Quando `beta` e `gamma` são 0 ou omitidos, reduz exatamente a `normalizeCompassDeg(360 - alpha)`.
+ */
+export function computeTiltCompensatedHeadingDeg(
+  alphaDeg: number,
+  betaDeg?: number | null,
+  gammaDeg?: number | null,
+  screenOrientationAngleDeg?: number | null,
+): number {
+  const screenAngle =
+    typeof screenOrientationAngleDeg === 'number' && Number.isFinite(screenOrientationAngleDeg)
+      ? screenOrientationAngleDeg
+      : 0;
+
+  const hasBeta = typeof betaDeg === 'number' && Number.isFinite(betaDeg);
+  const hasGamma = typeof gammaDeg === 'number' && Number.isFinite(gammaDeg);
+
+  if (!hasBeta || !hasGamma || (Math.abs(betaDeg!) < 1e-3 && Math.abs(gammaDeg!) < 1e-3)) {
+    return normalizeCompassDeg(360 - alphaDeg + screenAngle);
+  }
+
+  const toRad = Math.PI / 180;
+  const a = alphaDeg * toRad;
+  const b = betaDeg! * toRad;
+  const g = gammaDeg! * toRad;
+
+  const cA = Math.cos(a);
+  const sA = Math.sin(a);
+  const sB = Math.sin(b);
+  const cG = Math.cos(g);
+  const sG = Math.sin(g);
+
+  // Horizontal forward vector F = Up x X_device in East-North-Up (ENU) world coordinates
+  const east = -(sA * cG + cA * sB * sG);
+  const north = cA * cG - sA * sB * sG;
+
+  if (east * east + north * north < 1e-6) {
+    return normalizeCompassDeg(360 - alphaDeg + screenAngle);
+  }
+
+  const headingRad = Math.atan2(east, north);
+  const headingDeg = (headingRad * 180) / Math.PI;
+  return normalizeCompassDeg(headingDeg + screenAngle);
+}
+
+/**
+ * Calcula a proa verdadeira/magnética 3D a partir do quaternion `[x, y, z, w]`
+ * fornecido pelo W3C `AbsoluteOrientationSensor`.
+ */
+export function computeHeadingFromQuaternion(
+  quaternion: readonly number[] | null | undefined,
+  screenOrientationAngleDeg?: number | null,
+): number | null {
+  if (!quaternion || quaternion.length < 4) {
+    return null;
+  }
+  const [qx, qy, qz, qw] = quaternion;
+  if (
+    typeof qx !== 'number' ||
+    typeof qy !== 'number' ||
+    typeof qz !== 'number' ||
+    typeof qw !== 'number' ||
+    !Number.isFinite(qx) ||
+    !Number.isFinite(qy) ||
+    !Number.isFinite(qz) ||
+    !Number.isFinite(qw)
+  ) {
+    return null;
+  }
+
+  // First column of rotation matrix R(q) is X_device in ENU frame:
+  // X_E = 1 - 2*(qy^2 + qz^2), X_N = 2*(qx*qy + qw*qz)
+  // Horizontal forward F = Up x X_device = [-X_N, X_E, 0]
+  const east = -2 * (qx * qy + qw * qz);
+  const north = 1 - 2 * (qy * qy + qz * qz);
+
+  if (east * east + north * north < 1e-6) {
+    return null;
+  }
+
+  const screenAngle =
+    typeof screenOrientationAngleDeg === 'number' && Number.isFinite(screenOrientationAngleDeg)
+      ? screenOrientationAngleDeg
+      : 0;
+
+  const headingDeg = (Math.atan2(east, north) * 180) / Math.PI;
+  return normalizeCompassDeg(headingDeg + screenAngle);
+}
+
+/**
  * Extrai a proa magnética/verdadeira (`headingDeg`) a partir de um evento `DeviceOrientationEvent`:
  * - iOS: `webkitCompassHeading`
- * - Android/Web: `360 - alpha` (`deviceorientationabsolute` / `deviceorientation`)
+ * - Android/Web: compensação de inclinação 3D (`alpha, beta, gamma` -> `360 - alpha` quando plano)
  */
 export function extractHeadingFromOrientationEvent(event: {
   alpha: number | null;
+  beta?: number | null;
+  gamma?: number | null;
   absolute?: boolean;
   webkitCompassHeading?: number | null;
+  screenOrientationAngle?: number | null;
 }): { headingDeg: number; source: CompassReading['source'] } | null {
   if (
     typeof event.webkitCompassHeading === 'number' &&
@@ -55,8 +185,14 @@ export function extractHeadingFromOrientationEvent(event: {
   }
 
   if (typeof event.alpha === 'number' && Number.isFinite(event.alpha)) {
+    const headingDeg = computeTiltCompensatedHeadingDeg(
+      event.alpha,
+      event.beta,
+      event.gamma,
+      event.screenOrientationAngle,
+    );
     return {
-      headingDeg: normalizeCompassDeg(360 - event.alpha),
+      headingDeg,
       source: event.absolute ? 'android_absolute' : 'standard',
     };
   }
@@ -88,6 +224,44 @@ export function requiresIosOrientationPermission(): boolean {
   );
 }
 
+function readStoredCompassPreference(): CompassPreference {
+  if (typeof window === 'undefined' || typeof window.localStorage === 'undefined') {
+    return { enabled: true, disabledReason: null };
+  }
+  try {
+    const raw = window.localStorage.getItem(COMPASS_PREF_STORAGE_KEY);
+    if (!raw) {
+      return { enabled: true, disabledReason: null };
+    }
+    const parsed = JSON.parse(raw) as Partial<CompassPreference>;
+    if (typeof parsed.enabled === 'boolean') {
+      return {
+        enabled: parsed.enabled,
+        disabledReason: parsed.disabledReason ?? null,
+      };
+    }
+  } catch {
+    // Ignora erro de parse/storage
+  }
+  return { enabled: true, disabledReason: null };
+}
+
+function writeStoredCompassPreference(pref: CompassPreference): void {
+  if (typeof window === 'undefined' || typeof window.localStorage === 'undefined') {
+    return;
+  }
+  try {
+    window.localStorage.setItem(COMPASS_PREF_STORAGE_KEY, JSON.stringify(pref));
+  } catch {
+    // Ignora erro de quota/storage
+  }
+}
+
+function shortestAngularDeltaDeg(a: number, b: number): number {
+  const diff = Math.abs(normalizeCompassDeg(a) - normalizeCompassDeg(b));
+  return diff > 180 ? 360 - diff : diff;
+}
+
 export interface WindCompassProps {
   windDirection10mDeg: number | null;
   windSpeed10mKmh: number | null;
@@ -98,15 +272,19 @@ export interface WindCompassProps {
    * Proa simulada opcional (útil para testes automatizados).
    */
   simulatedHeadingDeg?: number | null;
+  compassEnabled?: boolean;
+  onCompassPreferenceChange?: (pref: CompassPreference) => void;
   onToast?: (toast: Omit<ToastMessage, 'id'>) => void;
   onErrorLog?: (record: ErrorLogRecord) => void | Promise<void>;
 }
 
 /**
  * Bússola de Vento e Onda Relativa (Seção 4.6 de `docs/SPEC.md`):
- * - iOS: Botão explícito chamando `DeviceOrientationEvent.requestPermission()` + `webkitCompassHeading`.
- * - Android/Web: `deviceorientationabsolute` (`360 - alpha`).
- * - Desktop / Sem sensor: Oculta automaticamente (`return null`).
+ * - Prioriza W3C `AbsoluteOrientationSensor` ou `deviceorientationabsolute` exclusivo (`event.absolute === true`)
+ *   com compensação 3D de inclinação (`alpha, beta, gamma` + `screen.orientation.angle`).
+ * - NUNCA permite que eventos relativos `deviceorientation` (`event.absolute !== true` sem `webkitCompassHeading`)
+ *   sobrescrevam a proa magnética absoluta.
+ * - Oculta automaticamente se apenas eventos relativos/instáveis existirem, ou manualmente via botão "Ocultar Bússola".
  */
 export const WindCompass: React.FC<WindCompassProps> = ({
   windDirection10mDeg,
@@ -115,6 +293,8 @@ export const WindCompass: React.FC<WindCompassProps> = ({
   waveHeightM,
   marineAvailable,
   simulatedHeadingDeg,
+  compassEnabled: compassEnabledProp,
+  onCompassPreferenceChange,
   onToast,
   onErrorLog,
 }) => {
@@ -123,6 +303,13 @@ export const WindCompass: React.FC<WindCompassProps> = ({
   const [iosPermissionState, setIosPermissionState] = useState<
     'prompt' | 'granted' | 'denied'
   >(() => (isIosPermissionRequired ? 'prompt' : 'granted'));
+
+  const [internalCompassPref, setInternalCompassPref] = useState<CompassPreference>(() =>
+    readStoredCompassPreference(),
+  );
+
+  const isCompassEnabled =
+    typeof compassEnabledProp === 'boolean' ? compassEnabledProp : internalCompassPref.enabled;
 
   const [reading, setReading] = useState<CompassReading | null>(() => {
     if (
@@ -145,36 +332,68 @@ export const WindCompass: React.FC<WindCompassProps> = ({
 
   const [sensorUnavailable, setSensorUnavailable] = useState<boolean>(false);
 
-  const handleOrientationEvent = useCallback(
-    (rawEvent: Event) => {
-      const event = rawEvent as DeviceOrientationEventWithWebkit;
-      const extracted = extractHeadingFromOrientationEvent({
-        alpha: event.alpha,
-        absolute: event.absolute,
-        webkitCompassHeading: event.webkitCompassHeading,
-      });
+  // Refs para travar exclusivamente em fonte absoluta e detectar oscilação errática
+  const hasAbsoluteSourceRef = useRef<boolean>(false);
+  const hasW3cSensorActiveRef = useRef<boolean>(false);
+  const relativeOnlyCountRef = useRef<number>(0);
+  const wildJumpCountRef = useRef<number>(0);
+  const lastHeadingSampleRef = useRef<{ headingDeg: number; timestampMs: number } | null>(
+    null,
+  );
 
-      if (!extracted) {
-        return;
+  const applyVerifiedHeading = useCallback(
+    (headingDeg: number, source: CompassReading['source']) => {
+      const nowMs = Date.now();
+      const prev = lastHeadingSampleRef.current;
+
+      if (prev && nowMs - prev.timestampMs < 350) {
+        const delta = shortestAngularDeltaDeg(prev.headingDeg, headingDeg);
+        if (delta > 115) {
+          wildJumpCountRef.current += 1;
+        } else if (delta < 45) {
+          wildJumpCountRef.current = Math.max(0, wildJumpCountRef.current - 1);
+        }
+
+        if (wildJumpCountRef.current >= 4) {
+          setSensorUnavailable(true);
+          setReading(null);
+          return;
+        }
       }
 
+      lastHeadingSampleRef.current = { headingDeg, timestampMs: nowMs };
       setSensorUnavailable(false);
       setReading({
-        headingDeg: extracted.headingDeg,
-        relativeWindDeg: computeRelativeBearingDeg(windDirection10mDeg, extracted.headingDeg),
+        headingDeg,
+        relativeWindDeg: computeRelativeBearingDeg(windDirection10mDeg, headingDeg),
         relativeWaveDeg: marineAvailable
-          ? computeRelativeBearingDeg(waveDirectionDeg, extracted.headingDeg)
+          ? computeRelativeBearingDeg(waveDirectionDeg, headingDeg)
           : null,
-        source: extracted.source,
-        timestampMs: Date.now(),
+        source,
+        timestampMs: nowMs,
       });
     },
     [marineAvailable, waveDirectionDeg, windDirection10mDeg],
   );
 
+  const handleToggleCompassPref = (nextEnabled: boolean, reason: string | null = null) => {
+    const nextPref: CompassPreference = {
+      enabled: nextEnabled,
+      disabledReason: nextEnabled ? null : reason,
+    };
+    setInternalCompassPref(nextPref);
+    writeStoredCompassPreference(nextPref);
+    onCompassPreferenceChange?.(nextPref);
+  };
+
   useEffect(() => {
+    if (!isCompassEnabled) {
+      return;
+    }
+
     if (typeof simulatedHeadingDeg === 'number' && Number.isFinite(simulatedHeadingDeg)) {
       const h = normalizeCompassDeg(simulatedHeadingDeg);
+      hasAbsoluteSourceRef.current = true;
       setSensorUnavailable(false);
       setReading({
         headingDeg: h,
@@ -188,7 +407,7 @@ export const WindCompass: React.FC<WindCompassProps> = ({
       return;
     }
 
-    if (typeof window === 'undefined' || typeof DeviceOrientationEvent === 'undefined') {
+    if (typeof window === 'undefined') {
       setSensorUnavailable(true);
       return;
     }
@@ -197,14 +416,127 @@ export const WindCompass: React.FC<WindCompassProps> = ({
       return;
     }
 
-    const win = window as Window;
-    win.addEventListener('deviceorientationabsolute', handleOrientationEvent, true);
-    win.addEventListener('deviceorientation', handleOrientationEvent, true);
+    const win = window as Window & {
+      AbsoluteOrientationSensor?: AbsoluteOrientationSensorConstructor;
+    };
+
+    hasAbsoluteSourceRef.current = false;
+    hasW3cSensorActiveRef.current = false;
+    relativeOnlyCountRef.current = 0;
+    wildJumpCountRef.current = 0;
+    lastHeadingSampleRef.current = null;
+
+    // 1. Tenta inicializar W3C AbsoluteOrientationSensor (quando suportado pelo navegador/WebView)
+    let w3cSensor: AbsoluteOrientationSensorLike | null = null;
+    if (typeof win.AbsoluteOrientationSensor === 'function') {
+      try {
+        w3cSensor = new win.AbsoluteOrientationSensor({
+          frequency: 15,
+          referenceFrame: 'device',
+        });
+        const onSensorReading = () => {
+          const heading = computeHeadingFromQuaternion(
+            w3cSensor?.quaternion,
+            getScreenOrientationAngle(),
+          );
+          if (heading !== null) {
+            hasAbsoluteSourceRef.current = true;
+            hasW3cSensorActiveRef.current = true;
+            applyVerifiedHeading(heading, 'sensor_absolute');
+          }
+        };
+        const onSensorError = () => {
+          hasW3cSensorActiveRef.current = false;
+        };
+        w3cSensor.addEventListener('reading', onSensorReading);
+        w3cSensor.addEventListener('error', onSensorError);
+        w3cSensor.start?.();
+      } catch {
+        w3cSensor = null;
+      }
+    }
+
+    if (typeof win.addEventListener !== 'function' && !w3cSensor) {
+      setSensorUnavailable(true);
+      return;
+    }
+
+    // 2. Listener exclusivo para `deviceorientationabsolute`
+    const handleAbsoluteOrientation = (rawEvent: Event) => {
+      if (hasW3cSensorActiveRef.current) {
+        return;
+      }
+      const event = rawEvent as DeviceOrientationEventWithWebkit;
+      if (typeof event.alpha !== 'number' || !Number.isFinite(event.alpha)) {
+        return;
+      }
+      hasAbsoluteSourceRef.current = true;
+      const extracted = extractHeadingFromOrientationEvent({
+        alpha: event.alpha,
+        beta: event.beta,
+        gamma: event.gamma,
+        absolute: true,
+        webkitCompassHeading: event.webkitCompassHeading,
+        screenOrientationAngle: getScreenOrientationAngle(),
+      });
+      if (extracted) {
+        applyVerifiedHeading(extracted.headingDeg, extracted.source);
+      }
+    };
+
+    // 3. Listener de fallback para `deviceorientation`:
+    //    CRÍTICO: NUNCA permite que `deviceorientation` relativo (`event.absolute !== true` sem `webkitCompassHeading`)
+    //    sobrescreva `deviceorientationabsolute` ou `sensor_absolute`, nem finja ser bússola magnética no Android!
+    const handleFallbackOrientation = (rawEvent: Event) => {
+      if (hasW3cSensorActiveRef.current) {
+        return;
+      }
+      const event = rawEvent as DeviceOrientationEventWithWebkit;
+      const hasWebkitHeading =
+        typeof event.webkitCompassHeading === 'number' &&
+        Number.isFinite(event.webkitCompassHeading);
+      const isTrulyAbsolute = event.absolute === true || hasWebkitHeading;
+
+      if (!isTrulyAbsolute) {
+        // Se já recebemos fonte absoluta, ignoramos completamente o evento relativo!
+        if (hasAbsoluteSourceRef.current) {
+          return;
+        }
+        // Se apenas eventos relativos (`absolute: false`) existem no dispositivo,
+        // marcamos o sensor como indisponível/não confiável para ocultar com segurança.
+        if (typeof event.alpha === 'number' && Number.isFinite(event.alpha)) {
+          relativeOnlyCountRef.current += 1;
+          if (relativeOnlyCountRef.current >= 2) {
+            setSensorUnavailable(true);
+            setReading(null);
+          }
+        }
+        return;
+      }
+
+      hasAbsoluteSourceRef.current = true;
+      const extracted = extractHeadingFromOrientationEvent({
+        alpha: event.alpha,
+        beta: event.beta,
+        gamma: event.gamma,
+        absolute: true,
+        webkitCompassHeading: event.webkitCompassHeading,
+        screenOrientationAngle: getScreenOrientationAngle(),
+      });
+
+      if (extracted) {
+        applyVerifiedHeading(extracted.headingDeg, extracted.source);
+      }
+    };
+
+    win.addEventListener('deviceorientationabsolute', handleAbsoluteOrientation, true);
+    win.addEventListener('deviceorientation', handleFallbackOrientation, true);
 
     const timer = setTimeout(() => {
       setReading((current) => {
-        if (!current) {
+        if (!current || !hasAbsoluteSourceRef.current) {
           setSensorUnavailable(true);
+          return null;
         }
         return current;
       });
@@ -212,12 +544,18 @@ export const WindCompass: React.FC<WindCompassProps> = ({
 
     return () => {
       clearTimeout(timer);
-      win.removeEventListener('deviceorientationabsolute', handleOrientationEvent, true);
-      win.removeEventListener('deviceorientation', handleOrientationEvent, true);
+      try {
+        w3cSensor?.stop?.();
+      } catch {
+        // Ignora
+      }
+      win.removeEventListener('deviceorientationabsolute', handleAbsoluteOrientation, true);
+      win.removeEventListener('deviceorientation', handleFallbackOrientation, true);
     };
   }, [
-    handleOrientationEvent,
+    applyVerifiedHeading,
     iosPermissionState,
+    isCompassEnabled,
     isIosPermissionRequired,
     marineAvailable,
     simulatedHeadingDeg,
@@ -258,6 +596,29 @@ export const WindCompass: React.FC<WindCompassProps> = ({
     );
   };
 
+  // Se o usuário ocultou manualmente a bússola, exibe apenas uma barra compacta discreta para eventual reativação
+  if (!isCompassEnabled) {
+    return (
+      <div
+        data-testid="compass-hidden-bar"
+        className="rounded-2xl border border-slate-200/80 dark:border-sky-800/60 bg-white/90 dark:bg-[#132a47]/80 px-4 py-2.5 flex items-center justify-between gap-3 shadow-sm"
+      >
+        <div className="flex items-center gap-2 text-xs text-slate-600 dark:text-slate-300">
+          <EyeOff className="w-4 h-4 text-slate-400 shrink-0" aria-hidden="true" />
+          <span>Bússola ocultada pelo usuário (modo campo limpo).</span>
+        </div>
+        <button
+          type="button"
+          onClick={() => handleToggleCompassPref(true, null)}
+          className="min-h-[40px] min-w-[44px] px-3 py-1.5 rounded-xl text-xs font-semibold inline-flex items-center gap-1.5 bg-sky-50 dark:bg-sky-900/50 hover:bg-sky-100 text-sky-700 dark:text-sky-200 border border-sky-200 dark:border-sky-700 transition-colors"
+        >
+          <Eye className="w-3.5 h-3.5" aria-hidden="true" />
+          <span>Mostrar Bússola</span>
+        </button>
+      </div>
+    );
+  }
+
   // Seção 4.6 de docs/SPEC.md: "Desktop/Sem sensor: Oculta automaticamente."
   if (!isIosPermissionRequired && (sensorUnavailable || !reading)) {
     return null;
@@ -291,17 +652,30 @@ export const WindCompass: React.FC<WindCompassProps> = ({
               Bússola de Vento &amp; Onda Relativa
             </h3>
             <p className="text-xs text-slate-600 dark:text-slate-400">
-              Orientação em tempo real via magnetômetro ({reading?.source ?? 'iOS Sensor'})
+              Orientação 3D compensada via magnetômetro ({reading?.source ?? 'iOS Sensor'})
             </p>
           </div>
         </div>
 
-        {reading && (
-          <span className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-mono font-bold bg-slate-100 dark:bg-slate-800 text-slate-800 dark:text-slate-200">
-            <Navigation className="w-3.5 h-3.5 text-sky-500" aria-hidden="true" />
-            Proa: {Math.round(headingDeg)}°
-          </span>
-        )}
+        <div className="flex flex-wrap items-center gap-2">
+          {reading && (
+            <span className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-mono font-bold bg-slate-100 dark:bg-slate-800 text-slate-800 dark:text-slate-200">
+              <Navigation className="w-3.5 h-3.5 text-sky-500" aria-hidden="true" />
+              Proa: {Math.round(headingDeg)}°
+            </span>
+          )}
+
+          <button
+            type="button"
+            data-testid="hide-compass-button"
+            onClick={() => handleToggleCompassPref(false, 'manual_user_hide')}
+            className="min-h-[44px] min-w-[44px] px-3 py-1.5 rounded-xl text-xs font-semibold inline-flex items-center gap-1.5 border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800/80 hover:bg-slate-100 dark:hover:bg-slate-700 text-slate-700 dark:text-slate-200 transition-colors"
+            title="Ocultar bússola caso o sensor do aparelho oscile"
+          >
+            <EyeOff className="w-3.5 h-3.5 text-slate-500" aria-hidden="true" />
+            <span>Ocultar Bússola</span>
+          </button>
+        </div>
       </div>
 
       {isIosPermissionRequired && iosPermissionState === 'prompt' ? (

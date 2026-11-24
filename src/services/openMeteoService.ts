@@ -483,6 +483,7 @@ export function normalizeOpenMeteoForecast(params: NormalizeForecastParams): Nor
     parsedForecast.latitude,
     parsedForecast.longitude,
     timesUnix,
+    parsedForecast.timezone,
   );
 
   return {

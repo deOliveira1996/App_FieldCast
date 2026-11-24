@@ -1,9 +1,5 @@
 import fs from 'node:fs';
 
-/**
- * FieldCast runtime security and Write-Scope guard for Antigravity lifecycle hooks.
- * Invoked via `.agents/hooks.json` on PreToolUse / PostToolUse.
- */
 function readStdinJson() {
   try {
     const raw = fs.readFileSync(0, 'utf8').trim();
@@ -13,8 +9,8 @@ function readStdinJson() {
   }
 }
 
-function checkCommandSafety(commandLine) {
-  const cmd = String(commandLine || '');
+function checkCommandSafety(args) {
+  const cmd = String(args?.CommandLine || '');
   const blockedPatterns = [
     { re: /(^|\s)rm\s+-rf\s+(\/|~|\*|\.\.)/i, msg: 'Blocked destructive recursive delete command.' },
     { re: /\bgit\s+push\s+(--force|-f)\b/i, msg: 'Blocked force push; inspect branch state explicitly.' },
@@ -25,24 +21,26 @@ function checkCommandSafety(commandLine) {
       msg: 'Blocked command reading sensitive environment or signing files.',
     },
   ];
-
   for (const rule of blockedPatterns) {
     if (rule.re.test(cmd)) {
       return { decision: 'deny', reason: `[FieldCast Security Gate] ${rule.msg}` };
     }
   }
-  return {};
+  if (args?.BypassSandbox === true) {
+    return { decision: 'ask', reason: '[FieldCast Security Gate] BypassSandbox requires standard confirmation.' };
+  }
+  return { decision: 'allow' };
 }
 
-function checkWriteSafety(filePath) {
-  const normalized = String(filePath || '').replace(/\\/g, '/');
+function checkWriteSafety(args) {
+  const filePath = args?.Path || args?.path || '';
+  const normalized = String(filePath).replace(/\\/g, '/');
   if (/(^|\/)(\.env(\..*)?|.*\.(keystore|jks|p12|pem|key))$/i.test(normalized)) {
     return {
       decision: 'deny',
       reason: `[FieldCast Security Gate] Refusing direct write to secret/signing artifact: ${normalized}`,
     };
   }
-
   const scopeEnv = process.env.FIELDCAST_WRITE_SCOPE;
   if (scopeEnv && normalized) {
     const allowedPrefixes = scopeEnv
@@ -59,7 +57,7 @@ function checkWriteSafety(filePath) {
       };
     }
   }
-  return {};
+  return { decision: 'allow' };
 }
 
 const payload = readStdinJson();
@@ -70,9 +68,11 @@ const args = payload.toolCall?.args || {};
 let response = {};
 if (eventName === 'PreToolUse') {
   if (toolName === 'run_command') {
-    response = checkCommandSafety(args.CommandLine);
+    response = checkCommandSafety(args);
   } else if (toolName === 'write_file' || toolName === 'edit_file') {
-    response = checkWriteSafety(args.Path || args.path);
+    response = checkWriteSafety(args);
+  } else {
+    response = { decision: 'allow' };
   }
 }
 

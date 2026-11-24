@@ -28,12 +28,12 @@ function createInitialState(service: MonitoredServiceId): InternalCircuitState {
   return {
     service,
     label: SERVICE_LABELS[service],
-    status: 'healthy',
+    status: 'unverified',
     latencyMs: null,
     lastCheckedIso: null,
     circuitOpen: false,
     consecutiveFailures: 0,
-    message: 'Aguardando primeira verificação',
+    message: 'Aguardando verificação (sob demanda)',
     openedAtMs: null,
   };
 }

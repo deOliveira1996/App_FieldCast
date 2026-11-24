@@ -1,10 +1,15 @@
 import type { ActiveCoordinates, SavedLocation } from '../types/field';
+import type { ServiceEndpointStatus } from '../types/health';
 import {
   IpWhoIsResponseSchema,
   NominatimResponseSchema,
   type NominatimResult,
 } from '../types/schemas';
-import { fetchWithCircuitBreaker } from './httpClient';
+import {
+  fetchWithCircuitBreaker,
+  getServiceEndpointStatus,
+  markServiceDegraded,
+} from './httpClient';
 
 export const NOMINATIM_SEARCH_ENDPOINT = 'https://nominatim.openstreetmap.org/search';
 export const IPWHOIS_ENDPOINT = 'https://ipwho.is/';
@@ -211,4 +216,55 @@ export async function fetchIpApproximateLocation(options?: {
     isApproximateIp: true,
     updatedAtIso: new Date().toISOString(),
   };
+}
+
+/**
+ * Executa sonda real sob demanda para o endpoint Nominatim (respeitando rate-limit de 1 req/s).
+ * Nunca lança exceção não tratada ao ser usado pelo módulo de Diagnóstico.
+ */
+export async function probeNominatimHealth(options?: {
+  fetchImpl?: typeof fetch;
+  timeoutMs?: number;
+  minIntervalMs?: number;
+}): Promise<ServiceEndpointStatus> {
+  try {
+    await searchLocationsNominatim('Florianopolis', {
+      limit: 1,
+      minIntervalMs: options?.minIntervalMs,
+      fetchImpl: options?.fetchImpl,
+      timeoutMs: options?.timeoutMs ?? 6000,
+      maxRetries: 0,
+    });
+  } catch (err) {
+    const status = getServiceEndpointStatus('nominatim');
+    if (status.status === 'healthy' || status.status === 'unverified') {
+      const reason = err instanceof Error ? err.message : 'Falha ao sondar Nominatim';
+      return markServiceDegraded('nominatim', reason);
+    }
+  }
+  return getServiceEndpointStatus('nominatim');
+}
+
+/**
+ * Executa sonda real sob demanda para o endpoint de geolocalização por IP (`ipwho.is`).
+ * Nunca lança exceção não tratada ao ser usado pelo módulo de Diagnóstico.
+ */
+export async function probeIpWhoisHealth(options?: {
+  fetchImpl?: typeof fetch;
+  timeoutMs?: number;
+}): Promise<ServiceEndpointStatus> {
+  try {
+    await fetchIpApproximateLocation({
+      fetchImpl: options?.fetchImpl,
+      timeoutMs: options?.timeoutMs ?? 6000,
+      maxRetries: 0,
+    });
+  } catch (err) {
+    const status = getServiceEndpointStatus('ipwhois');
+    if (status.status === 'healthy' || status.status === 'unverified') {
+      const reason = err instanceof Error ? err.message : 'Falha ao sondar ipwho.is';
+      return markServiceDegraded('ipwhois', reason);
+    }
+  }
+  return getServiceEndpointStatus('ipwhois');
 }

@@ -58,7 +58,7 @@ const HEALTH_BADGE_MAP: Record<
     Icon: XCircle,
   },
   unverified: {
-    label: 'Sob Demanda',
+    label: 'Sob Demanda / Não Verificado',
     bgClass: 'bg-sky-500/15 text-sky-900 dark:text-sky-200 border border-sky-500/30',
     Icon: Clock,
   },
@@ -368,7 +368,10 @@ export const HealthCheckModal: React.FC<HealthCheckModalProps> = ({
                           {formatUtcTimestamp(ep.lastCheckedIso)}
                         </td>
                         <td className="py-2.5 px-3 text-slate-600 dark:text-slate-400 max-w-xs truncate">
-                          {ep.message ?? 'OK'}
+                          {ep.message ??
+                            (ep.status === 'unverified'
+                              ? 'Aguardando uso (Sob Demanda / Não Verificado)'
+                              : 'OK')}
                         </td>
                       </tr>
                     );

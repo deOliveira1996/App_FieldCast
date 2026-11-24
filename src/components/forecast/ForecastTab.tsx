@@ -61,6 +61,13 @@ export interface ForecastTabProps {
   onReloadForecast?: () => void | Promise<void>;
   onToast?: (toast: Omit<ToastMessage, 'id'>) => void;
   onErrorLog?: (record: ErrorLogRecord) => void | Promise<void>;
+  isPrimaryLocation?: boolean;
+  onSetPrimaryLocation?: (coords: {
+    latitude: number;
+    longitude: number;
+    name: string;
+    origin?: ActiveCoordinates['origin'];
+  }) => void | Promise<void>;
 }
 
 /**
@@ -90,6 +97,8 @@ export const ForecastTab: React.FC<ForecastTabProps> = ({
   onReloadForecast,
   onToast,
   onErrorLog,
+  isPrimaryLocation,
+  onSetPrimaryLocation,
 }) => {
   const locationCtx = useAppLocationContext();
   const resolvedOnSelectLocation = propOnSelectLocation ?? locationCtx?.onSelectLocation;
@@ -233,6 +242,8 @@ export const ForecastTab: React.FC<ForecastTabProps> = ({
           visibleParams={visibleParams}
           isMiniMapOpen={isMiniMapOpen}
           onToggleMiniMap={() => setIsMiniMapOpen((prev) => !prev)}
+          isPrimaryLocation={isPrimaryLocation}
+          onSetPrimaryLocation={onSetPrimaryLocation}
         />
 
         {/* 2. Mapa Interativo de Pin Estilo Windy (Bandeirinha com Vento + Seleção de Ponto/Área) */}

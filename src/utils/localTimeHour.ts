@@ -156,12 +156,13 @@ export function findCurrentLocalDayIndex(
 
   const todayYmd = formatLocalYMD(now, timezone);
   for (let i = 0; i < ephemerisByDay.length; i++) {
-    const raw = ephemerisByDay[i]!.dateIso;
-    const parsed = new Date(raw);
+    const raw = ephemerisByDay[i]!.dateIso.trim();
+    const isBareDate = /^\d{4}-\d{2}-\d{2}$/.test(raw);
+    const parsed = isBareDate ? new Date(`${raw}T12:00:00Z`) : new Date(raw);
     const dayYmd = Number.isNaN(parsed.getTime())
       ? raw.slice(0, 10)
       : formatLocalYMD(parsed, timezone);
-    if (dayYmd === todayYmd || raw.slice(0, 10) === todayYmd) {
+    if (dayYmd === todayYmd || (isBareDate && raw === todayYmd)) {
       return i;
     }
   }

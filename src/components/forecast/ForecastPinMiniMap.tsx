@@ -1,12 +1,14 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { Component, useEffect, useMemo, useRef, useState } from 'react';
 import 'leaflet/dist/leaflet.css';
 import L from 'leaflet';
 import { Circle, MapContainer, Marker, TileLayer, useMap, useMapEvents } from 'react-leaflet';
 import {
+  AlertTriangle,
   Bookmark,
   Check,
   Compass,
   Crosshair,
+  EyeOff,
   Layers,
   MapPin,
   Navigation,
@@ -99,12 +101,51 @@ function createWindyFlagPinIcon(windSummaryText: string): L.DivIcon {
   });
 }
 
+interface OverlayBoundaryProps {
+  resetKey: string;
+  onError: () => void;
+  children: React.ReactNode;
+}
+
+interface OverlayBoundaryState {
+  hasError: boolean;
+}
+
+class MiniMapOverlayErrorBoundary extends Component<OverlayBoundaryProps, OverlayBoundaryState> {
+  state: OverlayBoundaryState = { hasError: false };
+
+  static getDerivedStateFromError(): OverlayBoundaryState {
+    return { hasError: true };
+  }
+
+  componentDidCatch(): void {
+    this.props.onError();
+  }
+
+  componentDidUpdate(prevProps: OverlayBoundaryProps): void {
+    if (this.state.hasError && prevProps.resetKey !== this.props.resetKey) {
+      this.setState({ hasError: false });
+    }
+  }
+
+  render(): React.ReactNode {
+    if (this.state.hasError) {
+      return null;
+    }
+    return this.props.children;
+  }
+}
+
 const MapClickAndSyncController: React.FC<{
   centerLat: number;
   centerLon: number;
   onPickCoordinates: (lat: number, lon: number) => void;
 }> = ({ centerLat, centerLon, onPickCoordinates }) => {
   const map = useMap();
+  const lastSyncedTargetRef = useRef<{ lat: number; lon: number }>({
+    lat: centerLat,
+    lon: centerLon,
+  });
 
   useEffect(() => {
     const timer = setTimeout(() => {
@@ -118,11 +159,17 @@ const MapClickAndSyncController: React.FC<{
   }, [map]);
 
   useEffect(() => {
+    const prev = lastSyncedTargetRef.current;
+    const targetShift = Math.hypot(prev.lat - centerLat, prev.lon - centerLon);
+    if (targetShift < 0.001) {
+      return;
+    }
+    lastSyncedTargetRef.current = { lat: centerLat, lon: centerLon };
     try {
       const current = map.getCenter();
       const dist = Math.hypot(current.lat - centerLat, current.lng - centerLon);
-      if (dist > 0.0005) {
-        map.setView([centerLat, centerLon], map.getZoom(), { animate: true });
+      if (dist > 0.002) {
+        map.setView([centerLat, centerLon], map.getZoom(), { animate: false });
       }
     } catch {
       // Ignore in headless test environment
@@ -193,11 +240,18 @@ export const ForecastPinMiniMap: React.FC<ForecastPinMiniMapProps> = ({
     useState<WeatherMapLayerId>('wind');
   const [showRainViewerOverlay, setShowRainViewerOverlay] =
     useState<boolean>(true);
+  const [overlayFallbackActive, setOverlayFallbackActive] =
+    useState<boolean>(false);
+  const [overlayRetryTick, setOverlayRetryTick] = useState<number>(0);
   const [radarState, setRadarState] = useState<RainViewerRadarState | null>(null);
 
   useEffect(() => {
-    setPinLat(activeLocation.latitude);
-    setPinLon(activeLocation.longitude);
+    setPinLat((prev) =>
+      Math.abs(prev - activeLocation.latitude) > 1e-5 ? activeLocation.latitude : prev,
+    );
+    setPinLon((prev) =>
+      Math.abs(prev - activeLocation.longitude) > 1e-5 ? activeLocation.longitude : prev,
+    );
   }, [activeLocation.latitude, activeLocation.longitude]);
 
   useEffect(() => {
@@ -373,12 +427,13 @@ export const ForecastPinMiniMap: React.FC<ForecastPinMiniMapProps> = ({
           {/* Weather Model & RainViewer Radar Quick Toggles */}
           <button
             type="button"
-            onClick={() =>
-              setWeatherOverlayLayer((prev) => (prev === 'wind' ? 'none' : 'wind'))
-            }
-            aria-pressed={weatherOverlayLayer === 'wind'}
+            onClick={() => {
+              setOverlayFallbackActive(false);
+              setWeatherOverlayLayer((prev) => (prev === 'wind' ? 'none' : 'wind'));
+            }}
+            aria-pressed={weatherOverlayLayer === 'wind' && !overlayFallbackActive}
             className={`min-h-[36px] px-3 py-1 rounded-full text-xs font-semibold inline-flex items-center gap-1.5 border transition-all ${
-              weatherOverlayLayer === 'wind'
+              weatherOverlayLayer === 'wind' && !overlayFallbackActive
                 ? 'bg-sky-50 dark:bg-sky-900/70 text-[#0070b8] dark:text-sky-100 border-sky-300 dark:border-sky-600'
                 : 'bg-white dark:bg-[#0d1f36] text-slate-600 dark:text-sky-200 border-slate-200 dark:border-sky-800 hover:bg-sky-50'
             }`}
@@ -399,6 +454,37 @@ export const ForecastPinMiniMap: React.FC<ForecastPinMiniMapProps> = ({
           >
             <Radar className="w-3.5 h-3.5 text-[#0080cd]" aria-hidden="true" />
             <span>Radar Chuva</span>
+          </button>
+
+          <button
+            type="button"
+            data-testid="minimap-safe-layers-toggle"
+            onClick={() => {
+              const hasAnyOverlay =
+                (weatherOverlayLayer !== 'none' && !overlayFallbackActive) || showRainViewerOverlay;
+              if (hasAnyOverlay) {
+                setWeatherOverlayLayer('none');
+                setShowRainViewerOverlay(false);
+              } else {
+                setOverlayFallbackActive(false);
+                setOverlayRetryTick((prev) => prev + 1);
+                setWeatherOverlayLayer('wind');
+                setShowRainViewerOverlay(true);
+              }
+            }}
+            aria-pressed={weatherOverlayLayer === 'none' && !showRainViewerOverlay}
+            className={`min-h-[36px] px-3 py-1 rounded-full text-xs font-semibold inline-flex items-center gap-1.5 border transition-all ${
+              weatherOverlayLayer === 'none' && !showRainViewerOverlay
+                ? 'bg-slate-800 text-white border-slate-700 dark:bg-sky-700 dark:border-sky-600'
+                : 'bg-white dark:bg-[#0d1f36] text-slate-600 dark:text-sky-200 border-slate-200 dark:border-sky-800 hover:bg-sky-50'
+            }`}
+          >
+            <EyeOff className="w-3.5 h-3.5" aria-hidden="true" />
+            <span>
+              {weatherOverlayLayer === 'none' && !showRainViewerOverlay
+                ? 'Mapa Limpo (Ativo)'
+                : 'Mapa Limpo'}
+            </span>
           </button>
 
           {/* Instant Windy Click Toggle */}
@@ -526,13 +612,20 @@ export const ForecastPinMiniMap: React.FC<ForecastPinMiniMapProps> = ({
             attribution={activeBaseLayer.attribution}
           />
 
-          <WeatherModelOverlayLayer
-            layerId={weatherOverlayLayer}
-            modelMode={mapModelMode}
-            points={activeGridSlice?.points ?? []}
-            opacity={0.72}
-            animateFlow={true}
-          />
+          {weatherOverlayLayer !== 'none' && !overlayFallbackActive && (
+            <MiniMapOverlayErrorBoundary
+              resetKey={`${mapModelMode}_${weatherOverlayLayer}_${overlayRetryTick}`}
+              onError={() => setOverlayFallbackActive(true)}
+            >
+              <WeatherModelOverlayLayer
+                layerId={weatherOverlayLayer}
+                modelMode={mapModelMode}
+                points={activeGridSlice?.points ?? []}
+                opacity={0.72}
+                animateFlow={true}
+              />
+            </MiniMapOverlayErrorBoundary>
+          )}
 
           {showRainViewerOverlay && latestRadarFrame && (
             <TileLayer
@@ -593,6 +686,26 @@ export const ForecastPinMiniMap: React.FC<ForecastPinMiniMapProps> = ({
             </span>
           </div>
         </div>
+
+        {/* Resilient Overlay Fallback Notice (if WebView canvas fails) */}
+        {overlayFallbackActive && (
+          <div className="absolute top-2.5 left-2.5 z-[500]">
+            <div className="px-2.5 py-1.5 rounded-xl bg-amber-50/95 dark:bg-amber-950/95 border border-amber-300 dark:border-amber-700 shadow-md text-[11px] text-amber-950 dark:text-amber-100 flex items-center gap-2">
+              <AlertTriangle className="w-3.5 h-3.5 text-amber-600 dark:text-amber-400 shrink-0" aria-hidden="true" />
+              <span>Camada climática em modo seguro</span>
+              <button
+                type="button"
+                onClick={() => {
+                  setOverlayFallbackActive(false);
+                  setOverlayRetryTick((prev) => prev + 1);
+                }}
+                className="underline font-bold hover:text-amber-700 dark:hover:text-amber-200"
+              >
+                Tentar novamente
+              </button>
+            </div>
+          </div>
+        )}
 
         {/* Floating Model & Radar Status HUD on Mini-Map */}
         <div

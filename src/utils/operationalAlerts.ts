@@ -1,5 +1,6 @@
 import * as SunCalc from 'suncalc';
 import { computeModelScalarStat } from './ensembleMath';
+import { formatLocalYMD, getLocalDateParts } from './localTimeHour';
 import {
   DEFAULT_SAFE_WINDOW_THRESHOLDS,
   type EnsembleHour,
@@ -287,18 +288,18 @@ function safeDateToIso(d: Date | undefined | null): string | null {
 
 /**
  * Calcula efemérides solares e lunares 100% offline usando `suncalc` para uma data e coordenada.
+ * Quando `timezone` é informado (ou via fuso local), ancora `dateIso` ao dia civil local
+ * e calcula o SunCalc ao meio-dia UTC desse dia civil para evitar desvios de meia-noite UTC.
  */
 export function computeEphemerisForDate(
   date: Date,
   latitude: number,
   longitude: number,
+  timezone?: string,
 ): EphemerisData {
-  // Usa o meio-dia UTC da data alvo para estabilidade do cálculo diário do SunCalc
-  const year = date.getUTCFullYear();
-  const month = date.getUTCMonth();
-  const day = date.getUTCDate();
-  const noonUtc = new Date(Date.UTC(year, month, day, 12, 0, 0));
-  const dateIso = noonUtc.toISOString().slice(0, 10);
+  const { year, month, day } = getLocalDateParts(date, timezone);
+  const noonUtc = new Date(Date.UTC(year, month - 1, day, 12, 0, 0));
+  const dateIso = formatLocalYMD(date, timezone);
 
   const times = SunCalc.getTimes(noonUtc, latitude, longitude);
   const moon = SunCalc.getMoonIllumination(noonUtc);
@@ -318,30 +319,33 @@ export function computeEphemerisForDate(
 }
 
 /**
- * Calcula efemérides diárias para o intervalo de timestamps UNIX do horizonte de previsão.
+ * Calcula efemérides diárias para o intervalo de timestamps UNIX do horizonte de previsão,
+ * agrupando os dias pelo calendário local em `timezone`.
  */
 export function computeEphemerisRange(
   latitude: number,
   longitude: number,
   timestampsUnix: readonly number[],
+  timezone?: string,
 ): EphemerisData[] {
   const uniqueDays = new Map<string, Date>();
 
   for (const ts of timestampsUnix) {
     const d = new Date(ts * 1000);
-    const key = d.toISOString().slice(0, 10);
+    const key = formatLocalYMD(d, timezone);
     if (!uniqueDays.has(key)) {
       uniqueDays.set(key, d);
     }
   }
 
   if (uniqueDays.size === 0) {
-    uniqueDays.set(new Date().toISOString().slice(0, 10), new Date());
+    const now = new Date();
+    uniqueDays.set(formatLocalYMD(now, timezone), now);
   }
 
   const results: EphemerisData[] = [];
   for (const d of uniqueDays.values()) {
-    results.push(computeEphemerisForDate(d, latitude, longitude));
+    results.push(computeEphemerisForDate(d, latitude, longitude, timezone));
   }
   return results;
 }

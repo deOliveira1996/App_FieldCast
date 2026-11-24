@@ -1,13 +1,20 @@
 import Dexie, { type Table } from 'dexie';
 import { haversineDistanceKm } from '../utils/exporters';
 import type {
+  CompassPreference,
+  HistoricalLogEntry,
+  HistoricalRecurrenceRule,
   OfflineTileRecord,
+  PrimaryLocationPreference,
   SavedLocation,
   TrackSession,
   Waypoint,
 } from '../types/field';
 import type { ErrorLogRecord } from '../types/health';
 import type { NormalizedForecast } from '../types/weather';
+
+export const PRIMARY_LOCATION_STORAGE_KEY = 'fieldcast_primary_location_v1';
+export const COMPASS_PREFERENCE_STORAGE_KEY = 'fieldcast_compass_pref_v1';
 
 export interface ForecastCacheRecord {
   locationKey: string;
@@ -57,6 +64,8 @@ export class FieldCastDatabase extends Dexie {
   tracks!: Table<TrackSession, string>;
   offlineTiles!: Table<OfflineTileRecord, string>;
   errorLogs!: Table<ErrorLogRecord, number>;
+  historicalRecurrenceRules!: Table<HistoricalRecurrenceRule, string>;
+  historicalLogs!: Table<HistoricalLogEntry, string>;
 
   constructor() {
     super('FieldCastDB');
@@ -67,6 +76,10 @@ export class FieldCastDatabase extends Dexie {
       tracks: 'id, startedAtIso, status',
       offlineTiles: 'key, missionId, z, theme, cachedAtIso',
       errorLogs: '++id, timestampUtcIso, module, action',
+    });
+    this.version(2).stores({
+      historicalRecurrenceRules: 'id, enabled, nextDueIso',
+      historicalLogs: 'id, ruleId, createdAtIso',
     });
   }
 }
@@ -83,6 +96,10 @@ const memoryStore = {
   waypoints: new Map<string, Waypoint>(),
   tracks: new Map<string, TrackSession>(),
   offlineTiles: new Map<string, OfflineTileRecord>(),
+  historicalRecurrenceRules: new Map<string, HistoricalRecurrenceRule>(),
+  historicalLogs: new Map<string, HistoricalLogEntry>(),
+  primaryLocation: null as PrimaryLocationPreference | null,
+  compassPreference: { enabled: true, disabledReason: null } as CompassPreference,
   errorLogs: [] as ErrorLogRecord[],
   nextErrorId: 1,
 };
@@ -100,8 +117,21 @@ export async function resetDatabaseForTests(): Promise<void> {
   memoryStore.waypoints.clear();
   memoryStore.tracks.clear();
   memoryStore.offlineTiles.clear();
+  memoryStore.historicalRecurrenceRules.clear();
+  memoryStore.historicalLogs.clear();
+  memoryStore.primaryLocation = null;
+  memoryStore.compassPreference = { enabled: true, disabledReason: null };
   memoryStore.errorLogs = [];
   memoryStore.nextErrorId = 1;
+
+  if (typeof window !== 'undefined') {
+    try {
+      window.localStorage.removeItem(PRIMARY_LOCATION_STORAGE_KEY);
+      window.localStorage.removeItem(COMPASS_PREFERENCE_STORAGE_KEY);
+    } catch {
+      // Ignora em ambientes sem localStorage acessível
+    }
+  }
 
   if (hasNativeIndexedDb()) {
     try {
@@ -112,6 +142,8 @@ export async function resetDatabaseForTests(): Promise<void> {
         db.tracks.clear(),
         db.offlineTiles.clear(),
         db.errorLogs.clear(),
+        db.historicalRecurrenceRules.clear(),
+        db.historicalLogs.clear(),
       ]);
     } catch {
       // Ignora caso o banco ainda não esteja aberto no ambiente
@@ -524,6 +556,206 @@ export async function clearErrorLogs(): Promise<void> {
   if (hasNativeIndexedDb()) {
     try {
       await db.errorLogs.clear();
+    } catch {
+      // Ignora
+    }
+  }
+}
+
+// ============================================================================
+// Preferences: Primary Location & Compass (localStorage + memory fallback)
+// ============================================================================
+
+export function loadPrimaryLocationPreference(): PrimaryLocationPreference | null {
+  if (typeof window !== 'undefined') {
+    try {
+      const raw = window.localStorage.getItem(PRIMARY_LOCATION_STORAGE_KEY);
+      if (raw) {
+        const parsed = JSON.parse(raw) as Partial<PrimaryLocationPreference>;
+        if (
+          parsed &&
+          typeof parsed.name === 'string' &&
+          typeof parsed.latitude === 'number' &&
+          Number.isFinite(parsed.latitude) &&
+          typeof parsed.longitude === 'number' &&
+          Number.isFinite(parsed.longitude)
+        ) {
+          const validPref: PrimaryLocationPreference = {
+            savedLocationId:
+              typeof parsed.savedLocationId === 'string' ? parsed.savedLocationId : undefined,
+            name: parsed.name,
+            latitude: parsed.latitude,
+            longitude: parsed.longitude,
+            region: typeof parsed.region === 'string' ? parsed.region : undefined,
+            origin: parsed.origin ?? 'saved',
+            updatedAtIso:
+              typeof parsed.updatedAtIso === 'string'
+                ? parsed.updatedAtIso
+                : new Date().toISOString(),
+          };
+          memoryStore.primaryLocation = validPref;
+          return validPref;
+        }
+      }
+    } catch {
+      // Fallback para memória
+    }
+  }
+  return memoryStore.primaryLocation ? { ...memoryStore.primaryLocation } : null;
+}
+
+export function savePrimaryLocationPreference(
+  pref: PrimaryLocationPreference,
+): PrimaryLocationPreference {
+  const normalized: PrimaryLocationPreference = {
+    ...pref,
+    name: pref.name.trim() || 'Área Principal',
+    updatedAtIso: pref.updatedAtIso || new Date().toISOString(),
+  };
+  memoryStore.primaryLocation = normalized;
+
+  if (typeof window !== 'undefined') {
+    try {
+      window.localStorage.setItem(PRIMARY_LOCATION_STORAGE_KEY, JSON.stringify(normalized));
+    } catch {
+      // Mantém fallback em memória
+    }
+  }
+  return normalized;
+}
+
+export function clearPrimaryLocationPreference(): void {
+  memoryStore.primaryLocation = null;
+  if (typeof window !== 'undefined') {
+    try {
+      window.localStorage.removeItem(PRIMARY_LOCATION_STORAGE_KEY);
+    } catch {
+      // Ignora
+    }
+  }
+}
+
+export function loadCompassPreference(): CompassPreference {
+  if (typeof window !== 'undefined') {
+    try {
+      const raw = window.localStorage.getItem(COMPASS_PREFERENCE_STORAGE_KEY);
+      if (raw) {
+        const parsed = JSON.parse(raw) as Partial<CompassPreference>;
+        if (parsed && typeof parsed.enabled === 'boolean') {
+          const pref: CompassPreference = {
+            enabled: parsed.enabled,
+            disabledReason: parsed.disabledReason ?? null,
+          };
+          memoryStore.compassPreference = pref;
+          return pref;
+        }
+      }
+    } catch {
+      // Fallback para memória
+    }
+  }
+  return { ...memoryStore.compassPreference };
+}
+
+export function saveCompassPreference(pref: CompassPreference): void {
+  const normalized: CompassPreference = {
+    enabled: Boolean(pref.enabled),
+    disabledReason: pref.disabledReason ?? null,
+  };
+  memoryStore.compassPreference = normalized;
+  if (typeof window !== 'undefined') {
+    try {
+      window.localStorage.setItem(COMPASS_PREFERENCE_STORAGE_KEY, JSON.stringify(normalized));
+    } catch {
+      // Mantém fallback em memória
+    }
+  }
+}
+
+// ============================================================================
+// CRUD: HistoricalRecurrenceRules & HistoricalLogs (Dexie v2 + memoryStore)
+// ============================================================================
+
+export async function getHistoricalRecurrenceRules(): Promise<HistoricalRecurrenceRule[]> {
+  if (hasNativeIndexedDb()) {
+    try {
+      const list = await db.historicalRecurrenceRules.toArray();
+      for (const item of list) {
+        memoryStore.historicalRecurrenceRules.set(item.id, item);
+      }
+    } catch {
+      // Fallback para memória
+    }
+  }
+  return Array.from(memoryStore.historicalRecurrenceRules.values()).sort((a, b) =>
+    a.nextDueIso.localeCompare(b.nextDueIso),
+  );
+}
+
+export async function saveHistoricalRecurrenceRule(
+  rule: HistoricalRecurrenceRule,
+): Promise<void> {
+  const copy: HistoricalRecurrenceRule = {
+    ...rule,
+    models: [...rule.models],
+  };
+  memoryStore.historicalRecurrenceRules.set(copy.id, copy);
+  if (hasNativeIndexedDb()) {
+    try {
+      await db.historicalRecurrenceRules.put(copy);
+    } catch {
+      // Mantém fallback em memória
+    }
+  }
+}
+
+export async function deleteHistoricalRecurrenceRule(id: string): Promise<void> {
+  memoryStore.historicalRecurrenceRules.delete(id);
+  if (hasNativeIndexedDb()) {
+    try {
+      await db.historicalRecurrenceRules.delete(id);
+    } catch {
+      // Ignora
+    }
+  }
+}
+
+export async function getHistoricalLogs(): Promise<HistoricalLogEntry[]> {
+  if (hasNativeIndexedDb()) {
+    try {
+      const list = await db.historicalLogs.toArray();
+      for (const item of list) {
+        memoryStore.historicalLogs.set(item.id, item);
+      }
+    } catch {
+      // Fallback para memória
+    }
+  }
+  return Array.from(memoryStore.historicalLogs.values()).sort((a, b) =>
+    b.createdAtIso.localeCompare(a.createdAtIso),
+  );
+}
+
+export async function saveHistoricalLogEntry(entry: HistoricalLogEntry): Promise<void> {
+  const copy: HistoricalLogEntry = {
+    ...entry,
+    modelsIncluded: [...entry.modelsIncluded],
+  };
+  memoryStore.historicalLogs.set(copy.id, copy);
+  if (hasNativeIndexedDb()) {
+    try {
+      await db.historicalLogs.put(copy);
+    } catch {
+      // Mantém fallback em memória
+    }
+  }
+}
+
+export async function deleteHistoricalLogEntry(id: string): Promise<void> {
+  memoryStore.historicalLogs.delete(id);
+  if (hasNativeIndexedDb()) {
+    try {
+      await db.historicalLogs.delete(id);
     } catch {
       // Ignora
     }

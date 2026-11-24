@@ -23,9 +23,9 @@ export const HELP_TOPICS: Record<HelpTopicId, HelpTopicDefinition> = {
   confidence: {
     title: 'Índice de Confiabilidade (0 a 100)',
     summary:
-      'Mede o grau de certeza da previsão combinando a concordância entre 3 modelos globais, a saúde das fontes e o horizonte de tempo.',
+      'Mede o grau de certeza da previsão combinando a concordância entre 4 modelos globais (ECMWF, GFS, ICON e GEM), a saúde das fontes e o horizonte de tempo.',
     details: [
-      'Concordância entre Modelos (até 50 pts): Compara ECMWF, GFS e ICON. Quanto menor a dispersão de vento/chuva e maior a coerência direcional vetorial (R → 1), maior a nota.',
+      'Concordância entre Modelos (até 50 pts): Compara os 4 modelos globais (ECMWF, GFS, ICON e GEM). Quanto menor a dispersão de vento/chuva e maior a coerência direcional vetorial (R → 1), maior a nota.',
       'Integridade e Frescor das Fontes (até 30 pts): Avalia se as APIs responderam em tempo real ou se o cache tem menos de 30 min. Em pontos continentais (sem mar), os pesos são redistribuídos automaticamente sem penalizar a nota.',
       'Horizonte Temporal (até 20 pts): Pontuação máxima nas primeiras 24h, com decaimento gradual de 24h a 72h e mais acentuado após 72h.',
       'Penalidade de Cisalhamento: Aplica desconto caso a interpolação vertical esteja ativa sob perfil de cisalhamento atípico (α fora de 0.05–0.40).',
@@ -42,7 +42,8 @@ export const HELP_TOPICS: Record<HelpTopicId, HelpTopicDefinition> = {
       'ECMWF IFS 0.25°: Modelo europeu de alta precisão sinótica (fornece vento nativo a 10m e 100m).',
       'NOAA GFS Seamless: Modelo norte-americano com excelente cobertura de visibilidade e vento a 10m, 80m e 120m.',
       'DWD ICON Seamless: Modelo alemão de malha icosaédrica detalhada (vento a 10m, 80m e 120m).',
-      'Modo Spaghetti: Sobrepõe as curvas dos 3 modelos no mesmo gráfico para visualizar rapidamente onde eles concordam ou divergem.',
+      'CMC GEM Seamless: Modelo global canadense (15 km) que amplia a diversidade sinótica do consenso multi-modelo.',
+      'Modo Spaghetti: Sobrepõe as curvas dos 4 modelos globais (ECMWF, GFS, ICON e GEM) no mesmo gráfico para visualizar rapidamente onde eles concordam ou divergem.',
     ],
     operationalTip:
       'Use o Modelo FieldCast para decisão geral e ative o modo Spaghetti quando quiser inspecionar qual modelo puxa o cenário mais extremo.',
@@ -113,6 +114,7 @@ export const HELP_TOPICS: Record<HelpTopicId, HelpTopicDefinition> = {
     details: [
       'Altura Significativa de Onda (m): Média do terço maior das ondas combinando vaga local (gerada pelo vento local) e ondulação distante.',
       'Swell (Ondulação de Fundo): Ondas geradas por sistemas distantes, caracterizadas por período mais longo (s) e maior energia na costa.',
+      'Nível do Mar Est. (MSL ~8 km): Estimativa barométrica/maré indicativa; não substitui Tábua de Marés oficial da DHN/Marinha.',
       'Detecção Continental: Em cidades no interior (terra firme), a grade marinha não se aplica e o sistema exibe um aviso informativo sem descontar pontos de confiabilidade.',
     ],
     operationalTip:

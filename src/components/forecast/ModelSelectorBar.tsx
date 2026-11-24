@@ -24,7 +24,7 @@ const VIEW_MODES: Array<{
   {
     id: 'fieldcast',
     label: 'Consenso FieldCast',
-    sublabel: 'Média dos 3 Modelos',
+    sublabel: 'Consenso Multi-Modelo',
   },
   {
     id: 'ecmwf_ifs025',
@@ -40,6 +40,11 @@ const VIEW_MODES: Array<{
     id: 'icon_seamless',
     label: 'DWD ICON',
     sublabel: 'Global Alemão',
+  },
+  {
+    id: 'gem_seamless',
+    label: 'CMC GEM',
+    sublabel: 'Global Canadense',
   },
   {
     id: 'spaghetti',

@@ -77,6 +77,15 @@ export interface AppShellProps {
   onDeleteLocation?: (id: string) => void | Promise<void>;
   onSearchQuery?: (query: string) => Promise<NominatimResult[]>;
   onRequestGps?: () => void | Promise<void>;
+  primaryLocationKey?: string | null;
+  onSetPrimaryLocation?: (loc: {
+    savedLocationId?: string;
+    name: string;
+    latitude: number;
+    longitude: number;
+    region?: string;
+    origin?: ActiveCoordinates['origin'];
+  }) => void | Promise<void>;
   onRunHealthCheck?: () => void | Promise<void>;
   onClearErrorLogs?: () => void | Promise<void>;
   onToast?: (toast: Omit<ToastMessage, 'id'>) => void;
@@ -111,6 +120,8 @@ export const AppShell: React.FC<AppShellProps> = ({
   onDeleteLocation,
   onSearchQuery,
   onRequestGps,
+  primaryLocationKey,
+  onSetPrimaryLocation,
   onRunHealthCheck,
   onClearErrorLogs,
   onToast,
@@ -402,6 +413,8 @@ export const AppShell: React.FC<AppShellProps> = ({
           onClose={() => setLocationsOpen(false)}
           activeLocation={activeLocation}
           savedLocations={savedLocations}
+          primaryLocationKey={primaryLocationKey}
+          onSetPrimaryLocation={onSetPrimaryLocation}
           onSelectLocation={onSelectLocation}
           onSaveLocation={onSaveLocation}
           onRenameLocation={onRenameLocation}

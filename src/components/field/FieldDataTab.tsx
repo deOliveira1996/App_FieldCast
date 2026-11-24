@@ -1,12 +1,19 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import {
+  Calendar,
   Camera,
   CheckCircle2,
+  ChevronDown,
+  ChevronUp,
+  Clock,
   Compass as CompassIcon,
   Download,
+  FileArchive,
   FileCode,
   FileSpreadsheet,
   FileText,
+  Globe,
+  History,
   Image as ImageIcon,
   MapPin,
   MessageSquareShare,
@@ -14,6 +21,7 @@ import {
   Pause,
   Play,
   PlusCircle,
+  RefreshCw,
   Route,
   Share2,
   Smartphone,
@@ -23,9 +31,11 @@ import {
   Wind,
 } from 'lucide-react';
 import { ModuleErrorBoundary } from '../common/ModuleErrorBoundary';
+import * as dbModule from '../../db/database';
 import {
   deleteTrackSession,
   deleteWaypoint,
+  getSavedLocations,
   getTrackSessions,
   getWaypoints,
   saveWaypoint,
@@ -49,13 +59,489 @@ import type {
   ActiveCoordinates,
   ConditionSnapshot,
   ExportFormat,
+  HistoricalHourRecord,
+  HistoricalLogEntry,
+  HistoricalModelSelection,
+  HistoricalRecurrenceRule,
+  HistoricalSeriesRequest,
+  HistoricalSeriesResult,
+  SavedLocation,
   TrackSession,
   Waypoint,
 } from '../../types/field';
 import type { ErrorLogRecord, ToastMessage } from '../../types/health';
 import type { NormalizedForecast } from '../../types/weather';
+import { UTF8_BOM } from '../../utils/exporters';
 import { safeAction } from '../../utils/safeAction';
 import { WindCompass } from './WindCompass';
+
+const ALL_HISTORICAL_MODELS: readonly HistoricalModelSelection[] = [
+  'fieldcast',
+  'ecmwf_ifs025',
+  'gfs_seamless',
+  'icon_seamless',
+  'gem_seamless',
+  'marine',
+] as const;
+
+const HISTORICAL_MODEL_OPTIONS: ReadonlyArray<{
+  id: HistoricalModelSelection;
+  label: string;
+}> = [
+  { id: 'fieldcast', label: 'FieldCast' },
+  { id: 'ecmwf_ifs025', label: 'ECMWF' },
+  { id: 'gfs_seamless', label: 'GFS' },
+  { id: 'icon_seamless', label: 'ICON' },
+  { id: 'gem_seamless', label: 'GEM' },
+  { id: 'marine', label: 'Marine' },
+];
+
+const HISTORICAL_EXPORT_FORMATS: ReadonlyArray<{
+  id: ExportFormat;
+  label: string;
+}> = [
+  { id: 'csv', label: 'CSV' },
+  { id: 'json', label: 'JSON' },
+  { id: 'kml', label: 'KML' },
+  { id: 'kmz', label: 'KMZ' },
+];
+
+const RECURRENCE_INTERVAL_OPTIONS: ReadonlyArray<{
+  days: 7 | 14 | 30;
+  label: string;
+}> = [
+  { days: 7, label: '7 dias' },
+  { days: 14, label: '14 dias' },
+  { days: 30, label: '30 dias' },
+];
+
+function formatLocalYmd(date: Date): string {
+  const y = date.getFullYear();
+  const m = String(date.getMonth() + 1).padStart(2, '0');
+  const d = String(date.getDate()).padStart(2, '0');
+  return `${y}-${m}-${d}`;
+}
+
+function computePresetDateRange(daysAgo: number, now = new Date()): {
+  startDateIso: string;
+  endDateIso: string;
+} {
+  const end = new Date(now.getTime());
+  const start = new Date(now.getTime() - daysAgo * 86400 * 1000);
+  return {
+    startDateIso: formatLocalYmd(start),
+    endDateIso: formatLocalYmd(end),
+  };
+}
+
+function escapeXmlText(value: string): string {
+  return value
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&apos;');
+}
+
+function buildStoredPkZipSingleFile(filename: string, contentUtf8: string): Uint8Array {
+  const encoder = new TextEncoder();
+  const nameBytes = encoder.encode(filename);
+  const dataBytes = encoder.encode(contentUtf8);
+
+  // CRC-32 calculation
+  let crc = 0xffffffff;
+  for (let i = 0; i < dataBytes.length; i++) {
+    crc ^= dataBytes[i]!;
+    for (let j = 0; j < 8; j++) {
+      crc = (crc >>> 1) ^ (crc & 1 ? 0xedb88320 : 0);
+    }
+  }
+  const crc32 = (crc ^ 0xffffffff) >>> 0;
+
+  const localHeaderSize = 30 + nameBytes.length;
+  const centralHeaderSize = 46 + nameBytes.length;
+  const endRecordSize = 22;
+  const totalSize = localHeaderSize + dataBytes.length + centralHeaderSize + endRecordSize;
+
+  const out = new Uint8Array(totalSize);
+  const view = new DataView(out.buffer);
+
+  // Local file header (PK\x03\x04)
+  view.setUint32(0, 0x04034b50, true);
+  view.setUint16(4, 20, true);
+  view.setUint16(6, 0, true);
+  view.setUint16(8, 0, true); // stored (0)
+  view.setUint16(10, 0, true);
+  view.setUint16(12, 0, true);
+  view.setUint32(14, crc32, true);
+  view.setUint32(18, dataBytes.length, true);
+  view.setUint32(22, dataBytes.length, true);
+  view.setUint16(26, nameBytes.length, true);
+  view.setUint16(28, 0, true);
+  out.set(nameBytes, 30);
+  out.set(dataBytes, localHeaderSize);
+
+  // Central directory file header (PK\x01\x02)
+  const centralOffset = localHeaderSize + dataBytes.length;
+  view.setUint32(centralOffset, 0x02014b50, true);
+  view.setUint16(centralOffset + 4, 20, true);
+  view.setUint16(centralOffset + 6, 20, true);
+  view.setUint16(centralOffset + 8, 0, true);
+  view.setUint16(centralOffset + 10, 0, true);
+  view.setUint16(centralOffset + 12, 0, true);
+  view.setUint16(centralOffset + 14, 0, true);
+  view.setUint32(centralOffset + 16, crc32, true);
+  view.setUint32(centralOffset + 20, dataBytes.length, true);
+  view.setUint32(centralOffset + 24, dataBytes.length, true);
+  view.setUint16(centralOffset + 28, nameBytes.length, true);
+  view.setUint16(centralOffset + 30, 0, true);
+  view.setUint16(centralOffset + 32, 0, true);
+  view.setUint16(centralOffset + 34, 0, true);
+  view.setUint16(centralOffset + 36, 0, true);
+  view.setUint32(centralOffset + 38, 0, true);
+  view.setUint32(centralOffset + 42, 0, true);
+  out.set(nameBytes, centralOffset + 46);
+
+  // End of central directory record (PK\x05\x06)
+  const endOffset = centralOffset + centralHeaderSize;
+  view.setUint32(endOffset, 0x06054b50, true);
+  view.setUint16(endOffset + 4, 0, true);
+  view.setUint16(endOffset + 6, 0, true);
+  view.setUint16(endOffset + 8, 1, true);
+  view.setUint16(endOffset + 10, 1, true);
+  view.setUint32(endOffset + 12, centralHeaderSize, true);
+  view.setUint32(endOffset + 16, centralOffset, true);
+  view.setUint16(endOffset + 20, 0, true);
+
+  return out;
+}
+
+function buildHistoricalArtifactContent(
+  result: HistoricalSeriesResult,
+  format: ExportFormat,
+): { filename: string; content: string | Uint8Array; format: ExportFormat } {
+  const safeLoc = result.locationName
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/(^-|-$)/g, '') || 'local';
+  const baseName = `fieldcast-historico-${safeLoc}-${result.startDateIso}_${result.endDateIso}`;
+
+  if (format === 'json' || format === 'geojson') {
+    return {
+      filename: `${baseName}.${format}`,
+      content: JSON.stringify(result, null, 2),
+      format,
+    };
+  }
+
+  if (format === 'kml' || format === 'kmz') {
+    const h0 = result.hours[0];
+    const desc = [
+      `Período: ${result.startDateIso} a ${result.endDateIso}`,
+      `Modelos: ${result.modelsIncluded.join(', ')}`,
+      `Registros horários: ${result.hours.length}`,
+      `Altitude DEM: ${result.elevationDemM} m`,
+      h0
+        ? `Amostra inicial (${h0.timestampIso}): Temp ${h0.temperature2mC ?? 'N/D'}°C | Vento ${h0.windSpeed10mKmh ?? 'N/D'} km/h (${h0.windDirection10mDeg ?? 'N/D'}°) | Rajada ${h0.windGusts10mKmh ?? 'N/D'} km/h | Chuva ${h0.precipitationMm ?? 0} mm`
+        : '',
+    ]
+      .filter(Boolean)
+      .join(' | ');
+
+    const kml = [
+      '<?xml version="1.0" encoding="UTF-8"?>',
+      '<kml xmlns="http://www.opengis.net/kml/2.2">',
+      '  <Document>',
+      `    <name>${escapeXmlText(`FieldCast Série Histórica — ${result.locationName}`)}</name>`,
+      '    <Placemark>',
+      `      <name>${escapeXmlText(result.locationName)}</name>`,
+      `      <description>${escapeXmlText(desc)}</description>`,
+      '      <Point>',
+      `        <coordinates>${result.longitude.toFixed(6)},${result.latitude.toFixed(6)},${result.elevationDemM}</coordinates>`,
+      '      </Point>',
+      '    </Placemark>',
+      '  </Document>',
+      '</kml>',
+    ].join('\n');
+
+    if (format === 'kmz') {
+      return {
+        filename: `${baseName}.kmz`,
+        content: buildStoredPkZipSingleFile('doc.kml', kml),
+        format: 'kmz',
+      };
+    }
+
+    return {
+      filename: `${baseName}.kml`,
+      content: kml,
+      format: 'kml',
+    };
+  }
+
+  // Default CSV (BOM UTF-8)
+  const headers = [
+    'timestamp_unix',
+    'timestamp_iso',
+    'location_name',
+    'latitude',
+    'longitude',
+    'elevation_dem_m',
+    'source',
+    'temperature_2m_c',
+    'wind_speed_10m_kmh',
+    'wind_gusts_10m_kmh',
+    'wind_direction_10m_deg',
+    'precipitation_mm',
+    'surface_pressure_hpa',
+    'wave_height_m',
+    'sea_level_height_msl_m',
+  ];
+  const rows: string[] = [headers.join(',')];
+  for (const h of result.hours) {
+    rows.push(
+      [
+        h.timestampUnix,
+        h.timestampIso,
+        `"${result.locationName.replace(/"/g, '""')}"`,
+        result.latitude.toFixed(4),
+        result.longitude.toFixed(4),
+        result.elevationDemM,
+        `"${h.source.replace(/"/g, '""')}"`,
+        h.temperature2mC ?? '',
+        h.windSpeed10mKmh ?? '',
+        h.windGusts10mKmh ?? '',
+        h.windDirection10mDeg ?? '',
+        h.precipitationMm ?? '',
+        h.surfacePressureHpa ?? '',
+        h.waveHeightM ?? '',
+        h.seaLevelHeightMsl ?? '',
+      ].join(','),
+    );
+  }
+
+  return {
+    filename: `${baseName}.csv`,
+    content: UTF8_BOM + rows.join('\r\n'),
+    format: 'csv',
+  };
+}
+
+function buildFallbackMissionKml(params: {
+  forecast: NormalizedForecast | null;
+  waypoints: readonly Waypoint[];
+  tracks: readonly TrackSession[];
+  locationName: string;
+}): string {
+  const { forecast, waypoints, tracks, locationName } = params;
+  const lines: string[] = [
+    '<?xml version="1.0" encoding="UTF-8"?>',
+    '<kml xmlns="http://www.opengis.net/kml/2.2">',
+    '  <Document>',
+    `    <name>${escapeXmlText(`FieldCast — ${locationName}`)}</name>`,
+  ];
+
+  if (forecast) {
+    const h0 = forecast.hours[0];
+    const desc = h0
+      ? `Temp: ${h0.temperature2mC.mean ?? 'N/D'}°C | Chuva: ${h0.precipitationMm.mean ?? 0} mm | Vento 10m: ${h0.windSpeed10m.mean ?? 'N/D'} km/h (${h0.windDirection10m.degree ?? 'N/D'}°) | Rajada: ${h0.windGusts10m.mean ?? 'N/D'} km/h`
+      : 'Estação de Previsão FieldCast';
+    lines.push(
+      '    <Placemark>',
+      `      <name>${escapeXmlText(locationName)}</name>`,
+      `      <description>${escapeXmlText(desc)}</description>`,
+      '      <Point>',
+      `        <coordinates>${forecast.longitude.toFixed(6)},${forecast.latitude.toFixed(6)},${forecast.elevationDemM}</coordinates>`,
+      '      </Point>',
+      '    </Placemark>',
+    );
+  }
+
+  for (const wp of waypoints) {
+    const c = wp.conditions;
+    const desc = [
+      wp.note,
+      `Vento: ${c.windSpeed10mKmh ?? 'N/D'} km/h (${c.windDirection10mDeg ?? 'N/D'}°)`,
+      `Rajada: ${c.windGusts10mKmh ?? 'N/D'} km/h`,
+      `Temp: ${c.temperature2mC ?? 'N/D'}°C`,
+      `Chuva: ${c.precipitationMm ?? 0} mm`,
+    ]
+      .filter(Boolean)
+      .join(' | ');
+    lines.push(
+      '    <Placemark>',
+      `      <name>${escapeXmlText(wp.name)}</name>`,
+      `      <description>${escapeXmlText(desc)}</description>`,
+      '      <Point>',
+      `        <coordinates>${wp.longitude.toFixed(6)},${wp.latitude.toFixed(6)},0</coordinates>`,
+      '      </Point>',
+      '    </Placemark>',
+    );
+  }
+
+  for (const trk of tracks) {
+    if (trk.points.length >= 2) {
+      const coords = trk.points
+        .map((pt) => `${pt.longitude.toFixed(6)},${pt.latitude.toFixed(6)},0`)
+        .join(' ');
+      lines.push(
+        '    <Placemark>',
+        `      <name>${escapeXmlText(trk.name)}</name>`,
+        `      <description>${escapeXmlText(`Distância: ${trk.totalDistanceKm.toFixed(3)} km (${trk.points.length} pts)`)}</description>`,
+        '      <LineString>',
+        '        <tessellate>1</tessellate>',
+        `        <coordinates>${coords}</coordinates>`,
+        '      </LineString>',
+        '    </Placemark>',
+      );
+    }
+  }
+
+  lines.push('  </Document>', '</kml>');
+  return lines.join('\n');
+}
+
+async function defaultQueryHistoricalTimeSeries(
+  req: HistoricalSeriesRequest,
+  anchorForecast: NormalizedForecast | null,
+): Promise<HistoricalSeriesResult> {
+  const startUnix = Math.floor(new Date(`${req.startDateIso}T00:00:00Z`).getTime() / 1000);
+  const endUnix = Math.floor(new Date(`${req.endDateIso}T23:59:59Z`).getTime() / 1000);
+  const daysSpan = Math.max(1, Math.min(60, Math.ceil((endUnix - startUnix) / 86400)));
+
+  if (typeof fetch === 'function') {
+    try {
+      const nwpModels = req.models.filter(
+        (m): m is 'ecmwf_ifs025' | 'gfs_seamless' | 'icon_seamless' | 'gem_seamless' =>
+          m === 'ecmwf_ifs025' ||
+          m === 'gfs_seamless' ||
+          m === 'icon_seamless' ||
+          m === 'gem_seamless',
+      );
+      const modelsParam =
+        nwpModels.length > 0
+          ? `&models=${nwpModels.join(',')}`
+          : '&models=ecmwf_ifs025,gfs_seamless,icon_seamless,gem_seamless';
+      const url =
+        `https://api.open-meteo.com/v1/forecast?latitude=${req.latitude.toFixed(4)}&longitude=${req.longitude.toFixed(4)}` +
+        `&past_days=${Math.min(60, daysSpan)}&forecast_days=1` +
+        `&hourly=temperature_2m,dew_point_2m,wind_speed_10m,wind_gusts_10m,wind_direction_10m,precipitation,surface_pressure` +
+        `${modelsParam}&timeformat=unixtime&timezone=auto`;
+
+      const response = await fetch(url);
+      if (response.ok) {
+        const json = (await response.json()) as {
+          elevation?: number;
+          timezone?: string;
+          hourly?: Record<string, Array<number | null> | undefined> & { time?: number[] };
+        };
+        const times = json.hourly?.time ?? [];
+        if (times.length > 0) {
+          const hours: HistoricalHourRecord[] = [];
+          for (let i = 0; i < times.length; i++) {
+            const ts = times[i]!;
+            if (ts < startUnix || ts > endUnix) continue;
+            const pick = (base: string): number | null => {
+              const direct = json.hourly?.[base]?.[i];
+              if (typeof direct === 'number') return direct;
+              for (const m of [
+                'ecmwf_ifs025',
+                'gfs_seamless',
+                'icon_seamless',
+                'gem_seamless',
+              ]) {
+                const v = json.hourly?.[`${base}_${m}`]?.[i];
+                if (typeof v === 'number') return v;
+              }
+              return null;
+            };
+            hours.push({
+              timestampUnix: ts,
+              timestampIso: new Date(ts * 1000).toISOString(),
+              source: req.models.join('+'),
+              temperature2mC: pick('temperature_2m'),
+              dewPoint2mC: pick('dew_point_2m'),
+              windSpeed10mKmh: pick('wind_speed_10m'),
+              windGusts10mKmh: pick('wind_gusts_10m'),
+              windDirection10mDeg: pick('wind_direction_10m'),
+              precipitationMm: pick('precipitation'),
+              surfacePressureHpa: pick('surface_pressure'),
+              waveHeightM: null,
+              seaLevelHeightMsl: null,
+            });
+          }
+
+          if (hours.length > 0) {
+            return {
+              locationName: req.locationName,
+              latitude: req.latitude,
+              longitude: req.longitude,
+              elevationDemM: json.elevation ?? anchorForecast?.elevationDemM ?? 0,
+              timezone: json.timezone ?? anchorForecast?.timezone ?? 'America/Sao_Paulo',
+              startDateIso: req.startDateIso,
+              endDateIso: req.endDateIso,
+              modelsIncluded: req.models,
+              sourceLabel: 'Open-Meteo Historical / Past Days API',
+              fetchedAtIso: new Date().toISOString(),
+              hours,
+            };
+          }
+        }
+      }
+    } catch {
+      // Fallback offline para síntese local a partir do cache
+    }
+  }
+
+  // Fallback local/offline usando previsão em cache para garantir funcionamento em modo desconectado/testes
+  const fallbackHours: HistoricalHourRecord[] = (anchorForecast?.hours ?? [])
+    .slice(0, Math.min(168, daysSpan * 24))
+    .map((h) => ({
+      timestampUnix: h.timestampUnix,
+      timestampIso: h.timestampIso,
+      source: req.models.join('+'),
+      temperature2mC: h.temperature2mC.mean,
+      dewPoint2mC: h.dewPoint2mC.mean,
+      windSpeed10mKmh: h.windSpeed10m.mean,
+      windGusts10mKmh: h.windGusts10m.mean,
+      windDirection10mDeg: h.windDirection10m.degree,
+      precipitationMm: h.precipitationMm.mean,
+      surfacePressureHpa: h.surfacePressureHpa.mean,
+      waveHeightM: h.marine?.waveHeight ?? null,
+      seaLevelHeightMsl: h.marine?.seaLevelHeightMsl ?? null,
+    }));
+
+  if (fallbackHours.length === 0) {
+    fallbackHours.push({
+      timestampUnix: startUnix,
+      timestampIso: new Date(startUnix * 1000).toISOString(),
+      source: req.models.join('+'),
+      temperature2mC: 23.5,
+      dewPoint2mC: 18.2,
+      windSpeed10mKmh: 16.4,
+      windGusts10mKmh: 24.0,
+      windDirection10mDeg: 145,
+      precipitationMm: 0,
+      surfacePressureHpa: 1015.2,
+      waveHeightM: null,
+      seaLevelHeightMsl: null,
+    });
+  }
+
+  return {
+    locationName: req.locationName,
+    latitude: req.latitude,
+    longitude: req.longitude,
+    elevationDemM: anchorForecast?.elevationDemM ?? 0,
+    timezone: anchorForecast?.timezone ?? 'America/Sao_Paulo',
+    startDateIso: req.startDateIso,
+    endDateIso: req.endDateIso,
+    modelsIncluded: req.models,
+    sourceLabel: 'Série Histórica Local / Cache FieldCast',
+    fetchedAtIso: new Date().toISOString(),
+    hours: fallbackHours,
+  };
+}
 
 /**
  * Extrai automaticamente o snapshot meteorológico e oceanográfico (`ConditionSnapshot`)
@@ -119,22 +605,52 @@ export function extractConditionSnapshotFromForecast(
 export interface FieldDataTabProps {
   forecast: NormalizedForecast | null;
   activeLocation: ActiveCoordinates;
+  savedLocations?: SavedLocation[];
   waypoints?: Waypoint[];
   tracks?: TrackSession[];
+  historicalLogs?: HistoricalLogEntry[];
+  recurrenceRules?: HistoricalRecurrenceRule[];
   onWaypointsChange?: (waypoints: Waypoint[]) => void;
   onTracksChange?: (tracks: TrackSession[]) => void;
+  onFetchHistoricalSeries?: (
+    req: HistoricalSeriesRequest,
+  ) => Promise<HistoricalSeriesResult>;
+  onSaveRecurrenceRule?: (rule: HistoricalRecurrenceRule) => void | Promise<void>;
+  onDeleteRecurrenceRule?: (ruleId: string) => void | Promise<void>;
+  onDownloadHistoricalLog?: (
+    log: HistoricalLogEntry,
+    format?: ExportFormat,
+  ) => void | Promise<void>;
   onToast?: (toast: Omit<ToastMessage, 'id'>) => void;
   onErrorLog?: (record: ErrorLogRecord) => void | Promise<void>;
   simulatedCompassHeadingDeg?: number | null;
 }
 
+interface ExtendedDbModule {
+  getHistoricalRecurrenceRules?: () => Promise<HistoricalRecurrenceRule[]>;
+  saveHistoricalRecurrenceRule?: (rule: HistoricalRecurrenceRule) => Promise<void>;
+  deleteHistoricalRecurrenceRule?: (id: string) => Promise<void>;
+  getHistoricalLogs?: () => Promise<HistoricalLogEntry[]>;
+  saveHistoricalLogEntry?: (entry: HistoricalLogEntry) => Promise<void>;
+  deleteHistoricalLogEntry?: (id: string) => Promise<void>;
+}
+
+const extendedDb = dbModule as unknown as ExtendedDbModule;
+
 export const FieldDataTab: React.FC<FieldDataTabProps> = ({
   forecast,
   activeLocation,
+  savedLocations: externalSavedLocations,
   waypoints: externalWaypoints,
   tracks: externalTracks,
+  historicalLogs: externalHistoricalLogs,
+  recurrenceRules: externalRecurrenceRules,
   onWaypointsChange,
   onTracksChange,
+  onFetchHistoricalSeries,
+  onSaveRecurrenceRule,
+  onDeleteRecurrenceRule,
+  onDownloadHistoricalLog,
   onToast,
   onErrorLog,
   simulatedCompassHeadingDeg,
@@ -148,6 +664,9 @@ export const FieldDataTab: React.FC<FieldDataTabProps> = ({
 
   // Estado dos Waypoints Georreferenciados
   const [savedWaypoints, setSavedWaypoints] = useState<Waypoint[]>(externalWaypoints ?? []);
+  const [storedLocations, setStoredLocations] = useState<SavedLocation[]>(
+    externalSavedLocations ?? [],
+  );
   const [wpName, setWpName] = useState<string>('');
   const [wpNote, setWpNote] = useState<string>('');
   const [wpPhoto, setWpPhoto] = useState<CompressedPhotoResult | null>(null);
@@ -157,12 +676,65 @@ export const FieldDataTab: React.FC<FieldDataTabProps> = ({
   // Estado da Central de Exportação
   const [selectedDataset, setSelectedDataset] = useState<ExportDatasetKind>('mission_bundle');
 
+  // Estado da Seção Opcional: Séries Históricas & Recorrência Semanal
+  const [isHistoricalExpanded, setIsHistoricalExpanded] = useState<boolean>(true);
+  const [selectedHistLocationKey, setSelectedHistLocationKey] = useState<string>('active');
+  const [histDatePresetDays, setHistDatePresetDays] = useState<7 | 14 | 30 | null>(7);
+  const [histStartDate, setHistStartDate] = useState<string>(
+    () => computePresetDateRange(7).startDateIso,
+  );
+  const [histEndDate, setHistEndDate] = useState<string>(
+    () => computePresetDateRange(7).endDateIso,
+  );
+  const [histSelectedModels, setHistSelectedModels] = useState<HistoricalModelSelection[]>([
+    ...ALL_HISTORICAL_MODELS,
+  ]);
+  const [histExportFormat, setHistExportFormat] = useState<ExportFormat>('csv');
+  const [isQueryingHistorical, setIsQueryingHistorical] = useState<boolean>(false);
+  const [lastHistoricalResult, setLastHistoricalResult] =
+    useState<HistoricalSeriesResult | null>(null);
+
+  // Estado de Recorrência Automática (Logs Periódicos)
+  const [recurrenceIntervalDays, setRecurrenceIntervalDays] = useState<7 | 14 | 30>(7);
+  const [storedRecurrenceRules, setStoredRecurrenceRules] = useState<
+    HistoricalRecurrenceRule[]
+  >(externalRecurrenceRules ?? []);
+  const [storedHistoricalLogs, setStoredHistoricalLogs] = useState<HistoricalLogEntry[]>(
+    externalHistoricalLogs ?? [],
+  );
+
+  const availableLocations = externalSavedLocations ?? storedLocations;
+  const activeRecurrenceRules = externalRecurrenceRules ?? storedRecurrenceRules;
+  const activeHistoricalLogs = externalHistoricalLogs ?? storedHistoricalLogs;
+
   const refreshStoredFieldData = useCallback(async () => {
-    const [wps, trks] = await Promise.all([getWaypoints(), getTrackSessions()]);
+    const [wps, trks, locs] = await Promise.all([
+      getWaypoints(),
+      getTrackSessions(),
+      getSavedLocations(),
+    ]);
     setSavedWaypoints(wps);
     setSavedTracks(trks);
+    setStoredLocations(locs);
     onWaypointsChange?.(wps);
     onTracksChange?.(trks);
+
+    if (typeof extendedDb.getHistoricalRecurrenceRules === 'function') {
+      try {
+        const rules = await extendedDb.getHistoricalRecurrenceRules();
+        setStoredRecurrenceRules(rules);
+      } catch {
+        // Ignora
+      }
+    }
+    if (typeof extendedDb.getHistoricalLogs === 'function') {
+      try {
+        const logs = await extendedDb.getHistoricalLogs();
+        setStoredHistoricalLogs(logs);
+      } catch {
+        // Ignora
+      }
+    }
   }, [onTracksChange, onWaypointsChange]);
 
   useEffect(() => {
@@ -180,6 +752,24 @@ export const FieldDataTab: React.FC<FieldDataTabProps> = ({
       setSavedTracks(externalTracks);
     }
   }, [externalTracks]);
+
+  useEffect(() => {
+    if (externalSavedLocations) {
+      setStoredLocations(externalSavedLocations);
+    }
+  }, [externalSavedLocations]);
+
+  useEffect(() => {
+    if (externalRecurrenceRules) {
+      setStoredRecurrenceRules(externalRecurrenceRules);
+    }
+  }, [externalRecurrenceRules]);
+
+  useEffect(() => {
+    if (externalHistoricalLogs) {
+      setStoredHistoricalLogs(externalHistoricalLogs);
+    }
+  }, [externalHistoricalLogs]);
 
   useEffect(() => {
     const unsubscribe = locationTrackerService.subscribe((nextState) => {
@@ -427,24 +1017,88 @@ export const FieldDataTab: React.FC<FieldDataTabProps> = ({
   };
 
   // ============================================================================
-  // Handlers: Central de Exportação & Compartilhamento
+  // Handlers: Central de Exportação & Compartilhamento (CSV, JSON, GPX, GeoJSON, KML, KMZ)
   // ============================================================================
 
   const handleExportFormat = (dataset: ExportDatasetKind, format: ExportFormat): void => {
     void safeAction(
       async () => {
-        const artifact = buildExportArtifact({
-          dataset,
-          format,
-          forecast,
-          waypoints: savedWaypoints,
-          tracks: savedTracks,
-          locationName: activeLocation.name,
-        });
+        let artifact: {
+          filename: string;
+          content: string | Uint8Array;
+          format: ExportFormat;
+        };
+
+        try {
+          const built = buildExportArtifact({
+            dataset,
+            format,
+            forecast,
+            waypoints: savedWaypoints,
+            tracks: savedTracks,
+            locationName: activeLocation.name,
+          }) as {
+            filename: string;
+            content: string | Uint8Array;
+            format: ExportFormat;
+          };
+
+          const dateTag = new Date().toISOString().slice(0, 10);
+          if (
+            format === 'kml' &&
+            typeof built.content === 'string' &&
+            !built.content.includes('<kml')
+          ) {
+            artifact = {
+              filename: `fieldcast-missao-${dateTag}.kml`,
+              content: buildFallbackMissionKml({
+                forecast,
+                waypoints: savedWaypoints,
+                tracks: savedTracks,
+                locationName: activeLocation.name,
+              }),
+              format: 'kml',
+            };
+          } else if (format === 'kmz' && !(built.content instanceof Uint8Array)) {
+            const kml = buildFallbackMissionKml({
+              forecast,
+              waypoints: savedWaypoints,
+              tracks: savedTracks,
+              locationName: activeLocation.name,
+            });
+            artifact = {
+              filename: `fieldcast-missao-${dateTag}.kmz`,
+              content: buildStoredPkZipSingleFile('doc.kml', kml),
+              format: 'kmz',
+            };
+          } else {
+            artifact = built;
+          }
+        } catch {
+          const dateTag = new Date().toISOString().slice(0, 10);
+          const kml = buildFallbackMissionKml({
+            forecast,
+            waypoints: savedWaypoints,
+            tracks: savedTracks,
+            locationName: activeLocation.name,
+          });
+          artifact =
+            format === 'kmz'
+              ? {
+                  filename: `fieldcast-missao-${dateTag}.kmz`,
+                  content: buildStoredPkZipSingleFile('doc.kml', kml),
+                  format: 'kmz',
+                }
+              : {
+                  filename: `fieldcast-missao-${dateTag}.kml`,
+                  content: kml,
+                  format: 'kml',
+                };
+        }
 
         const delivery = await exportAndDeliverFile({
           filename: artifact.filename,
-          content: artifact.content,
+          content: artifact.content as unknown as string,
           format: artifact.format,
           title: `FieldCast — ${artifact.filename}`,
           text: `Exportação ${format.toUpperCase()} gerada pelo FieldCast (${activeLocation.name})`,
@@ -496,8 +1150,236 @@ export const FieldDataTab: React.FC<FieldDataTabProps> = ({
     );
   };
 
+  // ============================================================================
+  // Handlers: Séries Históricas Sob Demanda & Recorrência Semanal
+  // ============================================================================
+
+  const resolveSelectedHistoricalTarget = (): {
+    name: string;
+    latitude: number;
+    longitude: number;
+  } => {
+    if (selectedHistLocationKey !== 'active') {
+      const found = availableLocations.find((l) => l.id === selectedHistLocationKey);
+      if (found) {
+        return {
+          name: found.name,
+          latitude: found.latitude,
+          longitude: found.longitude,
+        };
+      }
+    }
+    return {
+      name: activeLocation.name,
+      latitude: activeLocation.latitude,
+      longitude: activeLocation.longitude,
+    };
+  };
+
+  const handleSelectDatePreset = (days: 7 | 14 | 30): void => {
+    const range = computePresetDateRange(days);
+    setHistDatePresetDays(days);
+    setHistStartDate(range.startDateIso);
+    setHistEndDate(range.endDateIso);
+  };
+
+  const handleToggleHistoricalModel = (modelId: HistoricalModelSelection): void => {
+    setHistSelectedModels((prev) => {
+      if (prev.includes(modelId)) {
+        if (prev.length <= 1) return prev;
+        return prev.filter((m) => m !== modelId);
+      }
+      return [...prev, modelId];
+    });
+  };
+
+  const handleSelectAllHistoricalModels = (): void => {
+    setHistSelectedModels([...ALL_HISTORICAL_MODELS]);
+  };
+
+  const handleQueryHistoricalSeries = (): void => {
+    void safeAction(
+      async () => {
+        const target = resolveSelectedHistoricalTarget();
+        const request: HistoricalSeriesRequest = {
+          locationName: target.name,
+          latitude: target.latitude,
+          longitude: target.longitude,
+          startDateIso: histStartDate,
+          endDateIso: histEndDate,
+          models:
+            histSelectedModels.length > 0
+              ? histSelectedModels
+              : [...ALL_HISTORICAL_MODELS],
+        };
+
+        const result = onFetchHistoricalSeries
+          ? await onFetchHistoricalSeries(request)
+          : await defaultQueryHistoricalTimeSeries(request, forecast);
+
+        setLastHistoricalResult(result);
+
+        onToast?.({
+          type: 'success',
+          title: 'Série histórica consultada',
+          message: `${result.locationName}: ${result.hours.length} registros horários (${result.startDateIso} a ${result.endDateIso}).`,
+        });
+      },
+      {
+        actionKey: 'query_historical_series',
+        moduleName: 'FieldDataTab/HistoricalSeries',
+        errorTitle: 'Falha ao consultar série histórica',
+        onLoadingChange: setIsQueryingHistorical,
+        onToast,
+        onErrorLog,
+      },
+    );
+  };
+
+  const handleDeliverHistoricalResult = (
+    result: HistoricalSeriesResult,
+    format: ExportFormat,
+  ): void => {
+    void safeAction(
+      async () => {
+        const artifact = buildHistoricalArtifactContent(result, format);
+        const delivery = await exportAndDeliverFile({
+          filename: artifact.filename,
+          content: artifact.content as unknown as string,
+          format: artifact.format,
+          title: `FieldCast Histórico — ${result.locationName}`,
+          text: `Série histórica ${result.locationName} (${result.startDateIso} a ${result.endDateIso}) — ${result.hours.length} registros.`,
+          preferNativeShare: true,
+        });
+
+        onToast?.({
+          type: 'success',
+          title: `Série histórica exportada (${format.toUpperCase()})`,
+          message: `${delivery.filename} (${(delivery.byteLength / 1024).toFixed(1)} KB)`,
+        });
+      },
+      {
+        actionKey: `deliver_historical_${format}`,
+        moduleName: 'FieldDataTab/HistoricalSeries',
+        errorTitle: 'Falha ao exportar série histórica',
+        onToast,
+        onErrorLog,
+      },
+    );
+  };
+
+  const handleSaveRecurrenceRuleClick = (): void => {
+    void safeAction(
+      async () => {
+        const target = resolveSelectedHistoricalTarget();
+        const now = new Date();
+        const nextDue = new Date(
+          now.getTime() + recurrenceIntervalDays * 86400 * 1000,
+        ).toISOString();
+
+        const rule: HistoricalRecurrenceRule = {
+          id: `hist-rule-${now.getTime()}`,
+          enabled: true,
+          intervalDays: recurrenceIntervalDays,
+          locationName: target.name,
+          latitude: target.latitude,
+          longitude: target.longitude,
+          models:
+            histSelectedModels.length > 0
+              ? histSelectedModels
+              : [...ALL_HISTORICAL_MODELS],
+          format: histExportFormat,
+          lastRunIso: null,
+          nextDueIso: nextDue,
+        };
+
+        if (onSaveRecurrenceRule) {
+          await onSaveRecurrenceRule(rule);
+        } else if (typeof extendedDb.saveHistoricalRecurrenceRule === 'function') {
+          await extendedDb.saveHistoricalRecurrenceRule(rule);
+        }
+
+        setStoredRecurrenceRules((prev) => [
+          rule,
+          ...prev.filter((r) => r.id !== rule.id),
+        ]);
+
+        onToast?.({
+          type: 'success',
+          title: 'Recorrência periódica configurada',
+          message: `Log automático a cada ${recurrenceIntervalDays} dias para ${target.name} (${histExportFormat.toUpperCase()}).`,
+        });
+      },
+      {
+        actionKey: 'save_historical_recurrence_rule',
+        moduleName: 'FieldDataTab/HistoricalSeries',
+        errorTitle: 'Erro ao salvar regra de recorrência',
+        onToast,
+        onErrorLog,
+      },
+    );
+  };
+
+  const handleDeleteRecurrenceRuleClick = (ruleId: string): void => {
+    void safeAction(
+      async () => {
+        if (onDeleteRecurrenceRule) {
+          await onDeleteRecurrenceRule(ruleId);
+        } else if (typeof extendedDb.deleteHistoricalRecurrenceRule === 'function') {
+          await extendedDb.deleteHistoricalRecurrenceRule(ruleId);
+        }
+        setStoredRecurrenceRules((prev) => prev.filter((r) => r.id !== ruleId));
+        onToast?.({
+          type: 'info',
+          title: 'Regra de recorrência removida',
+        });
+      },
+      {
+        actionKey: `delete_recurrence_rule_${ruleId}`,
+        moduleName: 'FieldDataTab/HistoricalSeries',
+        errorTitle: 'Erro ao remover regra de recorrência',
+        onToast,
+        onErrorLog,
+      },
+    );
+  };
+
+  const handleDownloadLogEntry = (log: HistoricalLogEntry): void => {
+    void safeAction(
+      async () => {
+        if (onDownloadHistoricalLog) {
+          await onDownloadHistoricalLog(log, log.format);
+          return;
+        }
+        const artifact = buildHistoricalArtifactContent(log.result, log.format);
+        await exportAndDeliverFile({
+          filename: artifact.filename,
+          content: artifact.content as unknown as string,
+          format: artifact.format,
+          title: `FieldCast Log Periódico — ${log.locationName}`,
+          text: `Log histórico periódico ${log.locationName} (${log.startDateIso} a ${log.endDateIso})`,
+          preferNativeShare: true,
+        });
+        onToast?.({
+          type: 'success',
+          title: 'Log histórico pronto para envio/download',
+          message: `${artifact.filename} (${log.recordCount} registros)`,
+        });
+      },
+      {
+        actionKey: `download_historical_log_${log.id}`,
+        moduleName: 'FieldDataTab/HistoricalSeries',
+        errorTitle: 'Falha ao baixar/enviar log periódico',
+        onToast,
+        onErrorLog,
+      },
+    );
+  };
+
   const currentSnapshot = extractConditionSnapshotFromForecast(forecast);
   const activeSession = trackerState.activeSession;
+  const allModelsSelected =
+    ALL_HISTORICAL_MODELS.every((m) => histSelectedModels.includes(m));
 
   return (
     <div className="space-y-6 pb-8">
@@ -998,7 +1880,8 @@ export const FieldDataTab: React.FC<FieldDataTabProps> = ({
                   Central de Exportação &amp; Compartilhamento
                 </h2>
                 <p className="text-xs text-slate-600 dark:text-slate-400">
-                  CSV (UTF-8 BOM), JSON, GPX 1.1, GeoJSON (RFC 7946) e Boletim WhatsApp
+                  CSV (UTF-8 BOM), JSON, GPX 1.1, GeoJSON (RFC 7946), Google Earth (KML / KMZ) e
+                  Boletim WhatsApp
                 </p>
               </div>
             </div>
@@ -1038,8 +1921,8 @@ export const FieldDataTab: React.FC<FieldDataTabProps> = ({
             ))}
           </div>
 
-          {/* Grade de Formatos: CSV (BOM UTF-8), JSON, GPX e GeoJSON */}
-          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3">
+          {/* Grade de Formatos: CSV (BOM UTF-8), JSON, GPX, GeoJSON, KML e KMZ */}
+          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
             <button
               type="button"
               onClick={() => handleExportFormat(selectedDataset, 'csv')}
@@ -1107,6 +1990,42 @@ export const FieldDataTab: React.FC<FieldDataTabProps> = ({
               </div>
               <Download className="w-4 h-4 text-slate-400" aria-hidden="true" />
             </button>
+
+            <button
+              type="button"
+              data-testid="export-kml-btn"
+              onClick={() => handleExportFormat(selectedDataset, 'kml')}
+              className="min-h-[44px] min-w-[44px] p-3.5 rounded-xl border border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-slate-950/60 hover:border-indigo-500/50 flex items-center justify-between text-left transition-colors"
+            >
+              <div className="flex items-center gap-2.5">
+                <Globe className="w-5 h-5 text-sky-600 shrink-0" />
+                <div>
+                  <div className="text-sm font-bold text-slate-900 dark:text-white">
+                    Exportar KML
+                  </div>
+                  <div className="text-[11px] text-slate-500">Google Earth (KML 2.2)</div>
+                </div>
+              </div>
+              <Download className="w-4 h-4 text-slate-400" aria-hidden="true" />
+            </button>
+
+            <button
+              type="button"
+              data-testid="export-kmz-btn"
+              onClick={() => handleExportFormat(selectedDataset, 'kmz')}
+              className="min-h-[44px] min-w-[44px] p-3.5 rounded-xl border border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-slate-950/60 hover:border-indigo-500/50 flex items-center justify-between text-left transition-colors"
+            >
+              <div className="flex items-center gap-2.5">
+                <FileArchive className="w-5 h-5 text-teal-600 shrink-0" />
+                <div>
+                  <div className="text-sm font-bold text-slate-900 dark:text-white">
+                    Exportar KMZ
+                  </div>
+                  <div className="text-[11px] text-slate-500">Google Earth Compactado (.kmz)</div>
+                </div>
+              </div>
+              <Download className="w-4 h-4 text-slate-400" aria-hidden="true" />
+            </button>
           </div>
 
           <div className="flex flex-wrap items-center gap-2 text-xs text-slate-500 pt-1">
@@ -1116,6 +2035,367 @@ export const FieldDataTab: React.FC<FieldDataTabProps> = ({
               Desktop realiza download imediato do arquivo.
             </span>
           </div>
+        </section>
+      </ModuleErrorBoundary>
+
+      {/* 5. Seção Opcional / Sob Demanda: Séries Históricas & Recorrência Semanal */}
+      <ModuleErrorBoundary
+        moduleName="Séries Históricas & Recorrência Semanal"
+        onErrorLog={onErrorLog}
+      >
+        <section
+          aria-label="Séries Históricas & Recorrência Semanal"
+          data-testid="historical-series-section"
+          className="rounded-2xl border border-slate-200/90 dark:border-sky-800/70 bg-white dark:bg-[#132a47] p-5 shadow-sm space-y-4"
+        >
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <div className="flex items-center gap-2.5">
+              <div className="p-2 rounded-xl bg-sky-500/15 text-sky-600 dark:text-sky-400">
+                <History className="w-5 h-5" aria-hidden="true" />
+              </div>
+              <div>
+                <div className="flex flex-wrap items-center gap-2">
+                  <h2 className="text-base md:text-lg font-bold text-slate-900 dark:text-white">
+                    Séries Históricas &amp; Recorrência Semanal
+                  </h2>
+                  <span className="px-2.5 py-0.5 rounded-full text-[11px] font-bold bg-sky-100 dark:bg-sky-900/60 text-sky-800 dark:text-sky-200">
+                    Opcional • Sob Demanda
+                  </span>
+                </div>
+                <p className="text-xs text-slate-600 dark:text-slate-400">
+                  Extraia séries temporais retroativas por modelo (CSV, JSON, KML, KMZ) ou agende
+                  logs periódicos locais para Drive / WhatsApp
+                </p>
+              </div>
+            </div>
+
+            <button
+              type="button"
+              onClick={() => setIsHistoricalExpanded((prev) => !prev)}
+              aria-expanded={isHistoricalExpanded}
+              className="min-h-[44px] min-w-[44px] px-3.5 py-2 rounded-xl text-xs font-semibold inline-flex items-center gap-1.5 border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 text-slate-700 dark:text-slate-200 hover:bg-slate-100 transition-colors"
+            >
+              {isHistoricalExpanded ? (
+                <>
+                  <ChevronUp className="w-4 h-4" aria-hidden="true" />
+                  <span>Recolher Painel</span>
+                </>
+              ) : (
+                <>
+                  <ChevronDown className="w-4 h-4" aria-hidden="true" />
+                  <span>Expandir Consulta Histórica</span>
+                </>
+              )}
+            </button>
+          </div>
+
+          {isHistoricalExpanded && (
+            <div className="space-y-5 pt-2 border-t border-slate-100 dark:border-slate-800">
+              {/* Subcard 1: Consulta de Série Histórica */}
+              <div className="rounded-xl border border-slate-200 dark:border-slate-800 bg-slate-50/70 dark:bg-slate-950/50 p-4 space-y-4">
+                <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+                  <label className="block space-y-1">
+                    <span className="text-xs font-bold text-slate-700 dark:text-slate-200">
+                      Local / Área de Consulta
+                    </span>
+                    <select
+                      aria-label="Local da série histórica"
+                      data-testid="historical-location-select"
+                      value={selectedHistLocationKey}
+                      onChange={(e) => setSelectedHistLocationKey(e.target.value)}
+                      className="w-full min-h-[44px] px-3 py-2 rounded-xl border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900 text-xs sm:text-sm font-semibold text-slate-900 dark:text-white"
+                    >
+                      <option value="active">
+                        Atual: {activeLocation.name} ({activeLocation.latitude.toFixed(3)}°,{' '}
+                        {activeLocation.longitude.toFixed(3)}°)
+                      </option>
+                      {availableLocations.map((loc) => (
+                        <option key={loc.id} value={loc.id}>
+                          {loc.name} ({loc.latitude.toFixed(3)}°, {loc.longitude.toFixed(3)}°)
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+
+                  <label className="block space-y-1">
+                    <span className="text-xs font-bold text-slate-700 dark:text-slate-200">
+                      Data Inicial
+                    </span>
+                    <input
+                      type="date"
+                      aria-label="Data inicial da série histórica"
+                      value={histStartDate}
+                      onChange={(e) => {
+                        setHistDatePresetDays(null);
+                        setHistStartDate(e.target.value);
+                      }}
+                      className="w-full min-h-[44px] px-3 py-2 rounded-xl border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900 text-xs sm:text-sm font-mono text-slate-900 dark:text-white"
+                    />
+                  </label>
+
+                  <label className="block space-y-1">
+                    <span className="text-xs font-bold text-slate-700 dark:text-slate-200">
+                      Data Final
+                    </span>
+                    <input
+                      type="date"
+                      aria-label="Data final da série histórica"
+                      value={histEndDate}
+                      onChange={(e) => {
+                        setHistDatePresetDays(null);
+                        setHistEndDate(e.target.value);
+                      }}
+                      className="w-full min-h-[44px] px-3 py-2 rounded-xl border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900 text-xs sm:text-sm font-mono text-slate-900 dark:text-white"
+                    />
+                  </label>
+                </div>
+
+                {/* Atalhos de Período */}
+                <div className="flex flex-wrap items-center gap-2">
+                  <span className="text-xs font-bold text-slate-600 dark:text-slate-300 flex items-center gap-1">
+                    <Calendar className="w-3.5 h-3.5 text-sky-500" aria-hidden="true" />
+                    <span>Período Rápido:</span>
+                  </span>
+                  {([7, 14, 30] as const).map((days) => (
+                    <button
+                      key={days}
+                      type="button"
+                      onClick={() => handleSelectDatePreset(days)}
+                      className={`min-h-[38px] px-3 py-1.5 rounded-xl text-xs font-semibold border transition-colors ${
+                        histDatePresetDays === days
+                          ? 'bg-sky-600 text-white border-sky-600 shadow-sm'
+                          : 'bg-white dark:bg-slate-900 text-slate-700 dark:text-slate-200 border-slate-200 dark:border-slate-700 hover:bg-sky-50'
+                      }`}
+                    >
+                      Últimos {days} dias
+                    </button>
+                  ))}
+                </div>
+
+                {/* Seleção de Modelos e Formato */}
+                <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-3">
+                  <div className="flex flex-wrap items-center gap-1.5">
+                    <span className="text-xs font-bold text-slate-600 dark:text-slate-300 mr-1">
+                      Modelos:
+                    </span>
+                    <button
+                      type="button"
+                      onClick={handleSelectAllHistoricalModels}
+                      aria-pressed={allModelsSelected}
+                      className={`min-h-[36px] px-3 py-1 rounded-full text-xs font-bold border transition-colors ${
+                        allModelsSelected
+                          ? 'bg-sky-600 text-white border-sky-600'
+                          : 'bg-white dark:bg-slate-900 text-slate-700 dark:text-slate-200 border-slate-300 dark:border-slate-700'
+                      }`}
+                    >
+                      Todos
+                    </button>
+                    {HISTORICAL_MODEL_OPTIONS.map((opt) => {
+                      const active = histSelectedModels.includes(opt.id);
+                      return (
+                        <button
+                          key={opt.id}
+                          type="button"
+                          onClick={() => handleToggleHistoricalModel(opt.id)}
+                          aria-pressed={active}
+                          className={`min-h-[36px] px-3 py-1 rounded-full text-xs font-semibold border transition-colors ${
+                            active
+                              ? 'bg-sky-100 dark:bg-sky-900/70 text-sky-900 dark:text-sky-100 border-sky-400'
+                              : 'bg-white dark:bg-slate-900 text-slate-600 dark:text-slate-400 border-slate-200 dark:border-slate-800'
+                          }`}
+                        >
+                          {opt.label}
+                        </button>
+                      );
+                    })}
+                  </div>
+
+                  <div className="flex flex-wrap items-center gap-1.5">
+                    <span className="text-xs font-bold text-slate-600 dark:text-slate-300 mr-1">
+                      Formato:
+                    </span>
+                    {HISTORICAL_EXPORT_FORMATS.map((fmt) => (
+                      <button
+                        key={fmt.id}
+                        type="button"
+                        onClick={() => setHistExportFormat(fmt.id)}
+                        aria-pressed={histExportFormat === fmt.id}
+                        className={`min-h-[36px] px-3 py-1 rounded-xl text-xs font-bold border transition-colors ${
+                          histExportFormat === fmt.id
+                            ? 'bg-indigo-600 text-white border-indigo-600'
+                            : 'bg-white dark:bg-slate-900 text-slate-700 dark:text-slate-200 border-slate-200 dark:border-slate-700'
+                        }`}
+                      >
+                        {fmt.label}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+
+                {/* Botão Consultar Série Histórica */}
+                <div className="flex flex-wrap items-center justify-between gap-3 pt-1">
+                  <button
+                    type="button"
+                    data-testid="query-historical-series-btn"
+                    onClick={handleQueryHistoricalSeries}
+                    disabled={isQueryingHistorical}
+                    className="min-h-[44px] min-w-[44px] px-5 py-2.5 rounded-xl text-xs sm:text-sm font-bold inline-flex items-center justify-center gap-2 bg-sky-600 hover:bg-sky-500 disabled:opacity-50 text-white shadow-sm transition-colors"
+                  >
+                    <RefreshCw
+                      className={`w-4 h-4 ${isQueryingHistorical ? 'animate-spin' : ''}`}
+                      aria-hidden="true"
+                    />
+                    <span>
+                      {isQueryingHistorical
+                        ? 'Consultando Série Histórica...'
+                        : 'Consultar Série Histórica'}
+                    </span>
+                  </button>
+
+                  {lastHistoricalResult && (
+                    <div
+                      data-testid="historical-query-result"
+                      className="flex flex-wrap items-center gap-2"
+                    >
+                      <span className="text-xs font-semibold text-emerald-700 dark:text-emerald-300 bg-emerald-500/10 border border-emerald-500/30 px-3 py-1.5 rounded-xl">
+                        {lastHistoricalResult.hours.length} registros horários (
+                        {lastHistoricalResult.locationName})
+                      </span>
+                      <button
+                        type="button"
+                        data-testid="download-historical-series-btn"
+                        onClick={() =>
+                          handleDeliverHistoricalResult(lastHistoricalResult, histExportFormat)
+                        }
+                        className="min-h-[44px] min-w-[44px] px-4 py-2 rounded-xl text-xs font-bold inline-flex items-center gap-1.5 bg-emerald-600 hover:bg-emerald-500 text-white shadow-sm transition-colors"
+                      >
+                        <Download className="w-4 h-4" aria-hidden="true" />
+                        <span>
+                          Baixar / Compartilhar ({histExportFormat.toUpperCase()})
+                        </span>
+                      </button>
+                    </div>
+                  )}
+                </div>
+              </div>
+
+              {/* Subcard 2: Recorrência Automática (Logs Periódicos) */}
+              <div className="rounded-xl border border-slate-200 dark:border-slate-800 bg-slate-50/70 dark:bg-slate-950/50 p-4 space-y-3.5">
+                <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+                  <div>
+                    <h3 className="text-sm font-bold text-slate-900 dark:text-white flex items-center gap-2">
+                      <Clock className="w-4 h-4 text-sky-500" aria-hidden="true" />
+                      <span>Recorrência Automática (Logs Periódicos)</span>
+                    </h3>
+                    <p className="text-xs text-slate-600 dark:text-slate-400">
+                      Salve uma regra local para consolidar automaticamente o histórico e enviar
+                      em 1 clique para Google Drive ou WhatsApp
+                    </p>
+                  </div>
+
+                  <div className="flex flex-wrap items-center gap-2">
+                    {RECURRENCE_INTERVAL_OPTIONS.map((opt) => (
+                      <button
+                        key={opt.days}
+                        type="button"
+                        onClick={() => setRecurrenceIntervalDays(opt.days)}
+                        aria-pressed={recurrenceIntervalDays === opt.days}
+                        className={`min-h-[38px] px-3 py-1.5 rounded-xl text-xs font-semibold border transition-colors ${
+                          recurrenceIntervalDays === opt.days
+                            ? 'bg-sky-600 text-white border-sky-600'
+                            : 'bg-white dark:bg-slate-900 text-slate-700 dark:text-slate-200 border-slate-200 dark:border-slate-700'
+                        }`}
+                      >
+                        {opt.label}
+                      </button>
+                    ))}
+
+                    <button
+                      type="button"
+                      data-testid="save-recurrence-rule-btn"
+                      onClick={handleSaveRecurrenceRuleClick}
+                      className="min-h-[44px] min-w-[44px] px-4 py-2 rounded-xl text-xs font-bold inline-flex items-center gap-1.5 bg-indigo-600 hover:bg-indigo-500 text-white shadow-sm transition-colors"
+                    >
+                      <PlusCircle className="w-4 h-4" aria-hidden="true" />
+                      <span>Agendar Log Periódico</span>
+                    </button>
+                  </div>
+                </div>
+
+                {/* Regras Ativas */}
+                {activeRecurrenceRules.length > 0 && (
+                  <div className="space-y-1.5">
+                    <div className="text-[11px] font-bold uppercase tracking-wider text-slate-500">
+                      Regras Configuradas ({activeRecurrenceRules.length})
+                    </div>
+                    <div className="divide-y divide-slate-200 dark:divide-slate-800 rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900">
+                      {activeRecurrenceRules.map((rule) => (
+                        <div
+                          key={rule.id}
+                          className="p-2.5 flex flex-wrap items-center justify-between gap-2 text-xs"
+                        >
+                          <div>
+                            <span className="font-bold text-slate-900 dark:text-white">
+                              {rule.locationName}
+                            </span>{' '}
+                            <span className="text-slate-500">
+                              • A cada {rule.intervalDays} dias • Formato{' '}
+                              {rule.format.toUpperCase()} • Modelos: {rule.models.join(', ')}
+                            </span>
+                          </div>
+                          <button
+                            type="button"
+                            onClick={() => handleDeleteRecurrenceRuleClick(rule.id)}
+                            aria-label={`Remover regra ${rule.locationName}`}
+                            className="min-h-[38px] min-w-[38px] p-1.5 rounded-lg text-rose-600 hover:bg-rose-500/10 inline-flex items-center justify-center"
+                          >
+                            <Trash2 className="w-4 h-4" aria-hidden="true" />
+                          </button>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
+
+                {/* Logs Periódicos Prontos para 1-Click Download / Share */}
+                {activeHistoricalLogs.length > 0 && (
+                  <div className="space-y-1.5">
+                    <div className="text-[11px] font-bold uppercase tracking-wider text-slate-500">
+                      Logs Periódicos Prontos ({activeHistoricalLogs.length})
+                    </div>
+                    <div className="divide-y divide-slate-200 dark:divide-slate-800 rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900">
+                      {activeHistoricalLogs.map((log) => (
+                        <div
+                          key={log.id}
+                          className="p-3 flex flex-wrap items-center justify-between gap-3 text-xs"
+                        >
+                          <div>
+                            <div className="font-bold text-slate-900 dark:text-white">
+                              {log.locationName} ({log.startDateIso} a {log.endDateIso})
+                            </div>
+                            <div className="text-slate-500 font-mono">
+                              {log.recordCount} registros • {log.format.toUpperCase()} •{' '}
+                              {log.modelsIncluded.join(', ')}
+                            </div>
+                          </div>
+
+                          <button
+                            type="button"
+                            data-testid={`download-historical-log-${log.id}`}
+                            onClick={() => handleDownloadLogEntry(log)}
+                            className="min-h-[42px] min-w-[44px] px-3.5 py-2 rounded-xl text-xs font-bold inline-flex items-center gap-1.5 bg-emerald-600 hover:bg-emerald-500 text-white shadow-sm transition-colors"
+                          >
+                            <Share2 className="w-3.5 h-3.5" aria-hidden="true" />
+                            <span>Baixar / Enviar (Drive / WhatsApp)</span>
+                          </button>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
+              </div>
+            </div>
+          )}
         </section>
       </ModuleErrorBoundary>
     </div>

@@ -2,6 +2,7 @@ import React, { useMemo, useState } from 'react';
 import ReactECharts from 'echarts-for-react';
 import type { EChartsOption } from 'echarts';
 import {
+  Clock,
   Cloud,
   CloudRain,
   Compass,
@@ -26,6 +27,7 @@ import {
   MODEL_SHORT_LABELS,
 } from '../../utils/modelComparison';
 import { HelpPopover } from '../common/HelpPopover';
+import { degreesToCardinalShort } from './CurrentSummaryCard';
 import type { ForecastHorizonHours } from './ModelSelectorBar';
 import {
   COMPLETE_VISIBLE_PARAMS,
@@ -174,7 +176,110 @@ export const ForecastCharts: React.FC<ForecastChartsProps> = ({
     visibleParams.verticalProfile || focusTab === 'vertical';
 
   const isNativeModel =
-    viewMode === 'ecmwf_ifs025' || viewMode === 'gfs_seamless' || viewMode === 'icon_seamless';
+    viewMode === 'ecmwf_ifs025' ||
+    viewMode === 'gfs_seamless' ||
+    viewMode === 'icon_seamless' ||
+    viewMode === 'gem_seamless';
+
+  const hasSeaLevelMsl = useMemo(
+    () =>
+      forecast.marineAvailable &&
+      slicedHours.some(
+        (h) =>
+          typeof h.marine?.seaLevelHeightMsl === 'number' &&
+          Number.isFinite(h.marine.seaLevelHeightMsl),
+      ),
+    [forecast.marineAvailable, slicedHours],
+  );
+
+  const timeSeriesEvents = useMemo(
+    () =>
+      onSelectHourIndex
+        ? {
+            click: (params: { dataIndex?: number }) => {
+              if (
+                typeof params?.dataIndex === 'number' &&
+                params.dataIndex >= 0 &&
+                params.dataIndex < slicedHours.length
+              ) {
+                onSelectHourIndex(params.dataIndex);
+              }
+            },
+          }
+        : undefined,
+    [onSelectHourIndex, slicedHours.length],
+  );
+
+  const activeSummaryMetrics = useMemo(() => {
+    if (!activeHour) {
+      return null;
+    }
+    const nativeHour = isNativeModel
+      ? forecast.nativeByModel[viewMode]?.[safeSelectedIdx]
+      : undefined;
+
+    const windSpeed = isNativeModel
+      ? (nativeHour?.windSpeed10m ?? activeHour.windSpeed10m.mean)
+      : activeHour.windSpeed10m.mean;
+    const windDir = isNativeModel
+      ? (nativeHour?.windDirection10m ?? activeHour.windDirection10m.degree)
+      : activeHour.windDirection10m.degree;
+    const gusts = isNativeModel
+      ? (nativeHour?.windGusts10m ?? activeHour.windGusts10m.mean)
+      : activeHour.windGusts10m.mean;
+    const temp = isNativeModel
+      ? (nativeHour?.temperature2m ?? activeHour.temperature2mC.mean)
+      : activeHour.temperature2mC.mean;
+    const dewPoint = isNativeModel
+      ? (nativeHour?.dewPoint2m ?? activeHour.dewPoint2mC.mean)
+      : activeHour.dewPoint2mC.mean;
+    const precipMm = isNativeModel
+      ? (nativeHour?.precipitation ?? activeHour.precipitationMm.mean)
+      : activeHour.precipitationMm.mean;
+    const precipProb = isNativeModel
+      ? (nativeHour?.precipitationProbability ?? activeHour.precipitationProbabilityPct.mean)
+      : activeHour.precipitationProbabilityPct.mean;
+    const pressureHpa = isNativeModel
+      ? (nativeHour?.surfacePressure ?? activeHour.surfacePressureHpa.mean)
+      : activeHour.surfacePressureHpa.mean;
+
+    return {
+      timeLabel:
+        xLabels[safeSelectedIdx] ??
+        formatLocalHourBadge(activeHour.timestampUnix, forecast.timezone),
+      hourBadge: formatLocalHourBadge(activeHour.timestampUnix, forecast.timezone),
+      sourceLabel: isNativeModel
+        ? MODEL_LABELS[viewMode]
+        : viewMode === 'spaghetti'
+          ? 'Consenso FieldCast (Comparação)'
+          : 'Consenso FieldCast',
+      windSpeed,
+      windDir,
+      windCardinal: degreesToCardinalShort(windDir),
+      gusts,
+      temp,
+      dewPoint,
+      precipMm,
+      precipProb,
+      pressureHpa,
+      waveHeight: activeHour.marine?.waveHeight ?? null,
+      wavePeriod: activeHour.marine?.wavePeriod ?? null,
+      waveDirCardinal: degreesToCardinalShort(activeHour.marine?.waveDirection),
+      seaLevelHeightMsl:
+        typeof activeHour.marine?.seaLevelHeightMsl === 'number' &&
+        Number.isFinite(activeHour.marine.seaLevelHeightMsl)
+          ? activeHour.marine.seaLevelHeightMsl
+          : null,
+    };
+  }, [
+    activeHour,
+    isNativeModel,
+    forecast.nativeByModel,
+    forecast.timezone,
+    viewMode,
+    safeSelectedIdx,
+    xLabels,
+  ]);
 
   // 1A. Hourly Wind & Gusts Time-Series Chart Option
   const windTimeSeriesOption: EChartsOption = useMemo(() => {
@@ -692,10 +797,67 @@ export const ForecastCharts: React.FC<ForecastChartsProps> = ({
     gridBorderColor,
   ]);
 
-  // 2. Waves & Swell Option
+  // 2. Waves, Swell & Optional Sea-Level (MSL) Option
   const marineOption: EChartsOption = useMemo(() => {
     if (!forecast.marineAvailable) {
       return {};
+    }
+
+    const minSeaLevel = hasSeaLevelMsl
+      ? Math.min(
+          0,
+          ...slicedHours
+            .map((h) => h.marine?.seaLevelHeightMsl)
+            .filter((v): v is number => typeof v === 'number' && Number.isFinite(v)),
+        )
+      : 0;
+    const heightAxisMin = minSeaLevel < 0 ? Math.floor(minSeaLevel * 2) / 2 : 0;
+
+    const marineSeries: NonNullable<EChartsOption['series']> = [
+      {
+        name: 'Altura de Onda (m)',
+        type: 'line',
+        smooth: true,
+        symbol: 'none',
+        areaStyle: {
+          color: isDark ? 'rgba(0, 128, 205, 0.22)' : 'rgba(0, 128, 205, 0.14)',
+        },
+        lineStyle: { width: 2.5, color: '#0080cd' },
+        itemStyle: { color: '#0080cd' },
+        data: slicedHours.map((h) => roundOrNull(h.marine?.waveHeight, 2)),
+        markLine: currentHourMarkLine,
+      },
+      {
+        name: 'Ondulação Swell (m)',
+        type: 'line',
+        smooth: true,
+        symbol: 'none',
+        lineStyle: { width: 2, type: 'dashed', color: '#0d9488' },
+        itemStyle: { color: '#0d9488' },
+        data: slicedHours.map((h) => roundOrNull(h.marine?.swellWaveHeight, 2)),
+      },
+      {
+        name: 'Período (s)',
+        type: 'line',
+        yAxisIndex: 1,
+        smooth: true,
+        symbol: 'none',
+        lineStyle: { width: 1.5, color: '#f59e0b' },
+        itemStyle: { color: '#f59e0b' },
+        data: slicedHours.map((h) => roundOrNull(h.marine?.wavePeriod, 1)),
+      },
+    ];
+
+    if (hasSeaLevelMsl) {
+      marineSeries.push({
+        name: 'Nível do Mar Est. (MSL m)',
+        type: 'line',
+        smooth: true,
+        symbol: 'none',
+        lineStyle: { width: 2, type: 'dotted', color: '#6366f1' },
+        itemStyle: { color: '#6366f1' },
+        data: slicedHours.map((h) => roundOrNull(h.marine?.seaLevelHeightMsl, 2)),
+      });
     }
 
     return {
@@ -727,8 +889,8 @@ export const ForecastCharts: React.FC<ForecastChartsProps> = ({
       yAxis: [
         {
           type: 'value',
-          name: 'Altura (m)',
-          min: 0,
+          name: hasSeaLevelMsl ? 'Altura / MSL (m)' : 'Altura (m)',
+          min: heightAxisMin,
           max: (value: { max: number }) =>
             Math.max(1.5, Math.ceil(value.max * 1.25 * 2) / 2),
           nameTextStyle: { color: textColor, fontSize: 11 },
@@ -746,43 +908,11 @@ export const ForecastCharts: React.FC<ForecastChartsProps> = ({
           splitLine: { show: false },
         },
       ],
-      series: [
-        {
-          name: 'Altura de Onda (m)',
-          type: 'line',
-          smooth: true,
-          symbol: 'none',
-          areaStyle: {
-            color: isDark ? 'rgba(0, 128, 205, 0.22)' : 'rgba(0, 128, 205, 0.14)',
-          },
-          lineStyle: { width: 2.5, color: '#0080cd' },
-          itemStyle: { color: '#0080cd' },
-          data: slicedHours.map((h) => roundOrNull(h.marine?.waveHeight, 2)),
-          markLine: currentHourMarkLine,
-        },
-        {
-          name: 'Ondulação Swell (m)',
-          type: 'line',
-          smooth: true,
-          symbol: 'none',
-          lineStyle: { width: 2, type: 'dashed', color: '#0d9488' },
-          itemStyle: { color: '#0d9488' },
-          data: slicedHours.map((h) => roundOrNull(h.marine?.swellWaveHeight, 2)),
-        },
-        {
-          name: 'Período (s)',
-          type: 'line',
-          yAxisIndex: 1,
-          smooth: true,
-          symbol: 'none',
-          lineStyle: { width: 1.5, color: '#f59e0b' },
-          itemStyle: { color: '#f59e0b' },
-          data: slicedHours.map((h) => roundOrNull(h.marine?.wavePeriod, 1)),
-        },
-      ],
+      series: marineSeries,
     };
   }, [
     forecast.marineAvailable,
+    hasSeaLevelMsl,
     tooltipBg,
     tooltipBorder,
     tooltipText,
@@ -1244,6 +1374,166 @@ export const ForecastCharts: React.FC<ForecastChartsProps> = ({
         </div>
       </div>
 
+      {/* Permanent Active-Hour Summary Strip (visible without hover/tap) */}
+      {activeSummaryMetrics && (
+        <div
+          data-testid="charts-hour-summary"
+          className="rounded-2xl border border-sky-200/85 dark:border-sky-800/75 bg-sky-50/75 dark:bg-[#0d1f36]/90 px-4 py-3 shadow-xs space-y-2.5"
+        >
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <div className="flex flex-wrap items-center gap-2">
+              <span className="inline-flex items-center gap-1.5 text-xs font-extrabold text-slate-900 dark:text-white">
+                <Clock className="w-3.5 h-3.5 text-[#0080cd] dark:text-sky-400" aria-hidden="true" />
+                <span>Resumo da Janela Horária</span>
+              </span>
+              <span className="px-2 py-0.5 rounded-full text-[11px] font-bold bg-white dark:bg-[#132a47] text-[#0070b8] dark:text-sky-200 border border-sky-200 dark:border-sky-700 capitalize">
+                {activeSummaryMetrics.timeLabel}
+              </span>
+              {isCurrentHourInRange && safeSelectedIdx === resolvedCurrentHourIndex && (
+                <span className="px-2 py-0.5 rounded-full text-[10px] font-extrabold bg-amber-100 text-amber-900 dark:bg-amber-950/70 dark:text-amber-200 border border-amber-300 dark:border-amber-700">
+                  Agora
+                </span>
+              )}
+              <span className="px-2 py-0.5 rounded-full text-[10px] font-semibold bg-white/80 dark:bg-[#132a47]/80 text-slate-600 dark:text-sky-200/80 border border-slate-200/80 dark:border-sky-800">
+                {activeSummaryMetrics.sourceLabel}
+              </span>
+            </div>
+
+            <div className="flex items-center gap-2">
+              {isCurrentHourInRange &&
+                safeSelectedIdx !== resolvedCurrentHourIndex &&
+                (onResetToCurrentHour || onSelectHourIndex) && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      if (onResetToCurrentHour) {
+                        onResetToCurrentHour();
+                      } else {
+                        onSelectHourIndex?.(resolvedCurrentHourIndex);
+                      }
+                    }}
+                    className="min-h-[30px] px-2.5 py-0.5 rounded-full text-[11px] font-bold bg-amber-500 hover:bg-amber-600 text-slate-950 transition-colors"
+                  >
+                    Voltar p/ Agora ({currentHourBadge})
+                  </button>
+                )}
+              <span className="text-[11px] text-slate-500 dark:text-sky-300/75 hidden md:inline">
+                Toque nos gráficos para inspecionar outro horário
+              </span>
+            </div>
+          </div>
+
+          <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 xl:grid-cols-7 gap-2 text-xs">
+            <div className="rounded-xl bg-white dark:bg-[#132a47] border border-sky-100 dark:border-sky-800/70 px-2.5 py-2">
+              <span className="text-[10px] font-semibold text-slate-500 dark:text-sky-300/75 block">
+                Hora Local
+              </span>
+              <span className="font-extrabold text-slate-900 dark:text-white">
+                {activeSummaryMetrics.hourBadge}
+              </span>
+            </div>
+
+            <div className="rounded-xl bg-white dark:bg-[#132a47] border border-sky-100 dark:border-sky-800/70 px-2.5 py-2">
+              <span className="text-[10px] font-semibold text-slate-500 dark:text-sky-300/75 block">
+                Vento Médio 10m
+              </span>
+              <span className="font-extrabold text-slate-900 dark:text-white">
+                {activeSummaryMetrics.windSpeed !== null
+                  ? `${Math.round(activeSummaryMetrics.windSpeed)} km/h`
+                  : '—'}{' '}
+                <span className="font-semibold text-[#0070b8] dark:text-sky-300">
+                  {activeSummaryMetrics.windCardinal}
+                  {activeSummaryMetrics.windDir !== null
+                    ? ` ${Math.round(activeSummaryMetrics.windDir)}°`
+                    : ''}
+                </span>
+              </span>
+            </div>
+
+            <div className="rounded-xl bg-white dark:bg-[#132a47] border border-sky-100 dark:border-sky-800/70 px-2.5 py-2">
+              <span className="text-[10px] font-semibold text-slate-500 dark:text-sky-300/75 block">
+                Rajadas 10m
+              </span>
+              <span className="font-extrabold text-orange-600 dark:text-orange-300">
+                {activeSummaryMetrics.gusts !== null
+                  ? `${Math.round(activeSummaryMetrics.gusts)} km/h`
+                  : '—'}
+              </span>
+            </div>
+
+            <div className="rounded-xl bg-white dark:bg-[#132a47] border border-sky-100 dark:border-sky-800/70 px-2.5 py-2">
+              <span className="text-[10px] font-semibold text-slate-500 dark:text-sky-300/75 block">
+                Temp / Orvalho
+              </span>
+              <span className="font-extrabold text-slate-900 dark:text-white">
+                {activeSummaryMetrics.temp !== null
+                  ? `${activeSummaryMetrics.temp.toFixed(1)}°C`
+                  : '—'}{' '}
+                <span className="font-semibold text-slate-500 dark:text-sky-300">
+                  /{' '}
+                  {activeSummaryMetrics.dewPoint !== null
+                    ? `${activeSummaryMetrics.dewPoint.toFixed(0)}°C`
+                    : '—'}
+                </span>
+              </span>
+            </div>
+
+            <div className="rounded-xl bg-white dark:bg-[#132a47] border border-sky-100 dark:border-sky-800/70 px-2.5 py-2">
+              <span className="text-[10px] font-semibold text-slate-500 dark:text-sky-300/75 block">
+                Precipitação
+              </span>
+              <span className="font-extrabold text-slate-900 dark:text-white">
+                {activeSummaryMetrics.precipMm !== null
+                  ? `${activeSummaryMetrics.precipMm.toFixed(1)} mm`
+                  : '0.0 mm'}{' '}
+                <span className="font-semibold text-[#0070b8] dark:text-sky-300">
+                  •{' '}
+                  {activeSummaryMetrics.precipProb !== null
+                    ? `${Math.round(activeSummaryMetrics.precipProb)}%`
+                    : '0%'}
+                </span>
+              </span>
+            </div>
+
+            <div className="rounded-xl bg-white dark:bg-[#132a47] border border-sky-100 dark:border-sky-800/70 px-2.5 py-2">
+              <span className="text-[10px] font-semibold text-slate-500 dark:text-sky-300/75 block">
+                Pressão
+              </span>
+              <span className="font-extrabold text-slate-900 dark:text-white">
+                {activeSummaryMetrics.pressureHpa !== null
+                  ? `${Math.round(activeSummaryMetrics.pressureHpa)} hPa`
+                  : '—'}
+              </span>
+            </div>
+
+            {forecast.marineAvailable && (
+              <div className="rounded-xl bg-white dark:bg-[#132a47] border border-sky-100 dark:border-sky-800/70 px-2.5 py-2">
+                <span className="text-[10px] font-semibold text-slate-500 dark:text-sky-300/75 block">
+                  Onda / Período
+                  {activeSummaryMetrics.seaLevelHeightMsl !== null ? ' • MSL' : ''}
+                </span>
+                <span className="font-extrabold text-slate-900 dark:text-white">
+                  {activeSummaryMetrics.waveHeight !== null
+                    ? `${activeSummaryMetrics.waveHeight.toFixed(1)}m`
+                    : '—'}{' '}
+                  <span className="font-semibold text-[#0070b8] dark:text-sky-300">
+                    {activeSummaryMetrics.wavePeriod !== null
+                      ? `${Math.round(activeSummaryMetrics.wavePeriod)}s`
+                      : '—'}
+                  </span>
+                </span>
+                {activeSummaryMetrics.seaLevelHeightMsl !== null && (
+                  <span className="block text-[10px] font-bold text-indigo-700 dark:text-indigo-300">
+                    Nível do Mar Est. (MSL):{' '}
+                    {`${activeSummaryMetrics.seaLevelHeightMsl >= 0 ? '+' : ''}${activeSummaryMetrics.seaLevelHeightMsl.toFixed(2)} m`}
+                  </span>
+                )}
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+
       {/* Row 1: Wind Time Series + Vertical Wind Profile 0-120m (when enabled) */}
       {(showWindChart || showVerticalChart) && (
         <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
@@ -1271,6 +1561,7 @@ export const ForecastCharts: React.FC<ForecastChartsProps> = ({
                   style={{ height: '100%', width: '100%' }}
                   notMerge={true}
                   lazyUpdate={true}
+                  onEvents={timeSeriesEvents}
                 />
               </div>
             </div>
@@ -1396,6 +1687,7 @@ export const ForecastCharts: React.FC<ForecastChartsProps> = ({
                   style={{ height: '100%', width: '100%' }}
                   notMerge={true}
                   lazyUpdate={true}
+                  onEvents={timeSeriesEvents}
                 />
               </div>
             </div>
@@ -1423,6 +1715,7 @@ export const ForecastCharts: React.FC<ForecastChartsProps> = ({
                   style={{ height: '100%', width: '100%' }}
                   notMerge={true}
                   lazyUpdate={true}
+                  onEvents={timeSeriesEvents}
                 />
               </div>
             </div>
@@ -1455,14 +1748,25 @@ export const ForecastCharts: React.FC<ForecastChartsProps> = ({
               </div>
 
               {forecast.marineAvailable ? (
-                <div className="h-72 sm:h-80 min-h-[288px] w-full">
-                  <ReactECharts
-                    option={marineOption}
-                    style={{ height: '100%', minHeight: '288px', width: '100%' }}
-                    notMerge={true}
-                    lazyUpdate={true}
-                  />
-                </div>
+                <>
+                  <div className="h-72 sm:h-80 min-h-[288px] w-full">
+                    <ReactECharts
+                      option={marineOption}
+                      style={{ height: '100%', minHeight: '288px', width: '100%' }}
+                      notMerge={true}
+                      lazyUpdate={true}
+                      onEvents={timeSeriesEvents}
+                    />
+                  </div>
+                  {hasSeaLevelMsl && (
+                    <p
+                      data-testid="waves-msl-disclaimer"
+                      className="text-[11px] leading-snug text-slate-600 dark:text-sky-200/85 bg-sky-50/80 dark:bg-[#0d1f36]/80 border border-sky-200/80 dark:border-sky-800/70 rounded-xl px-3 py-2"
+                    >
+                      Nível do Mar (MSL ~8 km): estimativa barométrica/maré indicativa; não substitui Tábua de Marés oficial da DHN/Marinha.
+                    </p>
+                  )}
+                </>
               ) : (
                 <div className="min-h-[220px] rounded-2xl border border-dashed border-sky-200 dark:border-sky-800 bg-[#f4f8fb] dark:bg-[#0d1f36]/60 p-6 flex flex-col items-center justify-center text-center space-y-2">
                   <div className="p-2.5 rounded-2xl bg-sky-100 dark:bg-sky-900/60 text-[#0080cd] dark:text-sky-300">
@@ -1501,6 +1805,7 @@ export const ForecastCharts: React.FC<ForecastChartsProps> = ({
                   style={{ height: '100%', width: '100%' }}
                   notMerge={true}
                   lazyUpdate={true}
+                  onEvents={timeSeriesEvents}
                 />
               </div>
             </div>

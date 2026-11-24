@@ -1,8 +1,49 @@
-import type { TrackPoint, TrackSession, Waypoint } from '../types/field';
+import type {
+  HistoricalSeriesResult,
+  TrackPoint,
+  TrackSession,
+  Waypoint,
+} from '../types/field';
 import type { NormalizedForecast } from '../types/weather';
+import {
+  findCurrentLocalHourIndex,
+  formatLocalHourBadge,
+  formatLocalYMD,
+} from './localTimeHour';
 
 export const UTF8_BOM = '\uFEFF';
 export const EARTH_RADIUS_KM = 6371;
+
+const CARDINAL_16_POINTS = [
+  'N',
+  'NNE',
+  'NE',
+  'ENE',
+  'E',
+  'ESE',
+  'SE',
+  'SSE',
+  'S',
+  'SSW',
+  'SW',
+  'WSW',
+  'W',
+  'WNW',
+  'NW',
+  'NNW',
+] as const;
+
+/**
+ * Converte um azimute/direção em graus para sigla cardeal de 16 pontos.
+ */
+export function formatCardinalDirection(deg: number | null | undefined): string {
+  if (typeof deg !== 'number' || !Number.isFinite(deg)) {
+    return 'N/D';
+  }
+  const normalized = ((deg % 360) + 360) % 360;
+  const idx = Math.round(normalized / 22.5) % 16;
+  return CARDINAL_16_POINTS[idx] ?? 'N';
+}
 
 /**
  * Calcula a distância geodésica em quilômetros entre duas coordenadas (Lat/Lon em graus)
@@ -353,10 +394,21 @@ export function exportToGpx(options: {
     const c = wp.conditions;
     const summaryParts: string[] = [];
     if (wp.note) summaryParts.push(wp.note);
-    if (c.windSpeed10mKmh !== null) summaryParts.push(`Vento: ${c.windSpeed10mKmh.toFixed(1)} km/h`);
+    if (c.windSpeed10mKmh !== null) {
+      const dirSuffix =
+        c.windDirection10mDeg !== null
+          ? ` (${Math.round(c.windDirection10mDeg)}° ${formatCardinalDirection(c.windDirection10mDeg)})`
+          : '';
+      summaryParts.push(`Vento: ${c.windSpeed10mKmh.toFixed(1)} km/h${dirSuffix}`);
+    } else if (c.windDirection10mDeg !== null) {
+      summaryParts.push(
+        `Dir. Vento: ${Math.round(c.windDirection10mDeg)}° (${formatCardinalDirection(c.windDirection10mDeg)})`,
+      );
+    }
     if (c.windGusts10mKmh !== null)
       summaryParts.push(`Rajada: ${c.windGusts10mKmh.toFixed(1)} km/h`);
     if (c.temperature2mC !== null) summaryParts.push(`Temp: ${c.temperature2mC.toFixed(1)} °C`);
+    if (c.precipitationMm !== null) summaryParts.push(`Chuva: ${c.precipitationMm.toFixed(1)} mm`);
     if (c.waveHeightM !== null) summaryParts.push(`Onda: ${c.waveHeightM.toFixed(2)} m`);
     if (c.safeWindow !== null) summaryParts.push(`Semáforo: ${c.safeWindow}`);
 
@@ -507,40 +559,426 @@ export function exportToGeoJson(options: {
 }
 
 /**
+ * Gera documento KML 2.2 válido para Google Earth contendo estação de previsão,
+ * Waypoints georreferenciados, Tracks GPS (`<LineString>`) e/ou série histórica horária.
+ */
+export function exportToKml(options: {
+  waypoints?: readonly Waypoint[];
+  tracks?: readonly TrackSession[];
+  forecast?: NormalizedForecast | null;
+  historical?: HistoricalSeriesResult | null;
+  name?: string;
+}): string {
+  const waypoints = options.waypoints ?? [];
+  const tracks = options.tracks ?? [];
+  const docName = escapeXml(options.name ?? 'FieldCast Exportação Operacional');
+
+  const lines: string[] = [
+    '<?xml version="1.0" encoding="UTF-8"?>',
+    '<kml xmlns="http://www.opengis.net/kml/2.2">',
+    '  <Document>',
+    `    <name>${docName}</name>`,
+    '    <description>Exportado offline pelo FieldCast (Previsão Multi-Modelo, Oceanografia &amp; Campo).</description>',
+    '    <Style id="fieldcast-station"><IconStyle><scale>1.2</scale><Icon><href>https://maps.google.com/mapfiles/kml/paddle/blu-circle.png</href></Icon></IconStyle></Style>',
+    '    <Style id="fieldcast-waypoint"><IconStyle><scale>1.1</scale><Icon><href>https://maps.google.com/mapfiles/kml/paddle/ylw-stars.png</href></Icon></IconStyle></Style>',
+    '    <Style id="fieldcast-track"><LineStyle><color>ffeb9b00</color><width>3.5</width></LineStyle></Style>',
+  ];
+
+  if (options.forecast) {
+    const f = options.forecast;
+    const hIdx = findCurrentLocalHourIndex(f.hours, f.timezone);
+    const h = f.hours[hIdx] ?? f.hours[0];
+    const windMean = h?.windSpeed10m.mean;
+    const windDir = h?.windDirection10m.degree;
+    const gusts = h?.windGusts10m.mean;
+    const temp = h?.temperature2mC.mean;
+    const precip = h?.precipitationMm.mean;
+    const precipProb = h?.precipitationProbabilityPct.mean;
+    const localDate = h ? formatLocalYMD(new Date(h.timestampUnix * 1000), f.timezone) : 'N/D';
+    const localHour = h ? formatLocalHourBadge(h.timestampUnix, f.timezone) : 'N/D';
+
+    const descParts = [
+      `Horário local: ${localDate} ${localHour} (${f.timezone})`,
+      `Altitude DEM: ${f.elevationDemM} m`,
+      `Temperatura 2m: ${temp !== null && temp !== undefined ? `${temp.toFixed(1)} °C` : 'N/D'}`,
+      `Precipitação: ${precip !== null && precip !== undefined ? `${precip.toFixed(1)} mm` : 'N/D'} (${precipProb !== null && precipProb !== undefined ? `${Math.round(precipProb)}%` : 'N/D'})`,
+      `Vento Médio 10m: ${windMean !== null && windMean !== undefined ? `${windMean.toFixed(1)} km/h` : 'N/D'} (${windDir !== null && windDir !== undefined ? `${Math.round(windDir)}° ${formatCardinalDirection(windDir)}` : 'N/D'}) | Rajadas 10m: ${gusts !== null && gusts !== undefined ? `${gusts.toFixed(1)} km/h` : 'N/D'}`,
+      `Confiabilidade: ${f.overallConfidence.total}/100 (${f.overallConfidence.badge.toUpperCase()})`,
+      `Semáforo: ${h?.safeWindow ?? 'N/D'}`,
+    ];
+    if (f.marineAvailable && h?.marine) {
+      const mslPart =
+        h.marine.seaLevelHeightMsl !== null && h.marine.seaLevelHeightMsl !== undefined
+          ? ` | Nível Mar Est. (MSL ~8 km): ${h.marine.seaLevelHeightMsl.toFixed(2)} m (não substitui DHN)`
+          : '';
+      descParts.push(
+        `Ondas: ${h.marine.waveHeight !== null ? `${h.marine.waveHeight.toFixed(2)} m` : 'N/D'}${mslPart}`,
+      );
+    }
+
+    lines.push(
+      '    <Placemark>',
+      `      <name>${escapeXml(`Estação Previsão (${f.locationKey})`)}</name>`,
+      '      <styleUrl>#fieldcast-station</styleUrl>',
+      `      <description>${escapeXml(descParts.join('\n'))}</description>`,
+      '      <Point>',
+      `        <coordinates>${f.longitude.toFixed(6)},${f.latitude.toFixed(6)},${Math.round(f.elevationDemM)}</coordinates>`,
+      '      </Point>',
+      '    </Placemark>',
+    );
+  }
+
+  if (waypoints.length > 0) {
+    lines.push('    <Folder>', '      <name>Waypoints de Campo</name>');
+    for (const wp of waypoints) {
+      const c = wp.conditions;
+      const wpDesc = [
+        wp.note ? `Nota: ${wp.note}` : null,
+        `Data UTC: ${wp.timestampUtcIso}`,
+        `Vento Médio 10m: ${c.windSpeed10mKmh !== null ? `${c.windSpeed10mKmh.toFixed(1)} km/h` : 'N/D'} (${c.windDirection10mDeg !== null ? `${Math.round(c.windDirection10mDeg)}° ${formatCardinalDirection(c.windDirection10mDeg)}` : 'N/D'}) | Rajadas 10m: ${c.windGusts10mKmh !== null ? `${c.windGusts10mKmh.toFixed(1)} km/h` : 'N/D'}`,
+        `Temperatura 2m: ${c.temperature2mC !== null ? `${c.temperature2mC.toFixed(1)} °C` : 'N/D'}`,
+        `Precipitação: ${c.precipitationMm !== null ? `${c.precipitationMm.toFixed(1)} mm` : 'N/D'}`,
+        c.waveHeightM !== null ? `Onda: ${c.waveHeightM.toFixed(2)} m` : null,
+        c.safeWindow !== null ? `Semáforo: ${c.safeWindow}` : null,
+      ]
+        .filter((v): v is string => v !== null)
+        .join('\n');
+
+      lines.push(
+        '      <Placemark>',
+        `        <name>${escapeXml(wp.name)}</name>`,
+        '        <styleUrl>#fieldcast-waypoint</styleUrl>',
+        `        <TimeStamp><when>${escapeXml(wp.timestampUtcIso)}</when></TimeStamp>`,
+        `        <description>${escapeXml(wpDesc)}</description>`,
+        '        <Point>',
+        `          <coordinates>${wp.longitude.toFixed(6)},${wp.latitude.toFixed(6)},0</coordinates>`,
+        '        </Point>',
+        '      </Placemark>',
+      );
+    }
+    lines.push('    </Folder>');
+  }
+
+  if (tracks.length > 0) {
+    lines.push('    <Folder>', '      <name>Rotas GPS (Tracks)</name>');
+    for (const trk of tracks) {
+      if (trk.points.length === 0) {
+        continue;
+      }
+      const trkDesc = [
+        `Status: ${trk.status}`,
+        `Distância: ${trk.totalDistanceKm.toFixed(3)} km`,
+        `Pontos: ${trk.points.length}`,
+        `Início: ${trk.startedAtIso}`,
+        trk.endedAtIso ? `Término: ${trk.endedAtIso}` : null,
+      ]
+        .filter((v): v is string => v !== null)
+        .join('\n');
+
+      if (trk.points.length >= 2) {
+        const coordsText = trk.points
+          .map((pt) => `${pt.longitude.toFixed(6)},${pt.latitude.toFixed(6)},0`)
+          .join(' ');
+        lines.push(
+          '      <Placemark>',
+          `        <name>${escapeXml(trk.name)}</name>`,
+          '        <styleUrl>#fieldcast-track</styleUrl>',
+          `        <description>${escapeXml(trkDesc)}</description>`,
+          '        <LineString>',
+          '          <tessellate>1</tessellate>',
+          `          <coordinates>${coordsText}</coordinates>`,
+          '        </LineString>',
+          '      </Placemark>',
+        );
+      } else {
+        const pt = trk.points[0]!;
+        lines.push(
+          '      <Placemark>',
+          `        <name>${escapeXml(trk.name)}</name>`,
+          `        <description>${escapeXml(trkDesc)}</description>`,
+          '        <Point>',
+          `          <coordinates>${pt.longitude.toFixed(6)},${pt.latitude.toFixed(6)},0</coordinates>`,
+          '        </Point>',
+          '      </Placemark>',
+        );
+      }
+    }
+    lines.push('    </Folder>');
+  }
+
+  if (options.historical) {
+    const hist = options.historical;
+    lines.push('    <Folder>', `      <name>${escapeXml(`Série Histórica — ${hist.locationName}`)}</name>`);
+    lines.push(
+      '      <Placemark>',
+      `        <name>${escapeXml(`${hist.locationName} (${hist.startDateIso} a ${hist.endDateIso})`)}</name>`,
+      '        <styleUrl>#fieldcast-station</styleUrl>',
+      `        <description>${escapeXml(`Fonte: ${hist.sourceLabel}\nRegistros horários: ${hist.hours.length}\nModelos: ${hist.modelsIncluded.join(', ')}\nAltitude DEM: ${hist.elevationDemM} m`)}</description>`,
+      '        <Point>',
+      `          <coordinates>${hist.longitude.toFixed(6)},${hist.latitude.toFixed(6)},${Math.round(hist.elevationDemM)}</coordinates>`,
+      '        </Point>',
+      '      </Placemark>',
+    );
+
+    for (const hr of hist.hours) {
+      const hrDesc = [
+        `Fonte: ${hr.source}`,
+        `Temperatura 2m: ${hr.temperature2mC !== null ? `${hr.temperature2mC.toFixed(1)} °C` : 'N/D'}`,
+        `Vento Médio 10m: ${hr.windSpeed10mKmh !== null ? `${hr.windSpeed10mKmh.toFixed(1)} km/h` : 'N/D'} (${hr.windDirection10mDeg !== null ? `${Math.round(hr.windDirection10mDeg)}° ${formatCardinalDirection(hr.windDirection10mDeg)}` : 'N/D'}) | Rajadas 10m: ${hr.windGusts10mKmh !== null ? `${hr.windGusts10mKmh.toFixed(1)} km/h` : 'N/D'}`,
+        `Precipitação: ${hr.precipitationMm !== null ? `${hr.precipitationMm.toFixed(2)} mm` : 'N/D'}`,
+        `Pressão: ${hr.surfacePressureHpa !== null ? `${hr.surfacePressureHpa.toFixed(1)} hPa` : 'N/D'}`,
+        hr.waveHeightM !== null && hr.waveHeightM !== undefined
+          ? `Onda: ${hr.waveHeightM.toFixed(2)} m`
+          : null,
+        hr.seaLevelHeightMsl !== null && hr.seaLevelHeightMsl !== undefined
+          ? `Nível Mar Est. (MSL ~8 km): ${hr.seaLevelHeightMsl.toFixed(2)} m (não substitui DHN)`
+          : null,
+      ]
+        .filter((v): v is string => v !== null)
+        .join('\n');
+
+      lines.push(
+        '      <Placemark>',
+        `        <name>${escapeXml(`${hist.locationName} — ${hr.timestampIso.slice(0, 16).replace('T', ' ')}Z`)}</name>`,
+        `        <TimeStamp><when>${escapeXml(hr.timestampIso)}</when></TimeStamp>`,
+        `        <description>${escapeXml(hrDesc)}</description>`,
+        '        <Point>',
+        `          <coordinates>${hist.longitude.toFixed(6)},${hist.latitude.toFixed(6)},${Math.round(hist.elevationDemM)}</coordinates>`,
+        '        </Point>',
+        '      </Placemark>',
+      );
+    }
+    lines.push('    </Folder>');
+  }
+
+  lines.push('  </Document>', '</kml>');
+  return lines.join('\n');
+}
+
+const CRC32_TABLE: Uint32Array = (() => {
+  const table = new Uint32Array(256);
+  for (let i = 0; i < 256; i++) {
+    let c = i;
+    for (let k = 0; k < 8; k++) {
+      c = (c & 1) !== 0 ? 0xedb88320 ^ (c >>> 1) : c >>> 1;
+    }
+    table[i] = c >>> 0;
+  }
+  return table;
+})();
+
+/**
+ * Calcula CRC-32 IEEE 802.3 sem dependências externas.
+ */
+export function computeCrc32(bytes: Uint8Array): number {
+  let crc = 0xffffffff;
+  for (let i = 0; i < bytes.length; i++) {
+    crc = CRC32_TABLE[(crc ^ bytes[i]!) & 0xff]! ^ (crc >>> 8);
+  }
+  return (crc ^ 0xffffffff) >>> 0;
+}
+
+/**
+ * Empacota entradas em um arquivo ZIP (PKZIP Stored / método 0) 100% em TypeScript puro.
+ */
+export function buildStoredZip(
+  entries: ReadonlyArray<{ name: string; data: Uint8Array }>,
+): Uint8Array {
+  const encoder = new TextEncoder();
+  const now = new Date();
+  const dosTime =
+    ((now.getHours() & 0x1f) << 11) |
+    ((now.getMinutes() & 0x3f) << 5) |
+    ((now.getSeconds() >> 1) & 0x1f);
+  const dosDate =
+    (((Math.max(1980, now.getFullYear()) - 1980) & 0x7f) << 9) |
+    (((now.getMonth() + 1) & 0x0f) << 5) |
+    (now.getDate() & 0x1f);
+
+  const localRecords: Array<{
+    nameBytes: Uint8Array;
+    data: Uint8Array;
+    crc: number;
+    offset: number;
+  }> = [];
+
+  let offset = 0;
+  for (const entry of entries) {
+    const nameBytes = encoder.encode(entry.name);
+    const crc = computeCrc32(entry.data);
+    localRecords.push({ nameBytes, data: entry.data, crc, offset });
+    offset += 30 + nameBytes.length + entry.data.length;
+  }
+
+  const centralDirOffset = offset;
+  let centralDirSize = 0;
+  for (const rec of localRecords) {
+    centralDirSize += 46 + rec.nameBytes.length;
+  }
+
+  const totalSize = centralDirOffset + centralDirSize + 22;
+  const out = new Uint8Array(totalSize);
+  const view = new DataView(out.buffer);
+
+  let cursor = 0;
+  for (const rec of localRecords) {
+    // Local file header signature
+    view.setUint32(cursor, 0x04034b50, true);
+    view.setUint16(cursor + 4, 20, true); // version needed
+    view.setUint16(cursor + 6, 0x0800, true); // UTF-8 filename flag
+    view.setUint16(cursor + 8, 0, true); // method = 0 (stored)
+    view.setUint16(cursor + 10, dosTime, true);
+    view.setUint16(cursor + 12, dosDate, true);
+    view.setUint32(cursor + 14, rec.crc, true);
+    view.setUint32(cursor + 18, rec.data.length, true);
+    view.setUint32(cursor + 22, rec.data.length, true);
+    view.setUint16(cursor + 26, rec.nameBytes.length, true);
+    view.setUint16(cursor + 28, 0, true); // extra field len
+    out.set(rec.nameBytes, cursor + 30);
+    cursor += 30 + rec.nameBytes.length;
+    out.set(rec.data, cursor);
+    cursor += rec.data.length;
+  }
+
+  for (const rec of localRecords) {
+    // Central directory header signature
+    view.setUint32(cursor, 0x02014b50, true);
+    view.setUint16(cursor + 4, 20, true); // version made by
+    view.setUint16(cursor + 6, 20, true); // version needed
+    view.setUint16(cursor + 8, 0x0800, true); // UTF-8 flag
+    view.setUint16(cursor + 10, 0, true); // stored
+    view.setUint16(cursor + 12, dosTime, true);
+    view.setUint16(cursor + 14, dosDate, true);
+    view.setUint32(cursor + 16, rec.crc, true);
+    view.setUint32(cursor + 20, rec.data.length, true);
+    view.setUint32(cursor + 24, rec.data.length, true);
+    view.setUint16(cursor + 28, rec.nameBytes.length, true);
+    view.setUint16(cursor + 30, 0, true); // extra len
+    view.setUint16(cursor + 32, 0, true); // comment len
+    view.setUint16(cursor + 34, 0, true); // disk start
+    view.setUint16(cursor + 36, 0, true); // internal attrs
+    view.setUint32(cursor + 38, 0, true); // external attrs
+    view.setUint32(cursor + 42, rec.offset, true);
+    out.set(rec.nameBytes, cursor + 46);
+    cursor += 46 + rec.nameBytes.length;
+  }
+
+  // End of central directory record
+  view.setUint32(cursor, 0x06054b50, true);
+  view.setUint16(cursor + 4, 0, true);
+  view.setUint16(cursor + 6, 0, true);
+  view.setUint16(cursor + 8, localRecords.length, true);
+  view.setUint16(cursor + 10, localRecords.length, true);
+  view.setUint32(cursor + 12, centralDirSize, true);
+  view.setUint32(cursor + 16, centralDirOffset, true);
+  view.setUint16(cursor + 20, 0, true);
+
+  return out;
+}
+
+/**
+ * Gera arquivo KMZ válido para Google Earth (`doc.kml` compactado em PKZIP Stored sem dependências externas).
+ */
+export function exportToKmz(options: {
+  waypoints?: readonly Waypoint[];
+  tracks?: readonly TrackSession[];
+  forecast?: NormalizedForecast | null;
+  historical?: HistoricalSeriesResult | null;
+  name?: string;
+}): Uint8Array {
+  const kmlText = exportToKml(options);
+  const kmlBytes = new TextEncoder().encode(kmlText);
+  return buildStoredZip([{ name: 'doc.kml', data: kmlBytes }]);
+}
+
+/**
  * Gera resumo operacional formatado em português e link `https://wa.me/?text=...` para compartilhamento rápido.
+ * Quando `hourIndex` não é informado, resolve automaticamente a hora local atual em `forecast.timezone`.
  */
 export function buildWhatsAppShareUrl(
   forecast: NormalizedForecast,
   locationName = 'Ponto de Missão',
+  hourIndex?: number,
 ): { text: string; url: string } {
-  const h0 = forecast.hours[0];
+  const targetIndex =
+    typeof hourIndex === 'number' && Number.isFinite(hourIndex) && forecast.hours.length > 0
+      ? Math.max(0, Math.min(forecast.hours.length - 1, Math.trunc(hourIndex)))
+      : findCurrentLocalHourIndex(forecast.hours, forecast.timezone);
+
+  const h = forecast.hours[targetIndex];
+  const localDateStr = h
+    ? formatLocalYMD(new Date(h.timestampUnix * 1000), forecast.timezone)
+    : 'N/D';
+  const localHourStr = h
+    ? formatLocalHourBadge(h.timestampUnix, forecast.timezone)
+    : 'N/D';
+
+  const tempStr =
+    typeof h?.temperature2mC.mean === 'number' && Number.isFinite(h.temperature2mC.mean)
+      ? `${h.temperature2mC.mean.toFixed(1)} °C`
+      : 'N/D';
+
+  const precipMmStr =
+    typeof h?.precipitationMm.mean === 'number' && Number.isFinite(h.precipitationMm.mean)
+      ? `${h.precipitationMm.mean.toFixed(1)} mm`
+      : 'N/D';
+  const precipProbStr =
+    typeof h?.precipitationProbabilityPct.mean === 'number' &&
+    Number.isFinite(h.precipitationProbabilityPct.mean)
+      ? `${Math.round(h.precipitationProbabilityPct.mean)}%`
+      : 'N/D';
+
   const windStr =
-    h0?.windSpeed10m.mean !== null && h0?.windSpeed10m.mean !== undefined
-      ? `${h0.windSpeed10m.mean.toFixed(1)} km/h`
+    typeof h?.windSpeed10m.mean === 'number' && Number.isFinite(h.windSpeed10m.mean)
+      ? `${h.windSpeed10m.mean.toFixed(1)} km/h`
+      : 'N/D';
+  const dirStr =
+    typeof h?.windDirection10m.degree === 'number' && Number.isFinite(h.windDirection10m.degree)
+      ? `${Math.round(h.windDirection10m.degree)}° (${formatCardinalDirection(h.windDirection10m.degree)})`
       : 'N/D';
   const gustStr =
-    h0?.windGusts10m.mean !== null && h0?.windGusts10m.mean !== undefined
-      ? `${h0.windGusts10m.mean.toFixed(1)} km/h`
+    typeof h?.windGusts10m.mean === 'number' && Number.isFinite(h.windGusts10m.mean)
+      ? `${h.windGusts10m.mean.toFixed(1)} km/h`
       : 'N/D';
-  const waveStr =
-    forecast.marineAvailable &&
-    h0?.marine?.waveHeight !== null &&
-    h0?.marine?.waveHeight !== undefined
-      ? `${h0.marine.waveHeight.toFixed(2)} m`
-      : 'Continental / Sem grade marinha';
+
+  let waveStr = 'Continental / Sem grade marinha';
+  if (forecast.marineAvailable && h?.marine) {
+    const waveHeightPart =
+      typeof h.marine.waveHeight === 'number' && Number.isFinite(h.marine.waveHeight)
+        ? `${h.marine.waveHeight.toFixed(2)} m`
+        : 'N/D';
+    const wavePeriodPart =
+      typeof h.marine.wavePeriod === 'number' && Number.isFinite(h.marine.wavePeriod)
+        ? `${h.marine.wavePeriod.toFixed(1)} s`
+        : null;
+    const waveDirPart =
+      typeof h.marine.waveDirection === 'number' && Number.isFinite(h.marine.waveDirection)
+        ? `${Math.round(h.marine.waveDirection)}° (${formatCardinalDirection(h.marine.waveDirection)})`
+        : null;
+    const mslPart =
+      typeof h.marine.seaLevelHeightMsl === 'number' && Number.isFinite(h.marine.seaLevelHeightMsl)
+        ? ` | Maré Est. (MSL ~8 km): ${h.marine.seaLevelHeightMsl >= 0 ? '+' : ''}${h.marine.seaLevelHeightMsl.toFixed(2)} m (não substitui DHN)`
+        : '';
+
+    waveStr = [waveHeightPart, wavePeriodPart, waveDirPart].filter(Boolean).join(' • ') + mslPart;
+  }
+
   const semLabel =
-    h0?.safeWindow === 'green'
+    h?.safeWindow === 'green'
       ? 'VERDE (Janela Segura)'
-      : h0?.safeWindow === 'amber'
+      : h?.safeWindow === 'amber'
         ? 'AMARELO (Atenção)'
         : 'VERMELHO (Crítico)';
 
   const text = [
     `*FieldCast — Boletim Operacional*`,
     `Local: ${locationName} (${forecast.latitude.toFixed(4)}, ${forecast.longitude.toFixed(4)})`,
+    `Horário Local: ${localDateStr} ${localHourStr} (${forecast.timezone})`,
     `Altitude DEM: ${forecast.elevationDemM} m`,
-    `Vento 10m: ${windStr} (Rajadas: ${gustStr})`,
-    `Ondas: ${waveStr}`,
+    `Temperatura: ${tempStr}`,
+    `Precipitação: ${precipMmStr} (${precipProbStr})`,
+    `Vento Médio 10m: ${windStr} (${dirStr}) | Rajadas 10m: ${gustStr}`,
+    `Ondas / Maré Est.: ${waveStr}`,
     `Confiabilidade: ${forecast.overallConfidence.total}/100 (${forecast.overallConfidence.badge.toUpperCase()})`,
     `Semáforo Operacional: ${semLabel}`,
   ].join('\n');

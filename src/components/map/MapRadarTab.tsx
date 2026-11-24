@@ -325,14 +325,17 @@ function MapViewportBridge({
     }
   }, [map, onViewportChange]);
 
+  const emitViewportRef = useRef(emitViewport);
+  emitViewportRef.current = emitViewport;
+
   useEffect(() => {
     const timer = window.setTimeout(() => {
       map.invalidateSize();
-      emitViewport();
+      emitViewportRef.current();
     }, 120);
-    emitViewport();
+    emitViewportRef.current();
     return () => window.clearTimeout(timer);
-  }, [map, emitViewport]);
+  }, [map]);
 
   useEffect(() => {
     const prev = prevCenterRef.current;
@@ -347,10 +350,20 @@ function MapViewportBridge({
         lon: centerLon,
         trigger: recenterTrigger,
       };
-      map.setView([centerLat, centerLon], map.getZoom(), { animate: true });
-      emitViewport();
+      const currentCenter =
+        typeof map.getCenter === 'function' ? map.getCenter() : null;
+      const alreadyNearCenter =
+        currentCenter &&
+        Math.abs(currentCenter.lat - centerLat) < 0.0002 &&
+        Math.abs(currentCenter.lng - centerLon) < 0.0002;
+      if (!alreadyNearCenter || triggerChanged) {
+        map.setView([centerLat, centerLon], map.getZoom(), {
+          animate: triggerChanged,
+        });
+      }
+      emitViewportRef.current();
     }
-  }, [centerLat, centerLon, recenterTrigger, map, emitViewport]);
+  }, [centerLat, centerLon, recenterTrigger, map]);
 
   useMapEvents({
     moveend() {
@@ -375,6 +388,7 @@ const MAP_MODEL_OPTIONS: ReadonlyArray<{
   { id: 'ecmwf_ifs025', label: 'ECMWF 9 km' },
   { id: 'gfs_seamless', label: 'GFS 13 km' },
   { id: 'icon_seamless', label: 'ICON 13 km' },
+  { id: 'gem_seamless', label: 'GEM 15 km' },
 ];
 
 const WEATHER_LAYER_OPTIONS: ReadonlyArray<{
@@ -421,6 +435,11 @@ function MapRadarTabContent({
 
   const [activeWeatherLayer, setActiveWeatherLayer] =
     useState<WeatherMapLayerId>('wind');
+  const lastActiveWeatherLayerRef =
+    useRef<Exclude<WeatherMapLayerId, 'none'>>('wind');
+  if (activeWeatherLayer !== 'none') {
+    lastActiveWeatherLayerRef.current = activeWeatherLayer;
+  }
   const [timelineMode, setTimelineMode] = useState<'rainviewer' | 'model'>('rainviewer');
   const [selectedModelHourIdx, setSelectedModelHourIdx] = useState<number>(() =>
     findCurrentLocalHourIndex(forecast?.hours, forecast?.timezone),
@@ -638,7 +657,7 @@ function MapRadarTabContent({
             setIsLoadingSpatialGrid(false);
           }
         });
-    }, 350);
+    }, 450);
 
     return () => {
       cancelled = true;
@@ -1240,6 +1259,36 @@ function MapRadarTabContent({
           <div className="flex flex-wrap items-center gap-2">
             <button
               type="button"
+              data-testid="toggle-radar-safety"
+              onClick={() => {
+                const isBareMap = !radarEnabled && activeWeatherLayer === 'none';
+                if (isBareMap) {
+                  setRadarEnabled(true);
+                  setActiveWeatherLayer(lastActiveWeatherLayerRef.current || 'wind');
+                } else {
+                  setIsPlayingRadar(false);
+                  setRadarEnabled(false);
+                  setActiveWeatherLayer('none');
+                }
+              }}
+              aria-pressed={!radarEnabled && activeWeatherLayer === 'none'}
+              className={`min-h-[44px] min-w-[44px] px-3 py-2 rounded-xl text-xs font-bold inline-flex items-center gap-1.5 border transition-colors ${
+                !radarEnabled && activeWeatherLayer === 'none'
+                  ? 'bg-amber-50 dark:bg-amber-950/60 border-amber-300 dark:border-amber-700 text-amber-800 dark:text-amber-200'
+                  : 'bg-white dark:bg-slate-800 border-sky-200 dark:border-slate-700 text-slate-700 dark:text-slate-200 hover:bg-sky-50'
+              }`}
+              title="Alternar rapidamente entre mapa limpo (sem radar/overlay) e camadas meteorológicas"
+            >
+              <XCircle className="w-4 h-4 text-sky-600" aria-hidden="true" />
+              <span>
+                {!radarEnabled && activeWeatherLayer === 'none'
+                  ? 'Camada Oculta (Ativar Radar)'
+                  : 'Desativar Radar'}
+              </span>
+            </button>
+
+            <button
+              type="button"
               onClick={() => setRadarEnabled((prev) => !prev)}
               aria-pressed={radarEnabled}
               className={`min-h-[44px] min-w-[44px] px-3 py-2 rounded-xl text-xs font-semibold inline-flex items-center gap-1.5 border transition-colors ${
@@ -1456,8 +1505,21 @@ function MapRadarTabContent({
               layerId={activeWeatherLayer}
               modelMode={mapModelMode}
               points={activeMapGridSlice?.points ?? []}
+              hourTimestamp={
+                activeMapGridSlice?.timestampUnix ??
+                currentForecastHour?.timestampUnix ??
+                null
+              }
               opacity={radarOpacity}
               animateFlow={true}
+              onLayerError={() => {
+                setActiveWeatherLayer('none');
+                onToast?.({
+                  type: 'warning',
+                  title: 'Camada meteorológica ocultada por segurança',
+                  message: 'O mapa base continua operando normalmente.',
+                });
+              }}
             />
 
             {/* Overlay de Radar Animado RainViewer */}

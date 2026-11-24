@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useRef, useState } from 'react';
+import React, { useMemo, useRef, useState } from 'react';
 import {
   ChevronDown,
   ChevronUp,
@@ -228,6 +228,7 @@ export const WindguruTable: React.FC<WindguruTableProps> = ({
     Partial<Record<ComparableVariableId, boolean>>
   >({});
   const [isInlineTuneOpen, setIsInlineTuneOpen] = useState<boolean>(false);
+  const tableScrollRef = useRef<HTMLDivElement | null>(null);
   const currentHourHeaderRef = useRef<HTMLTableCellElement | null>(null);
 
   const hours: EnsembleHour[] = useMemo(
@@ -247,15 +248,28 @@ export const WindguruTable: React.FC<WindguruTableProps> = ({
     ? formatLocalHourBadge(hours[resolvedCurrentHourIndex]!.timestampUnix, forecast.timezone)
     : null;
 
-  useEffect(() => {
-    const el = currentHourHeaderRef.current;
-    if (el && typeof el.scrollIntoView === 'function') {
-      el.scrollIntoView({ behavior: 'smooth', inline: 'center', block: 'nearest' });
+  const scrollCurrentHourHorizontally = () => {
+    const container = tableScrollRef.current;
+    const headerEl = currentHourHeaderRef.current;
+    if (!container || !headerEl) {
+      return;
     }
-  }, [forecast.locationKey, resolvedCurrentHourIndex]);
+    const targetLeft = Math.max(
+      0,
+      headerEl.offsetLeft - container.clientWidth / 2 + headerEl.offsetWidth / 2,
+    );
+    if (typeof container.scrollTo === 'function') {
+      container.scrollTo({ left: targetLeft, behavior: 'smooth' });
+    } else {
+      container.scrollLeft = targetLeft;
+    }
+  };
 
   const isNative =
-    viewMode === 'ecmwf_ifs025' || viewMode === 'gfs_seamless' || viewMode === 'icon_seamless';
+    viewMode === 'ecmwf_ifs025' ||
+    viewMode === 'gfs_seamless' ||
+    viewMode === 'icon_seamless' ||
+    viewMode === 'gem_seamless';
   const nativeList: NativeModelHour[] = isNative
     ? (forecast.nativeByModel[viewMode] ?? []).slice(0, hours.length)
     : [];
@@ -464,10 +478,7 @@ export const WindguruTable: React.FC<WindguruTableProps> = ({
               type="button"
               onClick={() => {
                 onSelectHourIndex(resolvedCurrentHourIndex);
-                const el = currentHourHeaderRef.current;
-                if (el && typeof el.scrollIntoView === 'function') {
-                  el.scrollIntoView({ behavior: 'smooth', inline: 'center', block: 'nearest' });
-                }
+                scrollCurrentHourHorizontally();
               }}
               className="min-h-[28px] px-2.5 py-0.5 rounded-full text-[11px] font-bold bg-amber-100 hover:bg-amber-200 dark:bg-amber-950/60 dark:hover:bg-amber-900/70 text-amber-900 dark:text-amber-200 border border-amber-300 dark:border-amber-700 inline-flex items-center gap-1 transition-colors"
             >
@@ -574,7 +585,10 @@ export const WindguruTable: React.FC<WindguruTableProps> = ({
       )}
 
       {/* Scrollable Table Container */}
-      <div className="overflow-x-auto scrollbar-thin rounded-b-2xl bg-white dark:bg-[#132a47]">
+      <div
+        ref={tableScrollRef}
+        className="overflow-x-auto scrollbar-thin rounded-b-2xl bg-white dark:bg-[#132a47]"
+      >
         <table className="w-full border-collapse text-center text-[11px] select-none">
           <thead>
             {/* Day Header Row */}
