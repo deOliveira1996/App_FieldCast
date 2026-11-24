@@ -62,6 +62,7 @@ import {
 } from './types/schemas';
 import {
   DEFAULT_SAFE_WINDOW_THRESHOLDS,
+  type ForecastViewMode,
   type NormalizedForecast,
   type SafeWindowThresholds,
 } from './types/weather';
@@ -273,6 +274,7 @@ export function App(): React.ReactElement {
   const { toasts, addToast, dismissToast } = useToast();
 
   const [activeTab, setActiveTab] = useState<AppTabId>('forecast');
+  const [viewMode, setViewMode] = useState<ForecastViewMode>('fieldcast');
   const [isLocationsModalOpen, setIsLocationsModalOpen] = useState<boolean>(false);
 
   const [thresholds, setThresholds] = useState<SafeWindowThresholds>(() =>
@@ -909,6 +911,8 @@ export function App(): React.ReactElement {
               activeLocation={activeLocation}
               isLoading={isRefreshingForecast && !forecast}
               isDark={isDark}
+              viewMode={viewMode}
+              onViewModeChange={setViewMode}
               thresholds={thresholds}
               onSaveThresholds={handleSaveThresholds}
               onOpenLocationsModal={() => setIsLocationsModalOpen(true)}
@@ -931,6 +935,8 @@ export function App(): React.ReactElement {
               waypoints={waypoints}
               tracks={tracks}
               isDark={isDark}
+              viewMode={viewMode}
+              onViewModeChange={setViewMode}
               onSelectLocation={handleSelectLocation}
               onSaveLocation={handleSaveLocation}
               onRadarStateChange={() => {

@@ -77,6 +77,26 @@ export const OpenMeteoForecastHourlySchema = z
     cloud_cover_low_icon_seamless: NullableNumberArraySchema.optional(),
     cloud_cover_mid_icon_seamless: NullableNumberArraySchema.optional(),
     cloud_cover_high_icon_seamless: NullableNumberArraySchema.optional(),
+
+    // CMC Canada GEM Seamless (gem_seamless)
+    wind_speed_10m_gem_seamless: NullableNumberArraySchema.optional(),
+    wind_speed_80m_gem_seamless: NullableNumberArraySchema.optional(),
+    wind_speed_100m_gem_seamless: NullableNumberArraySchema.optional(),
+    wind_speed_120m_gem_seamless: NullableNumberArraySchema.optional(),
+    wind_direction_10m_gem_seamless: NullableNumberArraySchema.optional(),
+    wind_direction_80m_gem_seamless: NullableNumberArraySchema.optional(),
+    wind_direction_100m_gem_seamless: NullableNumberArraySchema.optional(),
+    wind_direction_120m_gem_seamless: NullableNumberArraySchema.optional(),
+    wind_gusts_10m_gem_seamless: NullableNumberArraySchema.optional(),
+    precipitation_gem_seamless: NullableNumberArraySchema.optional(),
+    precipitation_probability_gem_seamless: NullableNumberArraySchema.optional(),
+    temperature_2m_gem_seamless: NullableNumberArraySchema.optional(),
+    dew_point_2m_gem_seamless: NullableNumberArraySchema.optional(),
+    visibility_gem_seamless: NullableNumberArraySchema.optional(),
+    surface_pressure_gem_seamless: NullableNumberArraySchema.optional(),
+    cloud_cover_low_gem_seamless: NullableNumberArraySchema.optional(),
+    cloud_cover_mid_gem_seamless: NullableNumberArraySchema.optional(),
+    cloud_cover_high_gem_seamless: NullableNumberArraySchema.optional(),
   })
   .passthrough();
 
@@ -112,6 +132,7 @@ export const OpenMeteoMarineHourlySchema = z
     swell_wave_direction: NullableNumberArraySchema.optional(),
     ocean_current_velocity: NullableNumberArraySchema.optional(),
     ocean_current_direction: NullableNumberArraySchema.optional(),
+    sea_level_height_msl: NullableNumberArraySchema.optional(),
   })
   .passthrough();
 
@@ -216,3 +237,31 @@ export const SafeWindowThresholdsSchema = z.object({
   maxWaveM: z.number().min(0.1).max(20),
   maxPrecipProbPct: z.number().min(0).max(100),
 });
+
+/**
+ * Schema da Open-Meteo Historical Weather Archive API (ERA5 / reanálise horária).
+ */
+export const OpenMeteoArchiveResponseSchema = z
+  .object({
+    latitude: z.number(),
+    longitude: z.number(),
+    generationtime_ms: z.number().optional(),
+    utc_offset_seconds: z.number().optional().default(-10800),
+    timezone: z.string().optional().default('America/Sao_Paulo'),
+    elevation: z.number().optional().default(0),
+    hourly: z
+      .object({
+        time: z.array(z.number()),
+        temperature_2m: NullableNumberArraySchema.optional(),
+        dew_point_2m: NullableNumberArraySchema.optional(),
+        wind_speed_10m: NullableNumberArraySchema.optional(),
+        wind_gusts_10m: NullableNumberArraySchema.optional(),
+        wind_direction_10m: NullableNumberArraySchema.optional(),
+        precipitation: NullableNumberArraySchema.optional(),
+        surface_pressure: NullableNumberArraySchema.optional(),
+      })
+      .passthrough(),
+  })
+  .passthrough();
+
+export type OpenMeteoArchiveResponse = z.infer<typeof OpenMeteoArchiveResponseSchema>;

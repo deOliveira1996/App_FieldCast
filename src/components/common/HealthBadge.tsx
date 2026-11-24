@@ -38,6 +38,13 @@ const LEVEL_CONFIG: Record<
     badgeStyle:
       'border-rose-300/50 bg-rose-600/30 text-white hover:bg-rose-600/40',
   },
+  unverified: {
+    label: 'Parcial',
+    shortLabel: 'Parcial',
+    dotColor: 'bg-sky-300',
+    badgeStyle:
+      'border-white/25 bg-white/15 text-white hover:bg-white/25',
+  },
 };
 
 export const HealthBadge: React.FC<HealthBadgeProps> = ({ snapshot, onClick, className = '' }) => {

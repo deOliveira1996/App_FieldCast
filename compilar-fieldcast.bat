@@ -13,24 +13,31 @@ if %ERRORLEVEL% NEQ 0 (
     )
 )
 
-echo [1/4] Gerando icones PWA e assets Capacitor...
+echo [1/5] Gerando icones PWA, assets e mipmaps Android...
 call npm run icons:generate
 if %ERRORLEVEL% NEQ 0 goto :error
 
 echo.
-echo [2/4] Verificando tipagem TypeScript (tsc --noEmit)...
+echo [2/5] Verificando tipagem TypeScript (tsc --noEmit)...
 call npx tsc --noEmit
 if %ERRORLEVEL% NEQ 0 goto :error
 
 echo.
-echo [3/4] Executando suite de testes unitarios (Vitest)...
+echo [3/5] Executando suite de testes unitarios (Vitest)...
 call npm run test
 if %ERRORLEVEL% NEQ 0 goto :error
 
 echo.
-echo [4/4] Gerando bundle de producao PWA (dist/)...
+echo [4/5] Gerando bundle de producao PWA (dist/)...
 call npm run build
 if %ERRORLEVEL% NEQ 0 goto :error
+
+if exist "android" (
+    echo.
+    echo [5/5] Sincronizando projeto Capacitor Android...
+    call npx cap sync android
+    if %ERRORLEVEL% NEQ 0 goto :error
+)
 
 echo.
 echo ========================================================

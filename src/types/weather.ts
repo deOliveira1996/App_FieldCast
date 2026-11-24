@@ -1,4 +1,9 @@
-export const WEATHER_MODELS = ['ecmwf_ifs025', 'gfs_seamless', 'icon_seamless'] as const;
+export const WEATHER_MODELS = [
+  'ecmwf_ifs025',
+  'gfs_seamless',
+  'icon_seamless',
+  'gem_seamless',
+] as const;
 
 export type WeatherModelId = (typeof WEATHER_MODELS)[number];
 
@@ -77,6 +82,7 @@ export interface MarineHour {
   swellWaveDirection: number | null;
   oceanCurrentVelocity: number | null;
   oceanCurrentDirection: number | null;
+  seaLevelHeightMsl?: number | null;
 }
 
 export interface ConfidenceBreakdown {

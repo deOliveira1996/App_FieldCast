@@ -1,4 +1,4 @@
-export type HealthLevel = 'healthy' | 'degraded' | 'down';
+export type HealthLevel = 'healthy' | 'degraded' | 'down' | 'unverified';
 
 export type MonitoredServiceId =
   | 'open_meteo_forecast'

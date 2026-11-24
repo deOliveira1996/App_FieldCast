@@ -46,18 +46,21 @@ export const MODEL_SHORT_LABELS: Record<WeatherModelId, string> = {
   ecmwf_ifs025: 'ECMWF 9 km',
   gfs_seamless: 'GFS 13 km',
   icon_seamless: 'ICON 13 km',
+  gem_seamless: 'GEM 15 km',
 };
 
 export const MODEL_DISPLAY_LABELS: Record<WeatherModelId, string> = {
   ecmwf_ifs025: 'ECMWF IFS 0.25°',
   gfs_seamless: 'NOAA GFS',
   icon_seamless: 'DWD ICON',
+  gem_seamless: 'CMC GEM',
 };
 
 export const MODEL_COLORS: Record<WeatherModelId, string> = {
   ecmwf_ifs025: '#0080cd',
   gfs_seamless: '#10b981',
   icon_seamless: '#6366f1',
+  gem_seamless: '#f59e0b',
 };
 
 export const COMPARABLE_VARIABLES: ReadonlyArray<ComparableVariableDefinition> = [

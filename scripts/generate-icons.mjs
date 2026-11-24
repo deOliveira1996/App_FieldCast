@@ -51,6 +51,68 @@ const foregroundSvg = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 
   </g>
 </svg>`;
 
+const androidResDir = path.join(rootDir, 'android', 'app', 'src', 'main', 'res');
+
+const ANDROID_DENSITIES = [
+  { folder: 'mipmap-mdpi', launcherPx: 48, foregroundPx: 108 },
+  { folder: 'mipmap-hdpi', launcherPx: 72, foregroundPx: 162 },
+  { folder: 'mipmap-xhdpi', launcherPx: 96, foregroundPx: 216 },
+  { folder: 'mipmap-xxhdpi', launcherPx: 144, foregroundPx: 324 },
+  { folder: 'mipmap-xxxhdpi', launcherPx: 192, foregroundPx: 432 },
+];
+
+async function buildRoundPng(squareBuffer, sizePx) {
+  const circleMask = Buffer.from(
+    `<svg xmlns="http://www.w3.org/2000/svg" width="${sizePx}" height="${sizePx}" viewBox="0 0 ${sizePx} ${sizePx}"><circle cx="${sizePx / 2}" cy="${sizePx / 2}" r="${sizePx / 2}" fill="#ffffff"/></svg>`,
+  );
+  return sharp(squareBuffer)
+    .resize(sizePx, sizePx)
+    .composite([{ input: circleMask, blend: 'dest-in' }])
+    .png()
+    .toBuffer();
+}
+
+async function generateAndroidMipmaps(iconOnlyBuffer, fgBuffer) {
+  let resExists = false;
+  try {
+    const stat = await fs.stat(androidResDir);
+    resExists = stat.isDirectory();
+  } catch {
+    resExists = false;
+  }
+  if (!resExists) {
+    return;
+  }
+
+  for (const density of ANDROID_DENSITIES) {
+    const targetDir = path.join(androidResDir, density.folder);
+    await fs.mkdir(targetDir, { recursive: true });
+
+    const launcherPng = await sharp(iconOnlyBuffer)
+      .resize(density.launcherPx, density.launcherPx)
+      .png()
+      .toBuffer();
+    const roundPng = await buildRoundPng(iconOnlyBuffer, density.launcherPx);
+    const fgPng = await sharp(fgBuffer)
+      .resize(density.foregroundPx, density.foregroundPx)
+      .png()
+      .toBuffer();
+
+    await fs.writeFile(path.join(targetDir, 'ic_launcher.png'), launcherPng);
+    await fs.writeFile(path.join(targetDir, 'ic_launcher_round.png'), roundPng);
+    await fs.writeFile(path.join(targetDir, 'ic_launcher_foreground.png'), fgPng);
+  }
+
+  const valuesDir = path.join(androidResDir, 'values');
+  await fs.mkdir(valuesDir, { recursive: true });
+  await fs.writeFile(
+    path.join(valuesDir, 'ic_launcher_background.xml'),
+    `<?xml version="1.0" encoding="utf-8"?>\n<resources>\n    <color name="ic_launcher_background">#0F172A</color>\n</resources>\n`,
+    'utf8',
+  );
+  console.log('[FieldCast] Android mipmap launcher icons & adaptive background updated.');
+}
+
 async function generateIcons() {
   await fs.mkdir(publicIconsDir, { recursive: true });
   await fs.mkdir(assetsDir, { recursive: true });
@@ -84,11 +146,9 @@ async function generateIcons() {
   await fs.writeFile(path.join(publicIconsDir, 'maskable-512x512.png'), maskable512);
   await fs.writeFile(path.join(publicIconsDir, 'maskable-icon-512x512.png'), maskable512);
 
-  // 3. Capacitor Android assets (1024x1024)
-  await sharp(svgBuffer)
-    .resize(1024, 1024)
-    .png()
-    .toFile(path.join(assetsDir, 'icon-only.png'));
+  // 3. Capacitor Android assets (1024x1024) + Android mipmaps
+  const iconOnlyBuffer = await sharp(svgBuffer).resize(1024, 1024).png().toBuffer();
+  await fs.writeFile(path.join(assetsDir, 'icon-only.png'), iconOnlyBuffer);
 
   await sharp(fgBuffer)
     .resize(1024, 1024)
@@ -106,7 +166,9 @@ async function generateIcons() {
     .png()
     .toFile(path.join(assetsDir, 'icon-background.png'));
 
-  console.log('[FieldCast] Icons generated successfully in public/icons/ and assets/');
+  await generateAndroidMipmaps(iconOnlyBuffer, fgBuffer);
+
+  console.log('[FieldCast] Icons generated successfully in public/icons/, assets/, and android/res/');
 }
 
 generateIcons().catch((err) => {

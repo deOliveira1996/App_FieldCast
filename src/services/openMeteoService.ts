@@ -76,6 +76,7 @@ export const MARINE_HOURLY_VARIABLES = [
   'swell_wave_direction',
   'ocean_current_velocity',
   'ocean_current_direction',
+  'sea_level_height_msl',
 ] as const;
 
 /**
@@ -161,6 +162,7 @@ function extractMarineHourAt(
     swellWaveDirection: pick(h.swell_wave_direction),
     oceanCurrentVelocity: pick(h.ocean_current_velocity),
     oceanCurrentDirection: pick(h.ocean_current_direction),
+    seaLevelHeightMsl: pick(h.sea_level_height_msl),
   };
 }
 
@@ -207,6 +209,7 @@ export function normalizeOpenMeteoForecast(params: NormalizeForecastParams): Nor
     ecmwf_ifs025: extractNativeModelSeries(timesUnix, 'ecmwf_ifs025', hourlyRecord),
     gfs_seamless: extractNativeModelSeries(timesUnix, 'gfs_seamless', hourlyRecord),
     icon_seamless: extractNativeModelSeries(timesUnix, 'icon_seamless', hourlyRecord),
+    gem_seamless: extractNativeModelSeries(timesUnix, 'gem_seamless', hourlyRecord),
   };
 
   // Mapeia índice de timestamps marinhos para sincronizar pelo timestampUnix
@@ -223,6 +226,7 @@ export function normalizeOpenMeteoForecast(params: NormalizeForecastParams): Nor
       ecmwf_ifs025: nativeByModel.ecmwf_ifs025[idx]?.surfacePressure ?? null,
       gfs_seamless: nativeByModel.gfs_seamless[idx]?.surfacePressure ?? null,
       icon_seamless: nativeByModel.icon_seamless[idx]?.surfacePressure ?? null,
+      gem_seamless: nativeByModel.gem_seamless[idx]?.surfacePressure ?? null,
     }),
   );
   const meanPressureSeries = surfacePressureStats.map((s) => s.mean);
@@ -232,26 +236,31 @@ export function normalizeOpenMeteoForecast(params: NormalizeForecastParams): Nor
     const ecmwf = nativeByModel.ecmwf_ifs025[idx]!;
     const gfs = nativeByModel.gfs_seamless[idx]!;
     const icon = nativeByModel.icon_seamless[idx]!;
+    const gem = nativeByModel.gem_seamless[idx]!;
 
     const windSpeed10m = computeModelScalarStat({
       ecmwf_ifs025: ecmwf.windSpeed10m,
       gfs_seamless: gfs.windSpeed10m,
       icon_seamless: icon.windSpeed10m,
+      gem_seamless: gem.windSpeed10m,
     });
     const windSpeed80m = computeModelScalarStat({
       ecmwf_ifs025: ecmwf.windSpeed80m,
       gfs_seamless: gfs.windSpeed80m,
       icon_seamless: icon.windSpeed80m,
+      gem_seamless: gem.windSpeed80m,
     });
     const windSpeed100m = computeModelScalarStat({
       ecmwf_ifs025: ecmwf.windSpeed100m,
       gfs_seamless: gfs.windSpeed100m,
       icon_seamless: icon.windSpeed100m,
+      gem_seamless: gem.windSpeed100m,
     });
     const windSpeed120m = computeModelScalarStat({
       ecmwf_ifs025: ecmwf.windSpeed120m,
       gfs_seamless: gfs.windSpeed120m,
       icon_seamless: icon.windSpeed120m,
+      gem_seamless: gem.windSpeed120m,
     });
 
     const windDirection10m = computeModelCircularStat(
@@ -259,11 +268,13 @@ export function normalizeOpenMeteoForecast(params: NormalizeForecastParams): Nor
         ecmwf_ifs025: ecmwf.windDirection10m,
         gfs_seamless: gfs.windDirection10m,
         icon_seamless: icon.windDirection10m,
+        gem_seamless: gem.windDirection10m,
       },
       {
         ecmwf_ifs025: ecmwf.windSpeed10m,
         gfs_seamless: gfs.windSpeed10m,
         icon_seamless: icon.windSpeed10m,
+        gem_seamless: gem.windSpeed10m,
       },
     );
     const windDirection80m = computeModelCircularStat(
@@ -271,11 +282,13 @@ export function normalizeOpenMeteoForecast(params: NormalizeForecastParams): Nor
         ecmwf_ifs025: ecmwf.windDirection80m,
         gfs_seamless: gfs.windDirection80m,
         icon_seamless: icon.windDirection80m,
+        gem_seamless: gem.windDirection80m,
       },
       {
         ecmwf_ifs025: ecmwf.windSpeed80m,
         gfs_seamless: gfs.windSpeed80m,
         icon_seamless: icon.windSpeed80m,
+        gem_seamless: gem.windSpeed80m,
       },
     );
     const windDirection100m = computeModelCircularStat(
@@ -283,11 +296,13 @@ export function normalizeOpenMeteoForecast(params: NormalizeForecastParams): Nor
         ecmwf_ifs025: ecmwf.windDirection100m,
         gfs_seamless: gfs.windDirection100m,
         icon_seamless: icon.windDirection100m,
+        gem_seamless: gem.windDirection100m,
       },
       {
         ecmwf_ifs025: ecmwf.windSpeed100m,
         gfs_seamless: gfs.windSpeed100m,
         icon_seamless: icon.windSpeed100m,
+        gem_seamless: gem.windSpeed100m,
       },
     );
     const windDirection120m = computeModelCircularStat(
@@ -295,11 +310,13 @@ export function normalizeOpenMeteoForecast(params: NormalizeForecastParams): Nor
         ecmwf_ifs025: ecmwf.windDirection120m,
         gfs_seamless: gfs.windDirection120m,
         icon_seamless: icon.windDirection120m,
+        gem_seamless: gem.windDirection120m,
       },
       {
         ecmwf_ifs025: ecmwf.windSpeed120m,
         gfs_seamless: gfs.windSpeed120m,
         icon_seamless: icon.windSpeed120m,
+        gem_seamless: gem.windSpeed120m,
       },
     );
 
@@ -308,30 +325,35 @@ export function normalizeOpenMeteoForecast(params: NormalizeForecastParams): Nor
       ecmwf_ifs025: ecmwf.windGusts10m,
       gfs_seamless: gfs.windGusts10m,
       icon_seamless: icon.windGusts10m,
+      gem_seamless: gem.windGusts10m,
     });
 
     const precipitationMm = computeModelScalarStat({
       ecmwf_ifs025: ecmwf.precipitation,
       gfs_seamless: gfs.precipitation,
       icon_seamless: icon.precipitation,
+      gem_seamless: gem.precipitation,
     });
 
     const precipitationProbabilityPct = computeModelScalarStat({
       ecmwf_ifs025: ecmwf.precipitationProbability,
       gfs_seamless: gfs.precipitationProbability,
       icon_seamless: icon.precipitationProbability,
+      gem_seamless: gem.precipitationProbability,
     });
 
     const temperature2mC = computeModelScalarStat({
       ecmwf_ifs025: ecmwf.temperature2m,
       gfs_seamless: gfs.temperature2m,
       icon_seamless: icon.temperature2m,
+      gem_seamless: gem.temperature2m,
     });
 
     const dewPoint2mC = computeModelScalarStat({
       ecmwf_ifs025: ecmwf.dewPoint2m,
       gfs_seamless: gfs.dewPoint2m,
       icon_seamless: icon.dewPoint2m,
+      gem_seamless: gem.dewPoint2m,
     });
 
     const dewPointSpreadC = computeDewPointSpread(temperature2mC.mean, dewPoint2mC.mean);
@@ -340,6 +362,7 @@ export function normalizeOpenMeteoForecast(params: NormalizeForecastParams): Nor
       ecmwf_ifs025: ecmwf.visibility,
       gfs_seamless: gfs.visibility,
       icon_seamless: icon.visibility,
+      gem_seamless: gem.visibility,
     });
 
     const surfacePressureHpa = surfacePressureStats[idx]!;
@@ -351,16 +374,19 @@ export function normalizeOpenMeteoForecast(params: NormalizeForecastParams): Nor
         ecmwf_ifs025: ecmwf.cloudCoverLow,
         gfs_seamless: gfs.cloudCoverLow,
         icon_seamless: icon.cloudCoverLow,
+        gem_seamless: gem.cloudCoverLow,
       },
       midByModel: {
         ecmwf_ifs025: ecmwf.cloudCoverMid,
         gfs_seamless: gfs.cloudCoverMid,
         icon_seamless: icon.cloudCoverMid,
+        gem_seamless: gem.cloudCoverMid,
       },
       highByModel: {
         ecmwf_ifs025: ecmwf.cloudCoverHigh,
         gfs_seamless: gfs.cloudCoverHigh,
         icon_seamless: icon.cloudCoverHigh,
+        gem_seamless: gem.cloudCoverHigh,
       },
     });
 
@@ -383,7 +409,7 @@ export function normalizeOpenMeteoForecast(params: NormalizeForecastParams): Nor
       }
     }
 
-    const activeAtmosphericModels = [ecmwf, gfs, icon].filter(
+    const activeAtmosphericModels = [ecmwf, gfs, icon, gem].filter(
       (m) => m.windSpeed10m !== null || m.temperature2m !== null || m.surfacePressure !== null,
     ).length;
 

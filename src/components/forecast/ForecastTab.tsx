@@ -39,6 +39,8 @@ export interface ForecastTabProps {
   savedLocations?: SavedLocation[];
   isLoading?: boolean;
   isDark?: boolean;
+  viewMode?: ForecastViewMode;
+  onViewModeChange?: (mode: ForecastViewMode) => void;
   thresholds?: SafeWindowThresholds;
   onSaveThresholds?: (nextThresholds: SafeWindowThresholds) => void | Promise<void>;
   onSelectLocation?: (coords: {
@@ -77,6 +79,8 @@ export const ForecastTab: React.FC<ForecastTabProps> = ({
   savedLocations: propSavedLocations,
   isLoading = false,
   isDark = false,
+  viewMode: propViewMode,
+  onViewModeChange: propOnViewModeChange,
   thresholds,
   onSaveThresholds,
   onSelectLocation: propOnSelectLocation,
@@ -93,7 +97,15 @@ export const ForecastTab: React.FC<ForecastTabProps> = ({
   const resolvedOnRequestGps = propOnRequestGps ?? locationCtx?.onRequestGps;
   const resolvedSavedLocations = propSavedLocations ?? locationCtx?.savedLocations ?? [];
 
-  const [viewMode, setViewMode] = useState<ForecastViewMode>('fieldcast');
+  const [internalViewMode, setInternalViewMode] = useState<ForecastViewMode>('fieldcast');
+  const viewMode = propViewMode ?? internalViewMode;
+  const setViewMode = useCallback(
+    (nextMode: ForecastViewMode) => {
+      setInternalViewMode(nextMode);
+      propOnViewModeChange?.(nextMode);
+    },
+    [propOnViewModeChange],
+  );
   const [showInterpolatedProfile, setShowInterpolatedProfile] = useState<boolean>(false);
   const [horizonHours, setHorizonHours] = useState<ForecastHorizonHours>(168);
   const currentLocalHourIndex = useCurrentLocalHourIndex(forecast?.hours, forecast?.timezone);
@@ -228,6 +240,9 @@ export const ForecastTab: React.FC<ForecastTabProps> = ({
           <ForecastPinMiniMap
             activeLocation={activeLocation}
             savedLocations={resolvedSavedLocations}
+            forecast={forecast}
+            viewMode={viewMode}
+            selectedHourIndex={safeHourIndex}
             currentWindSpeedKmh={selectedHour?.windSpeed10m.mean ?? null}
             currentWindDirectionDeg={selectedHour?.windDirection10m.degree ?? null}
             onSelectLocation={resolvedOnSelectLocation}

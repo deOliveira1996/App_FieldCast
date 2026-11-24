@@ -57,6 +57,11 @@ const HEALTH_BADGE_MAP: Record<
     bgClass: 'bg-red-500/15 text-red-900 dark:text-red-300 border border-red-500/30',
     Icon: XCircle,
   },
+  unverified: {
+    label: 'Sob Demanda',
+    bgClass: 'bg-sky-500/15 text-sky-900 dark:text-sky-200 border border-sky-500/30',
+    Icon: Clock,
+  },
 };
 
 const PLATFORM_LABELS: Record<PlatformKind, string> = {

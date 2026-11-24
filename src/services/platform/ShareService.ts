@@ -43,6 +43,10 @@ export function getMimeTypeForFormat(format: ExportFormat): string {
       return 'application/gpx+xml;charset=utf-8';
     case 'geojson':
       return 'application/geo+json;charset=utf-8';
+    case 'kml':
+      return 'application/vnd.google-earth.kml+xml;charset=utf-8';
+    case 'kmz':
+      return 'application/vnd.google-earth.kmz';
   }
 }
 
@@ -56,6 +60,10 @@ export function getFileExtensionForFormat(format: ExportFormat): string {
       return 'gpx';
     case 'geojson':
       return 'geojson';
+    case 'kml':
+      return 'kml';
+    case 'kmz':
+      return 'kmz';
   }
 }
 

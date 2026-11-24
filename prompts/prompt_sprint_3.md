@@ -1,3 +1,5 @@
+> **[ARQUIVO HISTÓRICO LEGADO]** Substituído pelo pipeline paralelo `prompt_sprint_3a.md` + `prompt_sprint_3b.md` + `prompt_sprint_3c.md` e pelas skills modulares em `.agents/skills/`. Mantido apenas para referência.
+
 Siga `@.agent/rules/fieldcast-standards.md` e `@docs/SPEC.md`.
 Conecte as camadas da Sprint 2A (Core/Serviços/Dexie) e Sprint 2B (UI) e implemente todas as funcionalidades de campo:
 

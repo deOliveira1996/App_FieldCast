@@ -24,6 +24,7 @@ import {
   Bookmark,
   Camera,
   CheckCircle2,
+  CloudRain,
   Compass,
   Crosshair,
   Download,
@@ -42,10 +43,14 @@ import {
   SkipForward,
   Sparkles,
   Square,
+  Thermometer,
   Trash2,
+  Waves,
+  Wind,
   XCircle,
 } from 'lucide-react';
 import { ModuleErrorBoundary } from '../common';
+import { WeatherModelOverlayLayer } from './WeatherModelOverlayLayer';
 import {
   createWindyFlagPinIcon,
   degreesToCardinal,
@@ -77,6 +82,16 @@ import {
   type RadarAnimationFrame,
   type RainViewerRadarState,
 } from '../../services/rainViewerService';
+import {
+  buildOfflineFallbackSpatialGrid,
+  extractGridSnapshotAtHour,
+  fetchOpenMeteoSpatialGrid,
+  getLayerLegendSpec,
+  getModelModeDisplayName,
+  type MapModelMode,
+  type SpatialGridForecast,
+  type WeatherMapLayerId,
+} from '../../services/weatherGridService';
 import type {
   ActiveCoordinates,
   OfflineMissionBounds,
@@ -85,7 +100,15 @@ import type {
   Waypoint,
 } from '../../types/field';
 import type { ErrorLogRecord, ToastMessage } from '../../types/health';
-import type { NormalizedForecast, SafeWindowStatus } from '../../types/weather';
+import type {
+  ForecastViewMode,
+  NormalizedForecast,
+  SafeWindowStatus,
+} from '../../types/weather';
+import {
+  findCurrentLocalHourIndex,
+  formatLocalHourBadge,
+} from '../../utils/localTimeHour';
 import { safeAction } from '../../utils/safeAction';
 
 export interface MapRadarTabProps {
@@ -95,6 +118,8 @@ export interface MapRadarTabProps {
   waypoints?: Waypoint[];
   tracks?: TrackSession[];
   isDark?: boolean;
+  viewMode?: ForecastViewMode;
+  onViewModeChange?: (mode: ForecastViewMode) => void;
   onSelectLocation?: (coords: {
     latitude: number;
     longitude: number;
@@ -342,6 +367,28 @@ function MapViewportBridge({
   return null;
 }
 
+const MAP_MODEL_OPTIONS: ReadonlyArray<{
+  id: MapModelMode;
+  label: string;
+}> = [
+  { id: 'fieldcast', label: 'FieldCast (Ensemble)' },
+  { id: 'ecmwf_ifs025', label: 'ECMWF 9 km' },
+  { id: 'gfs_seamless', label: 'GFS 13 km' },
+  { id: 'icon_seamless', label: 'ICON 13 km' },
+];
+
+const WEATHER_LAYER_OPTIONS: ReadonlyArray<{
+  id: WeatherMapLayerId;
+  label: string;
+  Icon: React.ComponentType<{ className?: string }>;
+}> = [
+  { id: 'wind', label: 'Vento + Vetores', Icon: Wind },
+  { id: 'rain', label: 'Chuva (Modelo)', Icon: CloudRain },
+  { id: 'temperature', label: 'Temperatura', Icon: Thermometer },
+  { id: 'waves', label: 'Ondas (Mar)', Icon: Waves },
+  { id: 'none', label: 'Só Radar/Mapa', Icon: Layers },
+];
+
 function MapRadarTabContent({
   activeLocation,
   forecast,
@@ -349,6 +396,8 @@ function MapRadarTabContent({
   waypoints: waypointsProp,
   tracks: tracksProp,
   isDark = false,
+  viewMode,
+  onViewModeChange,
   onSelectLocation,
   onSaveLocation,
   onRadarStateChange,
@@ -359,6 +408,28 @@ function MapRadarTabContent({
 
   // Estilo de Mapa Base (100% gratuito, sem API Key)
   const [baseStyle, setBaseStyle] = useState<MapBaseStyle>('osm');
+
+  // Modelo Meteorológico e Camada Visual no Mapa
+  const [internalMapModel, setInternalMapModel] = useState<MapModelMode>('fieldcast');
+  const mapModelMode: MapModelMode =
+    viewMode && viewMode !== 'spaghetti' ? viewMode : internalMapModel;
+
+  const handleMapModelSelect = (nextModel: MapModelMode) => {
+    setInternalMapModel(nextModel);
+    onViewModeChange?.(nextModel);
+  };
+
+  const [activeWeatherLayer, setActiveWeatherLayer] =
+    useState<WeatherMapLayerId>('wind');
+  const [timelineMode, setTimelineMode] = useState<'rainviewer' | 'model'>('rainviewer');
+  const [selectedModelHourIdx, setSelectedModelHourIdx] = useState<number>(() =>
+    findCurrentLocalHourIndex(forecast?.hours, forecast?.timezone),
+  );
+  const [liveSpatialGrid, setLiveSpatialGrid] = useState<SpatialGridForecast | null>(
+    null,
+  );
+  const [isLoadingSpatialGrid, setIsLoadingSpatialGrid] = useState<boolean>(false);
+  const [radarTileErrorCount, setRadarTileErrorCount] = useState<number>(0);
 
   // Modo Pin estilo Windy (quando ativo, clicar no mapa já move o Pin e carrega a previsão)
   const [instantWindyPin, setInstantWindyPin] = useState<boolean>(true);
@@ -394,6 +465,20 @@ function MapRadarTabContent({
     west: activeLocation.longitude - 0.045,
     zoom: 12,
   });
+  const handleViewportChange = useCallback((next: ViewportSnapshot) => {
+    setViewport((prev) => {
+      if (
+        prev.zoom === next.zoom &&
+        Math.abs(prev.north - next.north) < 1e-5 &&
+        Math.abs(prev.south - next.south) < 1e-5 &&
+        Math.abs(prev.east - next.east) < 1e-5 &&
+        Math.abs(prev.west - next.west) < 1e-5
+      ) {
+        return prev;
+      }
+      return next;
+    });
+  }, []);
   const [inspectedPoint, setInspectedPoint] = useState<InspectedCoordinate | null>(
     null,
   );
@@ -477,6 +562,7 @@ function MapRadarTabContent({
         async () => {
           const state = await fetchRainViewerRadar();
           setRadarState(state);
+          setRadarTileErrorCount(0);
           onRadarStateChange?.(state);
           if (state.frames.length > 0) {
             const defaultIndex = Math.max(0, state.pastCount - 1);
@@ -514,20 +600,102 @@ function MapRadarTabContent({
     void loadRainViewerRadar(false);
   }, [loadRainViewerRadar]);
 
-  // Loop de animação do player do radar
+  // Sincroniza hora local padrão quando a previsão muda
+  const currentLocalHourIdx = useMemo(
+    () => findCurrentLocalHourIndex(forecast?.hours, forecast?.timezone),
+    [forecast?.hours, forecast?.timezone],
+  );
+
+  useEffect(() => {
+    setSelectedModelHourIdx(currentLocalHourIdx);
+  }, [forecast?.locationKey, currentLocalHourIdx]);
+
+  // Se o ponto for continental e camada atual for ondas, volta automaticamente para vento
+  useEffect(() => {
+    if (activeWeatherLayer === 'waves' && forecast && !forecast.marineAvailable) {
+      setActiveWeatherLayer('wind');
+    }
+  }, [activeWeatherLayer, forecast]);
+
+  // Busca grade espacial real multi-modelo na Open-Meteo (com debounce leve ao mover mapa)
+  useEffect(() => {
+    let cancelled = false;
+    const controller = new AbortController();
+    const timer = window.setTimeout(() => {
+      setIsLoadingSpatialGrid(true);
+      void fetchOpenMeteoSpatialGrid(viewport, {
+        forecastDays: 2,
+        signal: controller.signal,
+        anchorForecast: forecast,
+      })
+        .then((grid) => {
+          if (!cancelled && grid) {
+            setLiveSpatialGrid(grid);
+          }
+        })
+        .finally(() => {
+          if (!cancelled) {
+            setIsLoadingSpatialGrid(false);
+          }
+        });
+    }, 350);
+
+    return () => {
+      cancelled = true;
+      window.clearTimeout(timer);
+      controller.abort();
+    };
+  }, [
+    activeLocation.latitude,
+    activeLocation.longitude,
+    viewport.north.toFixed(2),
+    viewport.south.toFixed(2),
+    viewport.east.toFixed(2),
+    viewport.west.toFixed(2),
+    forecast,
+  ]);
+
+  const fallbackSpatialGrid = useMemo(
+    () => buildOfflineFallbackSpatialGrid(forecast, viewport),
+    [forecast, viewport],
+  );
+
+  const activeSpatialGrid = liveSpatialGrid ?? fallbackSpatialGrid;
+  const maxModelTimelineHours = useMemo(() => {
+    const fcLen = forecast?.hours.length ?? 0;
+    const gridLen = activeSpatialGrid.byModel[mapModelMode]?.length ?? 0;
+    return Math.max(1, Math.min(48, Math.max(fcLen, gridLen)));
+  }, [activeSpatialGrid.byModel, forecast?.hours.length, mapModelMode]);
+
+  // Loop de animação (RainViewer ou Previsão do Modelo)
   const frames = radarState?.frames ?? [];
   const activeFrame: RadarAnimationFrame | undefined =
     frames[currentFrameIndex] ?? frames[0];
 
   useEffect(() => {
-    if (!isPlayingRadar || !radarEnabled || frames.length <= 1) {
+    if (!isPlayingRadar) {
       return;
     }
+    if (timelineMode === 'rainviewer') {
+      if (!radarEnabled || frames.length <= 1) return;
+      const timer = window.setInterval(() => {
+        setCurrentFrameIndex((prev) => (prev + 1) % frames.length);
+      }, 650);
+      return () => window.clearInterval(timer);
+    }
+
+    if (maxModelTimelineHours <= 1) return;
     const timer = window.setInterval(() => {
-      setCurrentFrameIndex((prev) => (prev + 1) % frames.length);
-    }, 650);
+      setSelectedModelHourIdx((prev) => (prev + 1) % maxModelTimelineHours);
+    }, 750);
     return () => window.clearInterval(timer);
-  }, [isPlayingRadar, radarEnabled, frames.length]);
+  }, [
+    isPlayingRadar,
+    timelineMode,
+    radarEnabled,
+    frames.length,
+    maxModelTimelineHours,
+  ]);
 
   // Cancela eventual download em andamento ao desmontar
   useEffect(() => {
@@ -543,21 +711,34 @@ function MapRadarTabContent({
     [missionBounds],
   );
 
-  // Hora atual da previsão para a bandeirinha Windy e popup do ponto ativo
+  // Hora ativa da previsão (sincronizada com o slider de modelo ou janela horária local)
+  const safeModelHourIdx = Math.max(
+    0,
+    Math.min((forecast?.hours.length ?? 1) - 1, selectedModelHourIdx),
+  );
   const currentForecastHour = useMemo(() => {
     if (!forecast || forecast.hours.length === 0) return null;
-    const nowSec = Math.floor(Date.now() / 1000);
-    let closest = forecast.hours[0];
-    let bestDiff = Infinity;
-    for (const h of forecast.hours) {
-      const diff = Math.abs(h.timestampUnix - nowSec);
-      if (diff < bestDiff) {
-        bestDiff = diff;
-        closest = h;
-      }
-    }
-    return closest ?? forecast.hours[0] ?? null;
-  }, [forecast]);
+    return forecast.hours[safeModelHourIdx] ?? forecast.hours[0] ?? null;
+  }, [forecast, safeModelHourIdx]);
+
+  const activeNativeModelHour = useMemo(() => {
+    if (!forecast || mapModelMode === 'fieldcast') return null;
+    return forecast.nativeByModel[mapModelMode]?.[safeModelHourIdx] ?? null;
+  }, [forecast, mapModelMode, safeModelHourIdx]);
+
+  const activeMapGridSlice = useMemo(
+    () =>
+      extractGridSnapshotAtHour(
+        activeSpatialGrid,
+        mapModelMode,
+        safeModelHourIdx,
+        currentForecastHour?.timestampUnix,
+      ),
+    [activeSpatialGrid, mapModelMode, safeModelHourIdx, currentForecastHour?.timestampUnix],
+  );
+
+  const activeModelDisplayName = getModelModeDisplayName(mapModelMode);
+  const activeLegendSpec = getLayerLegendSpec(activeWeatherLayer);
 
   const handleSelectMapCoordinate = useCallback(
     (
@@ -869,17 +1050,31 @@ function MapRadarTabContent({
     );
   };
 
-  // Ícone de Bandeirinha Estilo Windy para o Ponto Ativo
+  const activeWindSpeed =
+    mapModelMode === 'fieldcast'
+      ? currentForecastHour?.windSpeed10m.mean ?? null
+      : activeNativeModelHour?.windSpeed10m ?? currentForecastHour?.windSpeed10m.mean ?? null;
+  const activeWindDir =
+    mapModelMode === 'fieldcast'
+      ? currentForecastHour?.windDirection10m.degree ?? null
+      : activeNativeModelHour?.windDirection10m ?? currentForecastHour?.windDirection10m.degree ?? null;
+  const activeTempC =
+    mapModelMode === 'fieldcast'
+      ? currentForecastHour?.temperature2mC.mean ?? null
+      : activeNativeModelHour?.temperature2m ?? currentForecastHour?.temperature2mC.mean ?? null;
+  const activePrecipMm =
+    mapModelMode === 'fieldcast'
+      ? currentForecastHour?.precipitationMm.mean ?? null
+      : activeNativeModelHour?.precipitation ?? currentForecastHour?.precipitationMm.mean ?? null;
+
+  // Ícone de Bandeirinha Estilo Windy para o Ponto Ativo (sincronizado com modelo & hora selecionados)
   const activeWindyFlagIcon = useMemo(() => {
-    const windSpeed = currentForecastHour?.windSpeed10m.mean;
-    const windDir = currentForecastHour?.windDirection10m.degree;
-    const tempC = currentForecastHour?.temperature2mC.mean;
-    const cardinal = degreesToCardinal(windDir);
+    const cardinal = degreesToCardinal(activeWindDir);
 
     const titleText =
-      windSpeed !== null && windSpeed !== undefined
-        ? `${Math.round(windSpeed)} km/h ${cardinal ? `◄ ${cardinal}` : ''}${
-            tempC !== null && tempC !== undefined ? ` • ${Math.round(tempC)}°C` : ''
+      activeWindSpeed !== null && activeWindSpeed !== undefined
+        ? `${Math.round(activeWindSpeed)} km/h ${cardinal ? `◄ ${cardinal}` : ''}${
+            activeTempC !== null && activeTempC !== undefined ? ` • ${Math.round(activeTempC)}°C` : ''
           }`
         : `${activeLocation.latitude.toFixed(3)}°, ${activeLocation.longitude.toFixed(3)}°`;
 
@@ -888,11 +1083,18 @@ function MapRadarTabContent({
       subtitleText: activeLocation.name.slice(0, 26),
       ctaText:
         forecastAreaRadiusKm > 0
-          ? `Área de Previsão: ${forecastAreaRadiusKm} km`
-          : 'Previsão Ativa neste Pin',
+          ? `${activeModelDisplayName} • Área ${forecastAreaRadiusKm} km`
+          : `${activeModelDisplayName} • Pin Ativo`,
       isPending: false,
     });
-  }, [currentForecastHour, activeLocation, forecastAreaRadiusKm]);
+  }, [
+    activeWindSpeed,
+    activeWindDir,
+    activeTempC,
+    activeLocation,
+    forecastAreaRadiusKm,
+    activeModelDisplayName,
+  ]);
 
   // Ícone de Bandeirinha Estilo Windy quando o usuário inspeciona outro ponto sem aplicar automaticamente
   const inspectedWindyFlagIcon = useMemo(() => {
@@ -1047,7 +1249,7 @@ function MapRadarTabContent({
               }`}
             >
               <Radar className="w-4 h-4 text-sky-600" aria-hidden="true" />
-              <span>Radar</span>
+              <span>Radar Chuva</span>
             </button>
 
             <button
@@ -1105,6 +1307,60 @@ function MapRadarTabContent({
               <Square className="w-4 h-4 text-sky-600" aria-hidden="true" />
               <span>Área Offline</span>
             </button>
+          </div>
+        </div>
+
+        {/* Terceira Linha: Seletor de Modelo Meteorológico & Camada de Radar do Modelo */}
+        <div className="pt-2.5 border-t border-sky-100 dark:border-slate-800 flex flex-col xl:flex-row xl:items-center justify-between gap-2.5">
+          <div className="flex flex-wrap items-center gap-1.5" role="group" aria-label="Modelo meteorológico no mapa">
+            <span className="text-[11px] font-bold text-sky-800 dark:text-sky-300 mr-1">
+              Modelo Meteorológico:
+            </span>
+            {MAP_MODEL_OPTIONS.map((opt) => {
+              const active = mapModelMode === opt.id;
+              return (
+                <button
+                  key={opt.id}
+                  type="button"
+                  onClick={() => handleMapModelSelect(opt.id)}
+                  aria-pressed={active}
+                  className={`min-h-[36px] px-3 py-1 rounded-full text-xs font-bold border transition-all ${
+                    active
+                      ? 'bg-[#0080cd] text-white border-[#0080cd] shadow-sm'
+                      : 'bg-sky-50/70 dark:bg-slate-800 text-slate-700 dark:text-sky-200 border-sky-200 dark:border-slate-700 hover:bg-sky-100/70'
+                  }`}
+                >
+                  {opt.label}
+                </button>
+              );
+            })}
+          </div>
+
+          <div className="flex flex-wrap items-center gap-1.5" role="group" aria-label="Camada meteorológica do modelo">
+            <span className="text-[11px] font-bold text-sky-800 dark:text-sky-300 mr-1">
+              Camada do Modelo:
+            </span>
+            {WEATHER_LAYER_OPTIONS.filter(
+              (opt) => opt.id !== 'waves' || forecast?.marineAvailable !== false,
+            ).map(({ id, label, Icon }) => {
+              const active = activeWeatherLayer === id;
+              return (
+                <button
+                  key={id}
+                  type="button"
+                  onClick={() => setActiveWeatherLayer(id)}
+                  aria-pressed={active}
+                  className={`min-h-[36px] px-3 py-1 rounded-full text-xs font-semibold inline-flex items-center gap-1.5 border transition-all ${
+                    active
+                      ? 'bg-sky-600 text-white border-sky-600 shadow-sm'
+                      : 'bg-white dark:bg-slate-800 text-slate-700 dark:text-slate-200 border-sky-200/80 dark:border-slate-700 hover:bg-sky-50'
+                  }`}
+                >
+                  <Icon className="w-3.5 h-3.5" aria-hidden="true" />
+                  <span>{label}</span>
+                </button>
+              );
+            })}
           </div>
         </div>
       </section>
@@ -1191,8 +1447,17 @@ function MapRadarTabContent({
               centerLat={activeLocation.latitude}
               centerLon={activeLocation.longitude}
               recenterTrigger={recenterTrigger}
-              onViewportChange={setViewport}
+              onViewportChange={handleViewportChange}
               onMapClick={handleMapClick}
+            />
+
+            {/* Overlay de Campo Meteorológico do Modelo (Vento, Chuva, Temp, Ondas) */}
+            <WeatherModelOverlayLayer
+              layerId={activeWeatherLayer}
+              modelMode={mapModelMode}
+              points={activeMapGridSlice?.points ?? []}
+              opacity={radarOpacity}
+              animateFlow={true}
             />
 
             {/* Overlay de Radar Animado RainViewer */}
@@ -1203,8 +1468,13 @@ function MapRadarTabContent({
                 opacity={radarOpacity}
                 maxNativeZoom={radarState?.maxNativeZoom ?? 7}
                 maxZoom={19}
-                zIndex={250}
+                zIndex={460}
                 attribution="RainViewer"
+                eventHandlers={{
+                  tileerror: () => {
+                    setRadarTileErrorCount((c) => c + 1);
+                  },
+                }}
               />
             )}
 
@@ -1581,6 +1851,101 @@ function MapRadarTabContent({
                 />
               )}
           </MapContainer>
+
+          {/* HUD Flutuante no Mapa: Informa Modelo Meteorológico, Radar RainViewer & Escala de Cores */}
+          <div
+            data-testid="map-weather-hud"
+            className="absolute top-3 right-3 z-[500] max-w-[270px] sm:max-w-[310px] rounded-2xl border border-sky-200/90 dark:border-sky-800 bg-white/95 dark:bg-slate-900/95 backdrop-blur-md p-2.5 sm:p-3 shadow-md space-y-1.5 pointer-events-auto"
+          >
+            <div className="flex items-center justify-between gap-2">
+              <span className="inline-flex items-center gap-1.5 text-[11px] font-extrabold text-sky-900 dark:text-sky-100">
+                <Radar className="w-3.5 h-3.5 text-[#0080cd]" aria-hidden="true" />
+                <span>Modelo: {activeModelDisplayName}</span>
+              </span>
+              <span
+                className={`px-2 py-0.5 rounded-full text-[10px] font-bold ${
+                  activeSpatialGrid.source === 'live_grid'
+                    ? 'bg-emerald-50 text-emerald-700 border border-emerald-200'
+                    : 'bg-sky-50 text-sky-700 border border-sky-200'
+                }`}
+              >
+                {isLoadingSpatialGrid
+                  ? 'Atualizando...'
+                  : activeSpatialGrid.source === 'live_grid'
+                    ? 'Grade ao Vivo'
+                    : 'Campo do Ponto'}
+              </span>
+            </div>
+
+            <div className="text-[11px] text-slate-600 dark:text-slate-300 flex flex-wrap items-center gap-x-2 gap-y-0.5">
+              <span>
+                Vento:{' '}
+                <strong className="text-slate-900 dark:text-white">
+                  {activeWindSpeed !== null ? `${Math.round(activeWindSpeed)} km/h` : '—'}
+                </strong>
+              </span>
+              <span>
+                Chuva:{' '}
+                <strong className="text-slate-900 dark:text-white">
+                  {activePrecipMm !== null ? `${activePrecipMm.toFixed(1)} mm` : '—'}
+                </strong>
+              </span>
+              <span>
+                Temp:{' '}
+                <strong className="text-slate-900 dark:text-white">
+                  {activeTempC !== null ? `${Math.round(activeTempC)}°C` : '—'}
+                </strong>
+              </span>
+            </div>
+
+            <div className="text-[10px] flex items-center gap-1.5 text-slate-600 dark:text-slate-300">
+              <span
+                className={`w-2 h-2 rounded-full shrink-0 ${
+                  !radarEnabled
+                    ? 'bg-slate-400'
+                    : radarState?.available && radarTileErrorCount === 0
+                      ? 'bg-emerald-500'
+                      : 'bg-amber-500'
+                }`}
+                aria-hidden="true"
+              />
+              <span>
+                {!radarEnabled
+                  ? 'Radar RainViewer pausado pelo usuário'
+                  : radarState?.available && activeFrame
+                    ? `RainViewer: ${frames.length} quadros • ${formatFrameTimestamp(activeFrame.timeUnix)}${
+                        radarTileErrorCount > 0 ? ' (alguns tiles falharam)' : ''
+                      }`
+                    : isLoadingRadar
+                      ? 'Carregando Radar RainViewer...'
+                      : 'Radar RainViewer indisponível (usando camada do modelo)'}
+              </span>
+            </div>
+
+            {activeLegendSpec && (
+              <div className="pt-1 border-t border-sky-100 dark:border-slate-800">
+                <div className="flex items-center justify-between text-[10px] font-semibold text-slate-600 dark:text-slate-300 mb-1">
+                  <span>{activeLegendSpec.title}</span>
+                  <span>{activeLegendSpec.unit}</span>
+                </div>
+                <div className="flex items-center rounded-full overflow-hidden h-2 border border-slate-200/80 dark:border-slate-700">
+                  {activeLegendSpec.stops.map((stop) => (
+                    <div
+                      key={stop.valueLabel}
+                      className="flex-1 h-full"
+                      style={{ backgroundColor: stop.color }}
+                      title={`${stop.valueLabel} ${activeLegendSpec.unit}`}
+                    />
+                  ))}
+                </div>
+                <div className="flex items-center justify-between text-[9px] font-mono text-slate-500 dark:text-slate-400 mt-0.5">
+                  {activeLegendSpec.stops.map((stop) => (
+                    <span key={stop.valueLabel}>{stop.valueLabel}</span>
+                  ))}
+                </div>
+              </div>
+            )}
+          </div>
         </div>
 
         {/* Barra Inferior Flutuante Estilo Windy para o Pin Selecionado */}
@@ -1659,15 +2024,72 @@ function MapRadarTabContent({
           </div>
         </div>
 
-        {/* Barra de Reprodução do Radar Animado RainViewer */}
-        <div className="border-t border-sky-100 dark:border-slate-800 bg-sky-50/40 dark:bg-slate-950/80 p-3 sm:p-4">
+        {/* Barra de Reprodução Dual: Radar ao Vivo (RainViewer) ou Linha do Tempo do Modelo */}
+        <div className="border-t border-sky-100 dark:border-slate-800 bg-sky-50/40 dark:bg-slate-950/80 p-3 sm:p-4 space-y-2.5">
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <div className="inline-flex items-center rounded-xl bg-white dark:bg-slate-900 p-1 border border-sky-200/80 dark:border-slate-700" role="group" aria-label="Fonte da linha do tempo do mapa">
+              <button
+                type="button"
+                onClick={() => {
+                  setIsPlayingRadar(false);
+                  setTimelineMode('rainviewer');
+                }}
+                aria-pressed={timelineMode === 'rainviewer'}
+                className={`min-h-[34px] px-3 py-1 rounded-lg text-xs font-bold transition-colors ${
+                  timelineMode === 'rainviewer'
+                    ? 'bg-sky-600 text-white shadow-sm'
+                    : 'text-slate-600 dark:text-slate-300 hover:text-sky-700'
+                }`}
+              >
+                Radar Chuva (RainViewer)
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  setIsPlayingRadar(false);
+                  setTimelineMode('model');
+                }}
+                aria-pressed={timelineMode === 'model'}
+                className={`min-h-[34px] px-3 py-1 rounded-lg text-xs font-bold transition-colors ${
+                  timelineMode === 'model'
+                    ? 'bg-sky-600 text-white shadow-sm'
+                    : 'text-slate-600 dark:text-slate-300 hover:text-sky-700'
+                }`}
+              >
+                Previsão {activeModelDisplayName} ({maxModelTimelineHours}h)
+              </button>
+            </div>
+
+            {timelineMode === 'model' && currentForecastHour && (
+              <div className="flex items-center gap-2 text-xs">
+                {safeModelHourIdx === currentLocalHourIdx ? (
+                  <span className="px-2.5 py-0.5 rounded-full bg-amber-100 text-amber-900 border border-amber-300 font-bold">
+                    Agora • {formatLocalHourBadge(currentForecastHour.timestampUnix, forecast?.timezone)}
+                  </span>
+                ) : (
+                  <button
+                    type="button"
+                    onClick={() => setSelectedModelHourIdx(currentLocalHourIdx)}
+                    className="px-2.5 py-0.5 rounded-full bg-amber-500 hover:bg-amber-600 text-slate-950 font-bold"
+                  >
+                    Voltar para Agora
+                  </button>
+                )}
+              </div>
+            )}
+          </div>
+
           <div className="flex flex-col md:flex-row md:items-center justify-between gap-3">
             {/* Botões Play/Pause, Passo Anterior/Próximo e Opacidade (todos >= 44x44px) */}
             <div className="flex flex-wrap items-center gap-2">
               <button
                 type="button"
                 onClick={() => setIsPlayingRadar((prev) => !prev)}
-                disabled={frames.length <= 1 || !radarEnabled}
+                disabled={
+                  timelineMode === 'rainviewer'
+                    ? frames.length <= 1 || !radarEnabled
+                    : maxModelTimelineHours <= 1
+                }
                 className="min-h-[44px] min-w-[44px] px-4 py-2 rounded-xl text-xs font-bold inline-flex items-center justify-center gap-2 bg-sky-600 hover:bg-sky-500 disabled:opacity-50 text-white shadow-sm transition-colors"
                 aria-label={
                   isPlayingRadar ? 'Pausar animação do radar' : 'Reproduzir radar'
@@ -1681,7 +2103,7 @@ function MapRadarTabContent({
                 ) : (
                   <>
                     <Play className="w-4 h-4" aria-hidden="true" />
-                    <span>Play Radar</span>
+                    <span>{timelineMode === 'rainviewer' ? 'Play Radar' : 'Play Modelo'}</span>
                   </>
                 )}
               </button>
@@ -1690,16 +2112,28 @@ function MapRadarTabContent({
                 type="button"
                 onClick={() => {
                   setIsPlayingRadar(false);
-                  setCurrentFrameIndex((prev) =>
-                    frames.length > 0
-                      ? (prev - 1 + frames.length) % frames.length
-                      : 0,
-                  );
+                  if (timelineMode === 'rainviewer') {
+                    setCurrentFrameIndex((prev) =>
+                      frames.length > 0
+                        ? (prev - 1 + frames.length) % frames.length
+                        : 0,
+                    );
+                  } else {
+                    setSelectedModelHourIdx((prev) =>
+                      maxModelTimelineHours > 0
+                        ? (prev - 1 + maxModelTimelineHours) % maxModelTimelineHours
+                        : 0,
+                    );
+                  }
                 }}
-                disabled={frames.length <= 1 || !radarEnabled}
+                disabled={
+                  timelineMode === 'rainviewer'
+                    ? frames.length <= 1 || !radarEnabled
+                    : maxModelTimelineHours <= 1
+                }
                 className="min-h-[44px] min-w-[44px] p-2.5 rounded-xl border border-sky-200 dark:border-slate-700 bg-white dark:bg-slate-900 hover:bg-sky-50 dark:hover:bg-slate-800 disabled:opacity-40 text-sky-800 dark:text-slate-200 inline-flex items-center justify-center"
-                title="Quadro anterior do radar"
-                aria-label="Quadro anterior do radar"
+                title="Quadro anterior"
+                aria-label="Quadro anterior"
               >
                 <SkipBack className="w-4 h-4" aria-hidden="true" />
               </button>
@@ -1708,14 +2142,24 @@ function MapRadarTabContent({
                 type="button"
                 onClick={() => {
                   setIsPlayingRadar(false);
-                  setCurrentFrameIndex((prev) =>
-                    frames.length > 0 ? (prev + 1) % frames.length : 0,
-                  );
+                  if (timelineMode === 'rainviewer') {
+                    setCurrentFrameIndex((prev) =>
+                      frames.length > 0 ? (prev + 1) % frames.length : 0,
+                    );
+                  } else {
+                    setSelectedModelHourIdx((prev) =>
+                      maxModelTimelineHours > 0 ? (prev + 1) % maxModelTimelineHours : 0,
+                    );
+                  }
                 }}
-                disabled={frames.length <= 1 || !radarEnabled}
+                disabled={
+                  timelineMode === 'rainviewer'
+                    ? frames.length <= 1 || !radarEnabled
+                    : maxModelTimelineHours <= 1
+                }
                 className="min-h-[44px] min-w-[44px] p-2.5 rounded-xl border border-sky-200 dark:border-slate-700 bg-white dark:bg-slate-900 hover:bg-sky-50 dark:hover:bg-slate-800 disabled:opacity-40 text-sky-800 dark:text-slate-200 inline-flex items-center justify-center"
-                title="Próximo quadro do radar"
-                aria-label="Próximo quadro do radar"
+                title="Próximo quadro"
+                aria-label="Próximo quadro"
               >
                 <SkipForward className="w-4 h-4" aria-hidden="true" />
               </button>
@@ -1749,26 +2193,51 @@ function MapRadarTabContent({
               </button>
             </div>
 
-            {/* Slider Temporal & Timestamp do Frame */}
+            {/* Slider Temporal & Timestamp do Frame / Hora do Modelo */}
             <div className="flex-1 flex flex-col sm:flex-row sm:items-center gap-3">
               <div className="flex-1 flex items-center gap-2">
-                <input
-                  type="range"
-                  min={0}
-                  max={Math.max(0, frames.length - 1)}
-                  value={Math.min(currentFrameIndex, Math.max(0, frames.length - 1))}
-                  disabled={frames.length <= 1 || !radarEnabled}
-                  onChange={(e) => {
-                    setIsPlayingRadar(false);
-                    setCurrentFrameIndex(Number(e.target.value));
-                  }}
-                  aria-label="Linha do tempo do radar RainViewer"
-                  className="w-full min-h-[44px] accent-sky-600 cursor-pointer disabled:opacity-40"
-                />
+                {timelineMode === 'rainviewer' ? (
+                  <input
+                    type="range"
+                    min={0}
+                    max={Math.max(0, frames.length - 1)}
+                    value={Math.min(currentFrameIndex, Math.max(0, frames.length - 1))}
+                    disabled={frames.length <= 1 || !radarEnabled}
+                    onChange={(e) => {
+                      setIsPlayingRadar(false);
+                      setCurrentFrameIndex(Number(e.target.value));
+                    }}
+                    aria-label="Linha do tempo do radar RainViewer"
+                    className="w-full min-h-[44px] accent-sky-600 cursor-pointer disabled:opacity-40"
+                  />
+                ) : (
+                  <input
+                    type="range"
+                    min={0}
+                    max={Math.max(0, maxModelTimelineHours - 1)}
+                    value={safeModelHourIdx}
+                    disabled={maxModelTimelineHours <= 1}
+                    onChange={(e) => {
+                      setIsPlayingRadar(false);
+                      setSelectedModelHourIdx(Number(e.target.value));
+                    }}
+                    aria-label="Linha do tempo da previsão do modelo meteorológico"
+                    className="w-full min-h-[44px] accent-sky-600 cursor-pointer disabled:opacity-40"
+                  />
+                )}
               </div>
 
               <div className="flex items-center justify-between sm:justify-end gap-2 shrink-0">
-                {activeFrame ? (
+                {timelineMode === 'model' && currentForecastHour ? (
+                  <>
+                    <span className="px-2.5 py-1 rounded-full text-[11px] font-bold border bg-sky-100 text-sky-800 dark:bg-sky-950 dark:text-sky-300 border-sky-200 dark:border-sky-800">
+                      {activeModelDisplayName}
+                    </span>
+                    <span className="font-mono text-xs sm:text-sm font-bold text-sky-900 dark:text-white bg-white dark:bg-slate-900 px-3 py-1.5 rounded-xl border border-sky-200 dark:border-slate-800">
+                      {formatFrameTimestamp(currentForecastHour.timestampUnix)}
+                    </span>
+                  </>
+                ) : activeFrame ? (
                   <>
                     <span
                       className={`px-2.5 py-1 rounded-full text-[11px] font-bold border ${

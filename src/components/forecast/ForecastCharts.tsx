@@ -728,6 +728,9 @@ export const ForecastCharts: React.FC<ForecastChartsProps> = ({
         {
           type: 'value',
           name: 'Altura (m)',
+          min: 0,
+          max: (value: { max: number }) =>
+            Math.max(1.5, Math.ceil(value.max * 1.25 * 2) / 2),
           nameTextStyle: { color: textColor, fontSize: 11 },
           axisLabel: { color: textColor, fontSize: 10 },
           splitLine: { lineStyle: { color: gridBorderColor } },
@@ -735,6 +738,9 @@ export const ForecastCharts: React.FC<ForecastChartsProps> = ({
         {
           type: 'value',
           name: 'Período (s)',
+          min: 0,
+          max: (value: { max: number }) =>
+            Math.max(10, Math.ceil(value.max + 2)),
           nameTextStyle: { color: textColor, fontSize: 11 },
           axisLabel: { color: textColor, fontSize: 10 },
           splitLine: { show: false },
@@ -1348,10 +1354,10 @@ export const ForecastCharts: React.FC<ForecastChartsProps> = ({
                 )}
               </div>
 
-              <div className="h-64 sm:h-72 w-full">
+              <div className="h-64 sm:h-72 min-h-[256px] w-full shrink-0">
                 <ReactECharts
                   option={verticalProfileOption}
-                  style={{ height: '100%', width: '100%' }}
+                  style={{ height: '100%', minHeight: '256px', width: '100%' }}
                   notMerge={true}
                   lazyUpdate={true}
                 />
@@ -1436,7 +1442,7 @@ export const ForecastCharts: React.FC<ForecastChartsProps> = ({
               data-chart-id="waves"
               data-current-hour-index={isCurrentHourInRange ? resolvedCurrentHourIndex : ''}
               data-current-hour-label={currentHourBadge ?? ''}
-              className="rounded-2xl border border-slate-200/90 dark:border-sky-800/70 bg-white dark:bg-[#132a47] p-4 shadow-sm space-y-2 flex flex-col"
+              className="rounded-2xl border border-slate-200/90 dark:border-sky-800/70 bg-white dark:bg-[#132a47] p-4 shadow-sm space-y-2"
             >
               <div className="flex items-center justify-between gap-2">
                 <div className="flex items-center gap-2">
@@ -1449,16 +1455,16 @@ export const ForecastCharts: React.FC<ForecastChartsProps> = ({
               </div>
 
               {forecast.marineAvailable ? (
-                <div className="h-72 sm:h-80 w-full flex-1">
+                <div className="h-72 sm:h-80 min-h-[288px] w-full">
                   <ReactECharts
                     option={marineOption}
-                    style={{ height: '100%', width: '100%' }}
+                    style={{ height: '100%', minHeight: '288px', width: '100%' }}
                     notMerge={true}
                     lazyUpdate={true}
                   />
                 </div>
               ) : (
-                <div className="flex-1 min-h-[180px] rounded-2xl border border-dashed border-sky-200 dark:border-sky-800 bg-[#f4f8fb] dark:bg-[#0d1f36]/60 p-6 flex flex-col items-center justify-center text-center space-y-2">
+                <div className="min-h-[220px] rounded-2xl border border-dashed border-sky-200 dark:border-sky-800 bg-[#f4f8fb] dark:bg-[#0d1f36]/60 p-6 flex flex-col items-center justify-center text-center space-y-2">
                   <div className="p-2.5 rounded-2xl bg-sky-100 dark:bg-sky-900/60 text-[#0080cd] dark:text-sky-300">
                     <Mountain className="w-6 h-6" aria-hidden="true" />
                   </div>

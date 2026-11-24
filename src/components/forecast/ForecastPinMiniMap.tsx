@@ -10,11 +10,27 @@ import {
   Layers,
   MapPin,
   Navigation,
+  Radar,
   Sparkles,
+  Wind,
 } from 'lucide-react';
+import {
+  fetchRainViewerRadar,
+  type RainViewerRadarState,
+} from '../../services/rainViewerService';
+import {
+  buildOfflineFallbackSpatialGrid,
+  extractGridSnapshotAtHour,
+  getLayerLegendSpec,
+  getModelModeDisplayName,
+  type MapModelMode,
+  type WeatherMapLayerId,
+} from '../../services/weatherGridService';
 import type { ActiveCoordinates, SavedLocation } from '../../types/field';
 import type { ToastMessage } from '../../types/health';
+import type { ForecastViewMode, NormalizedForecast } from '../../types/weather';
 import { safeAction } from '../../utils/safeAction';
+import { WeatherModelOverlayLayer } from '../map/WeatherModelOverlayLayer';
 import { degreesToCardinalShort } from './CurrentSummaryCard';
 
 export type MiniMapBaseLayerId = 'osm' | 'esri_street' | 'esri_satellite';
@@ -125,6 +141,9 @@ const MapClickAndSyncController: React.FC<{
 export interface ForecastPinMiniMapProps {
   activeLocation: ActiveCoordinates;
   savedLocations?: SavedLocation[];
+  forecast?: NormalizedForecast | null;
+  viewMode?: ForecastViewMode;
+  selectedHourIndex?: number;
   currentWindSpeedKmh?: number | null;
   currentWindDirectionDeg?: number | null;
   onSelectLocation?: (coords: {
@@ -150,6 +169,9 @@ export interface ForecastPinMiniMapProps {
 export const ForecastPinMiniMap: React.FC<ForecastPinMiniMapProps> = ({
   activeLocation,
   savedLocations = [],
+  forecast = null,
+  viewMode = 'fieldcast',
+  selectedHourIndex = 0,
   currentWindSpeedKmh = null,
   currentWindDirectionDeg = null,
   onSelectLocation,
@@ -167,11 +189,66 @@ export const ForecastPinMiniMap: React.FC<ForecastPinMiniMapProps> = ({
   const [instantApplyOnClick, setInstantApplyOnClick] = useState<boolean>(true);
   const [customPinName, setCustomPinName] = useState<string>('');
   const [justApplied, setJustApplied] = useState<boolean>(false);
+  const [weatherOverlayLayer, setWeatherOverlayLayer] =
+    useState<WeatherMapLayerId>('wind');
+  const [showRainViewerOverlay, setShowRainViewerOverlay] =
+    useState<boolean>(true);
+  const [radarState, setRadarState] = useState<RainViewerRadarState | null>(null);
 
   useEffect(() => {
     setPinLat(activeLocation.latitude);
     setPinLon(activeLocation.longitude);
   }, [activeLocation.latitude, activeLocation.longitude]);
+
+  useEffect(() => {
+    let active = true;
+    void fetchRainViewerRadar({ maxRetries: 1 }).then((state) => {
+      if (active) {
+        setRadarState(state);
+      }
+    });
+    return () => {
+      active = false;
+    };
+  }, []);
+
+  const mapModelMode: MapModelMode =
+    viewMode === 'spaghetti' ? 'fieldcast' : viewMode;
+  const activeModelDisplayName = getModelModeDisplayName(mapModelMode);
+
+  const miniMapBounds = useMemo(
+    () => ({
+      north: pinLat + 0.18,
+      south: pinLat - 0.18,
+      east: pinLon + 0.18,
+      west: pinLon - 0.18,
+    }),
+    [pinLat, pinLon],
+  );
+
+  const miniMapGrid = useMemo(
+    () => buildOfflineFallbackSpatialGrid(forecast, miniMapBounds),
+    [forecast, miniMapBounds],
+  );
+
+  const activeGridSlice = useMemo(
+    () =>
+      extractGridSnapshotAtHour(
+        miniMapGrid,
+        mapModelMode,
+        selectedHourIndex,
+        forecast?.hours[selectedHourIndex]?.timestampUnix,
+      ),
+    [miniMapGrid, mapModelMode, selectedHourIndex, forecast?.hours],
+  );
+
+  const latestRadarFrame = useMemo(() => {
+    if (!radarState?.frames.length) return null;
+    const pastIdx = Math.max(0, radarState.pastCount - 1);
+    return radarState.frames[pastIdx] ?? radarState.frames[0] ?? null;
+  }, [radarState]);
+
+  const windLegend = getLayerLegendSpec(weatherOverlayLayer);
 
   const windFlagText = useMemo(() => {
     if (currentWindSpeedKmh !== null && !Number.isNaN(currentWindSpeedKmh)) {
@@ -293,6 +370,37 @@ export const ForecastPinMiniMap: React.FC<ForecastPinMiniMapProps> = ({
         </div>
 
         <div className="flex flex-wrap items-center gap-2">
+          {/* Weather Model & RainViewer Radar Quick Toggles */}
+          <button
+            type="button"
+            onClick={() =>
+              setWeatherOverlayLayer((prev) => (prev === 'wind' ? 'none' : 'wind'))
+            }
+            aria-pressed={weatherOverlayLayer === 'wind'}
+            className={`min-h-[36px] px-3 py-1 rounded-full text-xs font-semibold inline-flex items-center gap-1.5 border transition-all ${
+              weatherOverlayLayer === 'wind'
+                ? 'bg-sky-50 dark:bg-sky-900/70 text-[#0070b8] dark:text-sky-100 border-sky-300 dark:border-sky-600'
+                : 'bg-white dark:bg-[#0d1f36] text-slate-600 dark:text-sky-200 border-slate-200 dark:border-sky-800 hover:bg-sky-50'
+            }`}
+          >
+            <Wind className="w-3.5 h-3.5 text-[#0080cd]" aria-hidden="true" />
+            <span>Camada Vento</span>
+          </button>
+
+          <button
+            type="button"
+            onClick={() => setShowRainViewerOverlay((prev) => !prev)}
+            aria-pressed={showRainViewerOverlay}
+            className={`min-h-[36px] px-3 py-1 rounded-full text-xs font-semibold inline-flex items-center gap-1.5 border transition-all ${
+              showRainViewerOverlay
+                ? 'bg-sky-50 dark:bg-sky-900/70 text-[#0070b8] dark:text-sky-100 border-sky-300 dark:border-sky-600'
+                : 'bg-white dark:bg-[#0d1f36] text-slate-600 dark:text-sky-200 border-slate-200 dark:border-sky-800 hover:bg-sky-50'
+            }`}
+          >
+            <Radar className="w-3.5 h-3.5 text-[#0080cd]" aria-hidden="true" />
+            <span>Radar Chuva</span>
+          </button>
+
           {/* Instant Windy Click Toggle */}
           <button
             type="button"
@@ -418,6 +526,26 @@ export const ForecastPinMiniMap: React.FC<ForecastPinMiniMapProps> = ({
             attribution={activeBaseLayer.attribution}
           />
 
+          <WeatherModelOverlayLayer
+            layerId={weatherOverlayLayer}
+            modelMode={mapModelMode}
+            points={activeGridSlice?.points ?? []}
+            opacity={0.72}
+            animateFlow={true}
+          />
+
+          {showRainViewerOverlay && latestRadarFrame && (
+            <TileLayer
+              key={`rv-mini-${latestRadarFrame.path}`}
+              url={latestRadarFrame.tileUrlTemplate}
+              opacity={0.65}
+              maxNativeZoom={radarState?.maxNativeZoom ?? 7}
+              maxZoom={19}
+              zIndex={460}
+              attribution="RainViewer"
+            />
+          )}
+
           <MapClickAndSyncController
             centerLat={pinLat}
             centerLon={pinLon}
@@ -455,7 +583,7 @@ export const ForecastPinMiniMap: React.FC<ForecastPinMiniMapProps> = ({
         </MapContainer>
 
         {/* Floating Coordinates Pill Overlay on Map */}
-        <div className="absolute bottom-2.5 left-2.5 z-20 pointer-events-none">
+        <div className="absolute bottom-2.5 left-2.5 z-[500] pointer-events-none">
           <div className="px-3 py-1.5 rounded-full bg-white/95 dark:bg-[#0d1f36]/95 backdrop-blur-md border border-slate-200 dark:border-sky-700/70 shadow-md text-[11px] font-medium text-slate-700 dark:text-sky-100 flex items-center gap-2">
             <Crosshair className="w-3.5 h-3.5 text-[#0080cd] dark:text-sky-400 shrink-0" aria-hidden="true" />
             <span>
@@ -464,6 +592,48 @@ export const ForecastPinMiniMap: React.FC<ForecastPinMiniMapProps> = ({
               {areaRadiusKm > 0 ? ` • Área ${areaRadiusKm} km` : ''}
             </span>
           </div>
+        </div>
+
+        {/* Floating Model & Radar Status HUD on Mini-Map */}
+        <div
+          data-testid="minimap-weather-hud"
+          className="absolute top-2.5 right-2.5 z-[500] pointer-events-none max-w-[240px] rounded-xl bg-white/95 dark:bg-[#0d1f36]/95 backdrop-blur-md border border-sky-200/90 dark:border-sky-700/70 px-2.5 py-2 shadow-md space-y-1 text-[10px]"
+        >
+          <div className="flex items-center gap-1.5 font-extrabold text-sky-900 dark:text-sky-100">
+            <Radar className="w-3.5 h-3.5 text-[#0080cd] shrink-0" aria-hidden="true" />
+            <span className="truncate">Modelo: {activeModelDisplayName}</span>
+          </div>
+          <div className="flex items-center gap-1.5 text-slate-600 dark:text-sky-200/90">
+            <span
+              className={`w-2 h-2 rounded-full shrink-0 ${
+                !showRainViewerOverlay
+                  ? 'bg-slate-400'
+                  : radarState?.available
+                    ? 'bg-emerald-500'
+                    : 'bg-amber-500'
+              }`}
+              aria-hidden="true"
+            />
+            <span className="truncate">
+              {!showRainViewerOverlay
+                ? 'Radar RainViewer oculto'
+                : radarState?.available
+                  ? `Radar RainViewer Ativo (${radarState.frames.length}q)`
+                  : 'Radar RainViewer em sincronização'}
+            </span>
+          </div>
+          {windLegend && (
+            <div className="flex items-center gap-1 pt-0.5">
+              {windLegend.stops.map((s) => (
+                <span
+                  key={s.valueLabel}
+                  className="h-1.5 flex-1 rounded-full"
+                  style={{ backgroundColor: s.color }}
+                  title={`${s.valueLabel} ${windLegend.unit}`}
+                />
+              ))}
+            </div>
+          )}
         </div>
       </div>
 

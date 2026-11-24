@@ -39,7 +39,12 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
-      - name: Generate PWA & Android PNG icons from public/icon.svg
+      - name: Security audit & secret pattern check
+        run: |
+          npm audit --audit-level=high || true
+          ! git grep -nE "AIza[0-9A-Za-z_-]{35}|BEGIN (RSA |EC |OPENSSH )?PRIVATE KEY" -- src/ android/app/src/
+
+      - name: Generate PWA & Android PNG icons + Launcher mipmaps
         run: npm run icons:generate
 
       - name: Run TypeScript typecheck & Vitest unit tests
