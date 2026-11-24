@@ -8,10 +8,12 @@ import {
   ModuleErrorBoundary,
   ToastContainer,
 } from './components/common';
+import { AeronauticsTab } from './components/aeronautics';
 import { FieldDataTab } from './components/field';
 import { ForecastTab } from './components/forecast';
 import { AppShell, type AppTabId } from './components/layout';
 import { MapRadarTab } from './components/map';
+import { NavigationTab } from './components/navigation';
 import {
   buildLocationKey,
   checkIndexedDbHealth,
@@ -1101,6 +1103,38 @@ export function App(): React.ReactElement {
           </ModuleErrorBoundary>
         )}
 
+        {activeTab === 'navigation' && (
+          <ModuleErrorBoundary
+            moduleName="Módulo de Navegação Costeira, Marés & Bússola"
+            onErrorLog={handleErrorLog}
+          >
+            <NavigationTab
+              forecast={forecast}
+              activeLocation={activeLocation}
+              isDark={isDark}
+              onRequestGps={handleRequestGps}
+              onOpenLocationsModal={() => setIsLocationsModalOpen(true)}
+              onToast={addToast}
+              onErrorLog={handleErrorLog}
+            />
+          </ModuleErrorBoundary>
+        )}
+
+        {activeTab === 'aeronautics' && (
+          <ModuleErrorBoundary
+            moduleName="Módulo Aeronáutico, Índice Kp & Condições de Drone"
+            onErrorLog={handleErrorLog}
+          >
+            <AeronauticsTab
+              forecast={forecast}
+              activeLocation={activeLocation}
+              isDark={isDark}
+              onToast={addToast}
+              onErrorLog={handleErrorLog}
+            />
+          </ModuleErrorBoundary>
+        )}
+
         {activeTab === 'map' && (
           <ModuleErrorBoundary
             moduleName="Módulo de Mapa Interativo, Radar & Cache Offline"
@@ -1125,7 +1159,7 @@ export function App(): React.ReactElement {
 
         {activeTab === 'field' && (
           <ModuleErrorBoundary
-            moduleName="Módulo de Operações de Campo, GPS Tracker & Exportação"
+            moduleName="Módulo de Armazenamento, Campo, GPS Tracker & Exportação"
             onErrorLog={handleErrorLog}
           >
             <FieldDataTab
@@ -1134,6 +1168,9 @@ export function App(): React.ReactElement {
               savedLocations={savedLocations}
               waypoints={waypoints}
               tracks={tracks}
+              primaryLocationName={primaryLocation?.name ?? null}
+              onOpenLocationsModal={() => setIsLocationsModalOpen(true)}
+              onRequestGps={handleRequestGps}
               onWaypointsChange={setWaypoints}
               onTracksChange={setTracks}
               onToast={addToast}

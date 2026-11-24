@@ -1,11 +1,13 @@
 import React, { createContext, type ReactNode, useContext, useMemo, useState } from 'react';
 import {
+  Anchor,
   BookOpen,
   CloudSun,
-  Compass,
+  Database,
   Map as MapIcon,
   MapPin,
   Moon,
+  Plane,
   RefreshCw,
   Search,
   Sun,
@@ -20,7 +22,7 @@ import { HealthBadge } from '../common/HealthBadge';
 import { HealthCheckModal } from '../common/HealthCheckModal';
 import { SavedLocationsModal } from './SavedLocationsModal';
 
-export type AppTabId = 'forecast' | 'map' | 'field';
+export type AppTabId = 'forecast' | 'navigation' | 'aeronautics' | 'map' | 'field';
 
 export interface AppLocationContextValue {
   activeLocation: ActiveCoordinates;
@@ -154,24 +156,40 @@ export const AppShell: React.FC<AppShellProps> = ({
   const tabs: Array<{
     id: AppTabId;
     label: string;
+    mobileLabel: string;
     Icon: React.ComponentType<{ className?: string }>;
     badgeCount?: number;
   }> = [
     {
       id: 'forecast',
-      label: 'Previsão',
+      label: 'Principal',
+      mobileLabel: 'Principal',
       Icon: CloudSun,
       badgeCount: activeAlertsCount > 0 ? activeAlertsCount : undefined,
     },
     {
+      id: 'navigation',
+      label: 'Navegação',
+      mobileLabel: 'Navegar',
+      Icon: Anchor,
+    },
+    {
+      id: 'aeronautics',
+      label: 'Aeronáutica',
+      mobileLabel: 'Drone/Kp',
+      Icon: Plane,
+    },
+    {
       id: 'map',
-      label: 'Mapa & Radar',
+      label: 'Mapa',
+      mobileLabel: 'Mapa',
       Icon: MapIcon,
     },
     {
       id: 'field',
-      label: 'Campo & Dados',
-      Icon: Compass,
+      label: 'Armazenamento',
+      mobileLabel: 'Dados',
+      Icon: Database,
     },
   ];
 
@@ -317,7 +335,7 @@ export const AppShell: React.FC<AppShellProps> = ({
 
               <nav
                 aria-label="Navegação Principal Desktop"
-                className="hidden md:flex items-center gap-1.5 mx-auto sm:mx-0"
+                className="hidden md:flex items-center gap-1 mx-auto sm:mx-0 flex-wrap"
               >
                 {tabs.map(({ id, label, Icon, badgeCount }) => {
                   const isActive = activeTab === id;
@@ -327,13 +345,13 @@ export const AppShell: React.FC<AppShellProps> = ({
                       type="button"
                       onClick={() => onTabChange(id)}
                       aria-current={isActive ? 'page' : undefined}
-                      className={`min-h-[36px] px-4 py-1.5 rounded-lg text-xs font-bold inline-flex items-center gap-2 transition-all focus:outline-none focus:ring-2 focus:ring-white ${
+                      className={`min-h-[38px] px-3 py-1.5 rounded-lg text-xs font-bold inline-flex items-center gap-1.5 transition-colors duration-75 focus:outline-none focus:ring-2 focus:ring-white ${
                         isActive
                           ? 'bg-white text-[#0070b8] shadow-sm'
                           : 'text-white/90 hover:bg-white/15'
                       }`}
                     >
-                      <Icon className="w-4 h-4" aria-hidden="true" />
+                      <Icon className="w-4 h-4 shrink-0" aria-hidden="true" />
                       <span>{label}</span>
                       {badgeCount !== undefined && badgeCount > 0 && (
                         <span
@@ -359,31 +377,34 @@ export const AppShell: React.FC<AppShellProps> = ({
           {children}
         </main>
 
-        {/* Mobile Fixed Bottom Tab Bar (3 Tabs >= 44x44px) */}
+        {/* Mobile Fixed Bottom Tab Bar (5 Tabs >= 44x44px) */}
         <nav
           aria-label="Navegação Principal Mobile"
-          className="md:hidden fixed bottom-0 inset-x-0 z-40 border-t border-sky-200 dark:border-sky-800/70 bg-white/95 dark:bg-[#0f243d]/95 backdrop-blur-md px-2 py-1.5 shadow-xl"
+          className="md:hidden fixed bottom-0 inset-x-0 z-40 border-t border-sky-200 dark:border-sky-800/70 bg-white/95 dark:bg-[#0f243d]/95 backdrop-blur-md px-1.5 py-1.5 shadow-xl"
         >
-          <div className="grid grid-cols-3 gap-1.5 max-w-md mx-auto">
-            {tabs.map(({ id, label, Icon, badgeCount }) => {
+          <div className="grid grid-cols-5 gap-1 max-w-lg mx-auto">
+            {tabs.map(({ id, label, mobileLabel, Icon, badgeCount }) => {
               const isActive = activeTab === id;
               return (
                 <button
                   key={id}
                   type="button"
+                  aria-label={label}
                   onClick={() => onTabChange(id)}
                   aria-current={isActive ? 'page' : undefined}
-                  className={`min-h-[48px] min-w-[44px] py-1.5 px-2 rounded-xl flex flex-col items-center justify-center gap-0.5 text-xs font-bold transition-colors relative focus:outline-none focus:ring-2 focus:ring-sky-500 ${
+                  className={`min-h-[48px] min-w-[44px] py-1.5 px-1 rounded-xl flex flex-col items-center justify-center gap-0.5 text-xs font-bold transition-colors relative focus:outline-none focus:ring-2 focus:ring-sky-500 ${
                     isActive
                       ? 'bg-[#0080cd] text-white shadow-sm'
                       : 'text-slate-600 dark:text-sky-200 hover:bg-sky-50 dark:hover:bg-sky-900/40'
                   }`}
                 >
-                  <Icon className="w-5 h-5" aria-hidden="true" />
-                  <span className="text-[11px] leading-tight">{label}</span>
+                  <Icon className="w-4 h-4 shrink-0" aria-hidden="true" />
+                  <span className="text-[10px] leading-tight truncate max-w-full">
+                    {mobileLabel}
+                  </span>
                   {badgeCount !== undefined && badgeCount > 0 && (
                     <span
-                      className={`absolute top-1 right-3 px-1.5 py-0.2 rounded-full text-[10px] font-bold ${
+                      className={`absolute top-0.5 right-1 px-1 py-0.2 rounded-full text-[9px] font-bold ${
                         isActive ? 'bg-white text-[#0080cd]' : 'bg-amber-500 text-slate-950'
                       }`}
                     >

@@ -265,3 +265,18 @@ export const OpenMeteoArchiveResponseSchema = z
   .passthrough();
 
 export type OpenMeteoArchiveResponse = z.infer<typeof OpenMeteoArchiveResponseSchema>;
+
+/**
+ * Schema do feed oficial aberto NOAA SWPC Planetary K-index (`noaa-planetary-k-index-forecast.json`).
+ */
+export const NoaaSwpcKpPointSchema = z
+  .object({
+    time_tag: z.string(),
+    kp: z.number(),
+    observed: z.string(),
+    noaa_scale: z.string().nullable().optional(),
+  })
+  .passthrough();
+
+export const NoaaSwpcKpForecastSchema = z.array(NoaaSwpcKpPointSchema);
+export type NoaaSwpcKpPoint = z.infer<typeof NoaaSwpcKpPointSchema>;

@@ -154,3 +154,14 @@
   - Autodiagnóstico real dos 5 endpoints (`Nominatim`, `ipwho.is`, `RainViewer`, `Open-Meteo Forecast/Marine`) com badge inicial `Sob Demanda / Não Verificado`.
   - Geração automática de mipmaps Android e fundo `#0F172A` em `scripts/generate-icons.mjs` para exibição do ícone FieldCast no Android.
   - Verificado: `npx tsc --noEmit` (0 erros), `npm run test` (15/15 arquivos, 107/107 testes), `npm run build` (`dist/` + `PWA v0.21.2`) e auditoria visual Browser QA sem erros de console.
+
+---
+
+## Sprint 6 / V3 Modularização em 5 Abas, Kp Index, Drone Score & Marés — **CONCLUÍDA**
+- **Arquitetura Modular em 5 Abas (`AppShell.tsx` & `App.tsx`)**:
+  - **Principal (`forecast`)**: Visão climática principal (`CurrentSummaryCard`, mini-mapa pin, alertas, gráficos, `WindguruTable` e efemérides).
+  - **Navegação (`navigation` — `NavigationTab.tsx`)**: Tábua/curva de marés regionais (`sea_level_height_msl` + detector de extremos `Preia-mar` / `Baixa-mar` via `extractTideExtrema`), onda significativa, swell, corrente oceânica, aviso explícito de não-substituição à DHN / Marinha do Brasil, fallback continental e bússola `WindCompass`.
+  - **Aeronáutica (`aeronautics` — `AeronauticsTab.tsx`)**: Feed aberto NOAA SWPC (`kpIndexService.ts`) com cache/fallback offline, controle **Manual Override de Índice Kp** (`0.0–9.0` slider e numérico), escala geomagnética `G0–G5`, **Índice de Condições de Voo para Drone (0–100)** (`droneFlightIndex.ts`) reativo à altitude AGL alvo (`30–120m`), limites configuráveis e perfil vertical de vento.
+  - **Mapa (`map`)**: `MapRadarTab` com modelos meteorológicos, RainViewer e cache offline de até 300 tiles.
+  - **Armazenamento (`field` — `FieldDataTab.tsx`)**: Painel resumido de persistência local IndexedDB (Locais Salvos, Área Principal, Waypoints, Rotas GPX, Logs/Regras e Tiles Offline `X/300`) com limpeza de tiles, GPS Tracker, Waypoints, Exportação e Séries Históricas.
+- **Verificação V3**: `npx tsc --noEmit` (0 erros), `npm run test` (16/16 arquivos, 115/115 testes), `npm run build` (`dist/` + `PWA v0.21.2`), auditoria visual no navegador em `1280x800` e `390x844` (0 erros de console, zero overflow horizontal), e compilação Windows + Android Debug APK (`app-debug.apk`).

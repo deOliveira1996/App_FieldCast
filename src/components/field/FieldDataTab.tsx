@@ -7,14 +7,17 @@ import {
   ChevronUp,
   Clock,
   Compass as CompassIcon,
+  Database,
   Download,
   FileArchive,
   FileCode,
   FileSpreadsheet,
   FileText,
   Globe,
+  HardDrive,
   History,
   Image as ImageIcon,
+  Layers,
   MapPin,
   MessageSquareShare,
   Navigation,
@@ -26,6 +29,7 @@ import {
   Share2,
   Smartphone,
   Square,
+  Star,
   Trash2,
   Waves,
   Wind,
@@ -33,8 +37,10 @@ import {
 import { ModuleErrorBoundary } from '../common/ModuleErrorBoundary';
 import * as dbModule from '../../db/database';
 import {
+  clearOfflineTiles,
   deleteTrackSession,
   deleteWaypoint,
+  getOfflineTilesCount,
   getSavedLocations,
   getTrackSessions,
   getWaypoints,
@@ -73,7 +79,6 @@ import type { ErrorLogRecord, ToastMessage } from '../../types/health';
 import type { NormalizedForecast } from '../../types/weather';
 import { UTF8_BOM } from '../../utils/exporters';
 import { safeAction } from '../../utils/safeAction';
-import { WindCompass } from './WindCompass';
 
 const ALL_HISTORICAL_MODELS: readonly HistoricalModelSelection[] = [
   'fieldcast',
@@ -621,6 +626,9 @@ export interface FieldDataTabProps {
     log: HistoricalLogEntry,
     format?: ExportFormat,
   ) => void | Promise<void>;
+  primaryLocationName?: string | null;
+  onOpenLocationsModal?: () => void;
+  onRequestGps?: () => void | Promise<void>;
   onToast?: (toast: Omit<ToastMessage, 'id'>) => void;
   onErrorLog?: (record: ErrorLogRecord) => void | Promise<void>;
   simulatedCompassHeadingDeg?: number | null;
@@ -645,6 +653,9 @@ export const FieldDataTab: React.FC<FieldDataTabProps> = ({
   tracks: externalTracks,
   historicalLogs: externalHistoricalLogs,
   recurrenceRules: externalRecurrenceRules,
+  primaryLocationName = null,
+  onOpenLocationsModal,
+  onRequestGps,
   onWaypointsChange,
   onTracksChange,
   onFetchHistoricalSeries,
@@ -653,7 +664,6 @@ export const FieldDataTab: React.FC<FieldDataTabProps> = ({
   onDownloadHistoricalLog,
   onToast,
   onErrorLog,
-  simulatedCompassHeadingDeg,
 }) => {
   // Estado do GPS Tracker
   const [trackerState, setTrackerState] = useState<LocationTrackerState>(() =>
@@ -673,8 +683,21 @@ export const FieldDataTab: React.FC<FieldDataTabProps> = ({
   const [isCompressingPhoto, setIsCompressingPhoto] = useState<boolean>(false);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
 
-  // Estado da Central de Exportação
+  // Estado da Central de Exportação e Armazenamento Offline
   const [selectedDataset, setSelectedDataset] = useState<ExportDatasetKind>('mission_bundle');
+  const [offlineTilesCount, setOfflineTilesCount] = useState<number>(0);
+
+  useEffect(() => {
+    let active = true;
+    void getOfflineTilesCount()
+      .then((count) => {
+        if (active) setOfflineTilesCount(count);
+      })
+      .catch(() => {});
+    return () => {
+      active = false;
+    };
+  }, []);
 
   // Estado da Seção Opcional: Séries Históricas & Recorrência Semanal
   const [isHistoricalExpanded, setIsHistoricalExpanded] = useState<boolean>(true);
@@ -1381,23 +1404,158 @@ export const FieldDataTab: React.FC<FieldDataTabProps> = ({
   const allModelsSelected =
     ALL_HISTORICAL_MODELS.every((m) => histSelectedModels.includes(m));
 
+  const handleClearOfflineTilesClick = () => {
+    void safeAction(
+      async () => {
+        await clearOfflineTiles();
+        setOfflineTilesCount(0);
+        onToast?.({
+          type: 'info',
+          title: 'Cache de tiles offline limpo',
+          message: 'Todos os blocos de mapa em cache local foram removidos.',
+        });
+      },
+      {
+        actionKey: 'clear_offline_tiles_storage_panel',
+        moduleName: 'FieldDataTab/StoragePanel',
+        errorTitle: 'Erro ao limpar cache de tiles offline',
+        onToast,
+        onErrorLog,
+      },
+    );
+  };
+
   return (
-    <div className="space-y-6 pb-8">
-      {/* 1. Bússola de Vento e Onda Relativa (Oculta automaticamente em Desktop/Sem sensor) */}
+    <div data-testid="storage-and-field-tab" className="space-y-6 pb-8">
+      {/* 1. Painel de Armazenamento & Dados Locais (Zero Servidor / Privacy-First) */}
       <ModuleErrorBoundary
-        moduleName="Bússola de Vento e Onda Relativa"
+        moduleName="Painel de Armazenamento e Dados Locais"
         onErrorLog={onErrorLog}
       >
-        <WindCompass
-          windDirection10mDeg={currentSnapshot.windDirection10mDeg}
-          windSpeed10mKmh={currentSnapshot.windSpeed10mKmh}
-          waveDirectionDeg={currentSnapshot.waveDirectionDeg}
-          waveHeightM={currentSnapshot.waveHeightM}
-          marineAvailable={forecast?.marineAvailable ?? false}
-          simulatedHeadingDeg={simulatedCompassHeadingDeg}
-          onToast={onToast}
-          onErrorLog={onErrorLog}
-        />
+        <section
+          data-testid="storage-overview-panel"
+          aria-label="Painel de Armazenamento e Dados Locais"
+          className="rounded-2xl border border-slate-200/90 dark:border-sky-800/70 bg-white dark:bg-[#132a47] p-5 shadow-sm space-y-4"
+        >
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <div className="flex items-center gap-2.5">
+              <div className="p-2 rounded-xl bg-sky-500/15 text-sky-600 dark:text-sky-400">
+                <Database className="w-5 h-5" aria-hidden="true" />
+              </div>
+              <div>
+                <h2 className="text-base md:text-lg font-bold text-slate-900 dark:text-white">
+                  Armazenamento Local & Missões (IndexedDB)
+                </h2>
+                <p className="text-xs text-slate-600 dark:text-slate-400">
+                  Persistência offline privada no dispositivo &bull; Zero envio para nuvem
+                </p>
+              </div>
+            </div>
+
+            <div className="flex flex-wrap items-center gap-2">
+              {onRequestGps && (
+                <button
+                  type="button"
+                  onClick={() =>
+                    void safeAction(async () => onRequestGps(), {
+                      actionKey: 'storage_panel_request_gps',
+                      moduleName: 'FieldDataTab',
+                      errorTitle: 'Erro ao atualizar GPS',
+                      onToast,
+                      onErrorLog,
+                    })
+                  }
+                  className="min-h-[44px] min-w-[44px] px-3.5 py-2 rounded-xl border border-slate-200 dark:border-sky-700 bg-slate-50 dark:bg-[#0f243d] hover:bg-sky-50 text-xs font-bold text-slate-700 dark:text-sky-100 inline-flex items-center gap-1.5"
+                >
+                  <MapPin className="w-4 h-4 text-sky-600 dark:text-sky-400" />
+                  <span>GPS Atual</span>
+                </button>
+              )}
+              {onOpenLocationsModal && (
+                <button
+                  type="button"
+                  onClick={onOpenLocationsModal}
+                  className="min-h-[44px] min-w-[44px] px-3.5 py-2 rounded-xl bg-[#0080cd] hover:bg-[#006eb3] text-white text-xs font-bold inline-flex items-center gap-1.5"
+                >
+                  <Star className="w-4 h-4" />
+                  <span>Gerenciar Locais</span>
+                </button>
+              )}
+              {offlineTilesCount > 0 && (
+                <button
+                  type="button"
+                  onClick={handleClearOfflineTilesClick}
+                  className="min-h-[44px] min-w-[44px] px-3.5 py-2 rounded-xl border border-rose-300 dark:border-rose-700/70 bg-rose-50 dark:bg-rose-950/40 text-rose-700 dark:text-rose-200 text-xs font-bold inline-flex items-center gap-1.5"
+                >
+                  <Trash2 className="w-4 h-4" />
+                  <span>Limpar Tiles ({offlineTilesCount})</span>
+                </button>
+              )}
+            </div>
+          </div>
+
+          <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-2.5 text-xs">
+            <div className="rounded-xl border border-slate-200/80 dark:border-sky-800/60 bg-slate-50/80 dark:bg-[#0f243d] p-3">
+              <span className="inline-flex items-center gap-1 text-[10px] font-semibold uppercase text-slate-500 dark:text-slate-400">
+                <Star className="w-3 h-3 text-amber-500" />
+                Área Principal
+              </span>
+              <p className="text-sm font-extrabold text-slate-900 dark:text-white truncate mt-1">
+                {primaryLocationName || activeLocation.name}
+              </p>
+            </div>
+
+            <div className="rounded-xl border border-slate-200/80 dark:border-sky-800/60 bg-slate-50/80 dark:bg-[#0f243d] p-3">
+              <span className="inline-flex items-center gap-1 text-[10px] font-semibold uppercase text-slate-500 dark:text-slate-400">
+                <MapPin className="w-3 h-3 text-sky-500" />
+                Locais Salvos
+              </span>
+              <p className="text-lg font-black text-slate-900 dark:text-white mt-0.5">
+                {storedLocations.length}
+              </p>
+            </div>
+
+            <div className="rounded-xl border border-slate-200/80 dark:border-sky-800/60 bg-slate-50/80 dark:bg-[#0f243d] p-3">
+              <span className="inline-flex items-center gap-1 text-[10px] font-semibold uppercase text-slate-500 dark:text-slate-400">
+                <CompassIcon className="w-3 h-3 text-emerald-500" />
+                Waypoints
+              </span>
+              <p className="text-lg font-black text-slate-900 dark:text-white mt-0.5">
+                {savedWaypoints.length}
+              </p>
+            </div>
+
+            <div className="rounded-xl border border-slate-200/80 dark:border-sky-800/60 bg-slate-50/80 dark:bg-[#0f243d] p-3">
+              <span className="inline-flex items-center gap-1 text-[10px] font-semibold uppercase text-slate-500 dark:text-slate-400">
+                <Route className="w-3 h-3 text-indigo-500" />
+                Rotas GPX
+              </span>
+              <p className="text-lg font-black text-slate-900 dark:text-white mt-0.5">
+                {savedTracks.length}
+              </p>
+            </div>
+
+            <div className="rounded-xl border border-slate-200/80 dark:border-sky-800/60 bg-slate-50/80 dark:bg-[#0f243d] p-3">
+              <span className="inline-flex items-center gap-1 text-[10px] font-semibold uppercase text-slate-500 dark:text-slate-400">
+                <HardDrive className="w-3 h-3 text-sky-500" />
+                Logs & Regras
+              </span>
+              <p className="text-lg font-black text-slate-900 dark:text-white mt-0.5">
+                {activeHistoricalLogs.length} / {activeRecurrenceRules.length}
+              </p>
+            </div>
+
+            <div className="rounded-xl border border-slate-200/80 dark:border-sky-800/60 bg-slate-50/80 dark:bg-[#0f243d] p-3">
+              <span className="inline-flex items-center gap-1 text-[10px] font-semibold uppercase text-slate-500 dark:text-slate-400">
+                <Layers className="w-3 h-3 text-cyan-500" />
+                Tiles Offline
+              </span>
+              <p className="text-lg font-black text-slate-900 dark:text-white mt-0.5">
+                {offlineTilesCount}/300
+              </p>
+            </div>
+          </div>
+        </section>
       </ModuleErrorBoundary>
 
       {/* 2. Painel GPS Tracker Adaptativo */}
