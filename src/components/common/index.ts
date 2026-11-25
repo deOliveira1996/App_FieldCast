@@ -6,3 +6,5 @@ export * from './HelpPopover';
 export * from './GlossaryModal';
 export * from './HealthBadge';
 export * from './HealthCheckModal';
+export * from './FullscreenViewer';
+export * from './ModelModeSwitchPill';

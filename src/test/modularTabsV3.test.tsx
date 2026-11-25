@@ -200,27 +200,31 @@ describe('FieldCast Modular 5-Tab UI, Kp Index, Drone Conditions & Tides (V3)', 
       const mobileNav = mounted.container.querySelector(
         'nav[aria-label="Navegação Principal Mobile"] > div',
       );
-      expect(desktopNav?.querySelectorAll('button')).toHaveLength(5);
+      expect(desktopNav?.querySelectorAll('button')).toHaveLength(7);
       expect(mobileNav?.className).toContain('grid-cols-5');
       expect(mobileNav?.querySelectorAll('button')).toHaveLength(5);
 
       const navButtons = Array.from(desktopNav!.querySelectorAll('button'));
-      expect(navButtons.map((b) => b.textContent?.trim())).toEqual([
-        'Principal',
-        'Navegação',
-        'Aeronáutica',
-        'Mapa',
-        'Armazenamento',
-      ]);
+      expect(navButtons.map((b) => b.getAttribute('aria-label') ?? b.textContent?.trim())).toEqual(
+        expect.arrayContaining([
+          expect.stringContaining('Resumo'),
+          expect.stringContaining('Modelos'),
+          expect.stringContaining('Navegação'),
+          expect.stringContaining('Aeronáutica'),
+          expect.stringContaining('Mapa'),
+          expect.stringContaining('Armazenamento'),
+          expect.stringContaining('Configurações'),
+        ]),
+      );
 
       act(() => {
         navButtons[1]!.click();
         navButtons[2]!.click();
-        navButtons[4]!.click();
+        navButtons[5]!.click();
       });
 
-      expect(onTabChange).toHaveBeenNthCalledWith(1, 'navigation');
-      expect(onTabChange).toHaveBeenNthCalledWith(2, 'aeronautics');
+      expect(onTabChange).toHaveBeenNthCalledWith(1, 'comparison');
+      expect(onTabChange).toHaveBeenNthCalledWith(2, 'navigation');
       expect(onTabChange).toHaveBeenNthCalledWith(3, 'field');
     });
 

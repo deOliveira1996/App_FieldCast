@@ -30,9 +30,13 @@ import {
   Download,
   HardDrive,
   Layers,
+  Lock,
   MapPin,
   Maximize2,
+  Minimize2,
   Navigation,
+  PanelRightClose,
+  PanelRightOpen,
   Pause,
   Play,
   Radar,
@@ -41,10 +45,12 @@ import {
   ShieldAlert,
   SkipBack,
   SkipForward,
+  SlidersHorizontal,
   Sparkles,
   Square,
   Thermometer,
   Trash2,
+  Unlock,
   Waves,
   Wind,
   XCircle,
@@ -88,6 +94,7 @@ import {
   fetchOpenMeteoSpatialGrid,
   getLayerLegendSpec,
   getModelModeDisplayName,
+  interpolateGridValueAtPoint,
   type MapModelMode,
   type SpatialGridForecast,
   type WeatherMapLayerId,
@@ -294,16 +301,20 @@ function MapViewportBridge({
   centerLat,
   centerLon,
   recenterTrigger,
+  layoutKey,
   onViewportChange,
   onMapClick,
 }: {
   centerLat: number;
   centerLon: number;
   recenterTrigger: number;
+  layoutKey: string;
   onViewportChange: (viewport: ViewportSnapshot) => void;
   onMapClick: (lat: number, lon: number) => void;
 }): null {
   const map = useMap();
+  const mapRef = useRef(map);
+  mapRef.current = map;
   const prevCenterRef = useRef<{ lat: number; lon: number; trigger: number }>({
     lat: centerLat,
     lon: centerLon,
@@ -312,30 +323,70 @@ function MapViewportBridge({
 
   const emitViewport = useCallback(() => {
     try {
-      const b = map.getBounds();
+      const b = mapRef.current.getBounds();
       onViewportChange({
         north: b.getNorth(),
         south: b.getSouth(),
         east: b.getEast(),
         west: b.getWest(),
-        zoom: map.getZoom(),
+        zoom: mapRef.current.getZoom(),
       });
     } catch {
       // Ignora caso o mapa ainda não esteja inicializado
     }
-  }, [map, onViewportChange]);
+  }, [onViewportChange]);
 
   const emitViewportRef = useRef(emitViewport);
   emitViewportRef.current = emitViewport;
 
   useEffect(() => {
     const timer = window.setTimeout(() => {
-      map.invalidateSize();
+      try {
+        mapRef.current.invalidateSize();
+      } catch {
+        // Ignora em ambiente headless de teste
+      }
       emitViewportRef.current();
-    }, 120);
+    }, 80);
     emitViewportRef.current();
     return () => window.clearTimeout(timer);
-  }, [map]);
+  }, [layoutKey]);
+
+  useEffect(() => {
+    let settleTimer: number | null = null;
+    const handleViewportRefresh = () => {
+      try {
+        mapRef.current.invalidateSize();
+      } catch {
+        // Ignora em ambiente headless de teste
+      }
+      emitViewportRef.current();
+      if (settleTimer !== null) {
+        window.clearTimeout(settleTimer);
+      }
+      settleTimer = window.setTimeout(() => {
+        try {
+          mapRef.current.invalidateSize();
+        } catch {
+          // Ignora em ambiente headless de teste
+        }
+        emitViewportRef.current();
+      }, 80);
+    };
+
+    window.addEventListener('resize', handleViewportRefresh);
+    window.addEventListener('orientationchange', handleViewportRefresh);
+    window.addEventListener('fieldcast:layout-refresh', handleViewportRefresh);
+
+    return () => {
+      if (settleTimer !== null) {
+        window.clearTimeout(settleTimer);
+      }
+      window.removeEventListener('resize', handleViewportRefresh);
+      window.removeEventListener('orientationchange', handleViewportRefresh);
+      window.removeEventListener('fieldcast:layout-refresh', handleViewportRefresh);
+    };
+  }, []);
 
   useEffect(() => {
     const prev = prevCenterRef.current;
@@ -351,19 +402,21 @@ function MapViewportBridge({
         trigger: recenterTrigger,
       };
       const currentCenter =
-        typeof map.getCenter === 'function' ? map.getCenter() : null;
+        typeof mapRef.current.getCenter === 'function'
+          ? mapRef.current.getCenter()
+          : null;
       const alreadyNearCenter =
         currentCenter &&
         Math.abs(currentCenter.lat - centerLat) < 0.0002 &&
         Math.abs(currentCenter.lng - centerLon) < 0.0002;
       if (!alreadyNearCenter || triggerChanged) {
-        map.setView([centerLat, centerLon], map.getZoom(), {
+        mapRef.current.setView([centerLat, centerLon], mapRef.current.getZoom(), {
           animate: triggerChanged,
         });
       }
       emitViewportRef.current();
     }
-  }, [centerLat, centerLon, recenterTrigger, map]);
+  }, [centerLat, centerLon, recenterTrigger]);
 
   useMapEvents({
     moveend() {
@@ -384,7 +437,7 @@ const MAP_MODEL_OPTIONS: ReadonlyArray<{
   id: MapModelMode;
   label: string;
 }> = [
-  { id: 'fieldcast', label: 'FieldCast (Ensemble)' },
+  { id: 'fieldcast', label: 'FieldCast Ensemble' },
   { id: 'ecmwf_ifs025', label: 'ECMWF 9 km' },
   { id: 'gfs_seamless', label: 'GFS 13 km' },
   { id: 'icon_seamless', label: 'ICON 13 km' },
@@ -450,10 +503,28 @@ function MapRadarTabContent({
   const [isLoadingSpatialGrid, setIsLoadingSpatialGrid] = useState<boolean>(false);
   const [radarTileErrorCount, setRadarTileErrorCount] = useState<number>(0);
 
-  // Modo Pin estilo Windy (quando ativo, clicar no mapa já move o Pin e carrega a previsão)
+  // Modo Pin estilo Windy, Trava Reativa de Marcador (Pin-Lock), Tela Cheia e Gaveta Windy
   const [instantWindyPin, setInstantWindyPin] = useState<boolean>(true);
+  const [isPinLocked, setIsPinLocked] = useState<boolean>(false);
+  const [isFullscreen, setIsFullscreen] = useState<boolean>(false);
+  const [isSidebarOpen, setIsSidebarOpen] = useState<boolean>(true);
   const [forecastAreaRadiusKm, setForecastAreaRadiusKm] = useState<number>(5);
   const [customPinName, setCustomPinName] = useState<string>('');
+
+  useEffect(() => {
+    if (!isFullscreen) return;
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') {
+        setIsFullscreen(false);
+      }
+    };
+    window.addEventListener('keydown', handleKeyDown);
+    document.addEventListener('keydown', handleKeyDown);
+    return () => {
+      window.removeEventListener('keydown', handleKeyDown);
+      document.removeEventListener('keydown', handleKeyDown);
+    };
+  }, [isFullscreen]);
 
   // Estado do Radar RainViewer
   const [radarState, setRadarState] = useState<RainViewerRadarState | null>(null);
@@ -830,6 +901,10 @@ function MapRadarTabContent({
         longitude: roundedLon,
       });
 
+      if (isPinLocked) {
+        return;
+      }
+
       if (instantWindyPin && onSelectLocation) {
         const trimmed = customPinName.trim();
         const areaLabel =
@@ -847,6 +922,7 @@ function MapRadarTabContent({
       missionBounds.minZoom,
       missionBounds.maxZoom,
       onToast,
+      isPinLocked,
       instantWindyPin,
       onSelectLocation,
       customPinName,
@@ -1121,10 +1197,41 @@ function MapRadarTabContent({
     return createWindyFlagPinIcon({
       titleText: `${inspectedPoint.latitude.toFixed(3)}°, ${inspectedPoint.longitude.toFixed(3)}°`,
       subtitleText: customPinName.trim() || 'Novo Pin no Mapa',
-      ctaText: 'Previsão para este local',
+      ctaText: isPinLocked ? 'Pin Fixado (Consulta)' : 'Previsão para este local',
       isPending: true,
     });
-  }, [inspectedPoint, customPinName]);
+  }, [inspectedPoint, customPinName, isPinLocked]);
+
+  // Valores interpolados da grade 3x3 no ponto consultado quando o Pin está fixado
+  const lockedGridSample = useMemo(() => {
+    if (!isPinLocked || !inspectedPoint) return null;
+    const pts = activeMapGridSlice?.points ?? [];
+    if (pts.length === 0) return null;
+    const wind = interpolateGridValueAtPoint(
+      pts,
+      inspectedPoint.latitude,
+      inspectedPoint.longitude,
+      'wind',
+    );
+    const rain = interpolateGridValueAtPoint(
+      pts,
+      inspectedPoint.latitude,
+      inspectedPoint.longitude,
+      'rain',
+    );
+    const temp = interpolateGridValueAtPoint(
+      pts,
+      inspectedPoint.latitude,
+      inspectedPoint.longitude,
+      'temperature',
+    );
+    return {
+      windSpeedKmh: wind.value,
+      windDirectionDeg: wind.windDirectionDeg,
+      precipMm: rain.value,
+      tempC: temp.value,
+    };
+  }, [isPinLocked, inspectedPoint, activeMapGridSlice?.points]);
 
   const progressPct =
     downloadProgress && downloadProgress.totalTiles > 0
@@ -1143,289 +1250,19 @@ function MapRadarTabContent({
     'Mapa Padrão (OSM)';
 
   return (
-    <div className="space-y-4 pb-8">
-      {/* Cabeçalho Clean Azul & Branco: Seletor de Mapa Base (Sem API Key), Modo Pin Windy e Camadas */}
-      <section className="rounded-2xl border border-sky-200/80 dark:border-sky-900/60 bg-white dark:bg-slate-900/90 p-4 sm:p-5 shadow-sm space-y-3.5">
-        <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-3">
-          <div className="space-y-1">
-            <div className="flex flex-wrap items-center gap-2">
-              <span className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-bold bg-sky-600 text-white shadow-sm">
-                <MapPin className="w-3.5 h-3.5" aria-hidden="true" />
-                Mapa de Previsão por Pin &amp; Radar
-              </span>
-              <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-semibold bg-sky-50 dark:bg-sky-950/60 text-sky-700 dark:text-sky-300 border border-sky-200 dark:border-sky-800">
-                100% Gratuito • Sem API Key ({activeBaseStyleLabel})
-              </span>
-              <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-semibold bg-emerald-50 dark:bg-emerald-950/60 text-emerald-700 dark:text-emerald-300 border border-emerald-200 dark:border-emerald-800">
-                <HardDrive className="w-3.5 h-3.5" aria-hidden="true" />
-                Cache Offline: {cacheStats.totalTiles} tiles
-              </span>
-            </div>
-            <p className="text-xs sm:text-sm text-slate-600 dark:text-slate-300">
-              Pin ativo:{' '}
-              <strong className="text-sky-900 dark:text-white">
-                {activeLocation.name}
-              </strong>{' '}
-              ({activeLocation.latitude.toFixed(4)}°,{' '}
-              {activeLocation.longitude.toFixed(4)}°)
-              {forecast ? ` • Altitude DEM: ${Math.round(forecast.elevationDemM)}m` : ''}
-              {' • '}
-              <span className="text-sky-700 dark:text-sky-300 font-medium">
-                Clique ou arraste o Pin em qualquer lugar do mapa para obter a previsão!
-              </span>
-            </p>
-          </div>
-
-          {/* Seletor de Estilo de Mapa Base (Padrão OSM / Costeiro Esri / Satélite Esri) */}
-          <div className="flex flex-wrap items-center gap-2">
-            <div
-              className="inline-flex items-center rounded-xl bg-sky-50/90 dark:bg-slate-800 p-1 border border-sky-200/80 dark:border-slate-700"
-              role="group"
-              aria-label="Seletor de Estilo de Mapa Base"
-            >
-              {BASE_MAP_STYLES.map((style) => (
-                <button
-                  key={style.id}
-                  type="button"
-                  onClick={() => setBaseStyle(style.id)}
-                  className={`min-h-[38px] px-3 py-1.5 rounded-lg text-xs font-semibold transition-all ${
-                    baseStyle === style.id
-                      ? 'bg-sky-600 text-white shadow-sm'
-                      : 'text-slate-600 dark:text-slate-300 hover:text-sky-700 hover:bg-white/60'
-                  }`}
-                >
-                  {style.shortLabel}
-                </button>
-              ))}
-            </div>
-
-            <button
-              type="button"
-              onClick={() => setRecenterTrigger((prev) => prev + 1)}
-              className="min-h-[44px] min-w-[44px] px-3.5 py-2 rounded-xl text-xs font-semibold inline-flex items-center gap-1.5 bg-sky-600 hover:bg-sky-500 text-white shadow-sm transition-colors"
-              title="Centralizar mapa no Pin ativo"
-            >
-              <Crosshair className="w-4 h-4" aria-hidden="true" />
-              <span>Centralizar Pin</span>
-            </button>
-          </div>
-        </div>
-
-        {/* Segunda Linha: Controle do Pin Estilo Windy (Raio de Área + Aplicação Instantânea) e Camadas */}
-        <div className="pt-2.5 border-t border-sky-100 dark:border-slate-800 flex flex-col xl:flex-row xl:items-center justify-between gap-2.5">
-          {/* Controles do Pin & Área de Previsão */}
-          <div className="flex flex-wrap items-center gap-2">
-            <button
-              type="button"
-              onClick={() => setInstantWindyPin((prev) => !prev)}
-              aria-pressed={instantWindyPin}
-              className={`min-h-[44px] px-3.5 py-2 rounded-xl text-xs font-semibold inline-flex items-center gap-1.5 border transition-colors ${
-                instantWindyPin
-                  ? 'bg-sky-600 text-white border-sky-600 shadow-sm'
-                  : 'bg-sky-50/70 dark:bg-slate-800 border-sky-200 dark:border-slate-700 text-sky-900 dark:text-slate-200'
-              }`}
-              title="Quando ativo, um clique em qualquer ponto do mapa posiciona o Pin e já carrega a previsão horária como no Windy"
-            >
-              <Sparkles className="w-4 h-4" aria-hidden="true" />
-              <span>
-                {instantWindyPin
-                  ? 'Pin Instantâneo (Estilo Windy): Ativo'
-                  : 'Modo Inspeção (Confirmar antes de aplicar)'}
-              </span>
-            </button>
-
-            <div className="inline-flex items-center rounded-xl bg-sky-50/80 dark:bg-slate-800 p-1 border border-sky-200/80 dark:border-slate-700">
-              <span className="text-[11px] font-semibold text-sky-800 dark:text-sky-300 px-2">
-                Área do Pin:
-              </span>
-              {FORECAST_AREA_RADIUS_OPTIONS_KM.map((radiusKm) => (
-                <button
-                  key={radiusKm}
-                  type="button"
-                  onClick={() => setForecastAreaRadiusKm(radiusKm)}
-                  className={`min-h-[34px] px-2.5 py-1 rounded-lg text-xs font-semibold transition-colors ${
-                    forecastAreaRadiusKm === radiusKm
-                      ? 'bg-white dark:bg-slate-700 text-sky-700 dark:text-sky-200 shadow-sm border border-sky-200/70 dark:border-slate-600'
-                      : 'text-slate-600 dark:text-slate-400 hover:text-sky-700'
-                  }`}
-                >
-                  {radiusKm === 0 ? 'Ponto' : `${radiusKm} km`}
-                </button>
-              ))}
-            </div>
-          </div>
-
-          {/* Botões de Camadas Visíveis (todos >= 44x44px) */}
-          <div className="flex flex-wrap items-center gap-2">
-            <button
-              type="button"
-              data-testid="toggle-radar-safety"
-              onClick={() => {
-                const isBareMap = !radarEnabled && activeWeatherLayer === 'none';
-                if (isBareMap) {
-                  setRadarEnabled(true);
-                  setActiveWeatherLayer(lastActiveWeatherLayerRef.current || 'wind');
-                } else {
-                  setIsPlayingRadar(false);
-                  setRadarEnabled(false);
-                  setActiveWeatherLayer('none');
-                }
-              }}
-              aria-pressed={!radarEnabled && activeWeatherLayer === 'none'}
-              className={`min-h-[44px] min-w-[44px] px-3 py-2 rounded-xl text-xs font-bold inline-flex items-center gap-1.5 border transition-colors ${
-                !radarEnabled && activeWeatherLayer === 'none'
-                  ? 'bg-amber-50 dark:bg-amber-950/60 border-amber-300 dark:border-amber-700 text-amber-800 dark:text-amber-200'
-                  : 'bg-white dark:bg-slate-800 border-sky-200 dark:border-slate-700 text-slate-700 dark:text-slate-200 hover:bg-sky-50'
-              }`}
-              title="Alternar rapidamente entre mapa limpo (sem radar/overlay) e camadas meteorológicas"
-            >
-              <XCircle className="w-4 h-4 text-sky-600" aria-hidden="true" />
-              <span>
-                {!radarEnabled && activeWeatherLayer === 'none'
-                  ? 'Camada Oculta (Ativar Radar)'
-                  : 'Desativar Radar'}
-              </span>
-            </button>
-
-            <button
-              type="button"
-              onClick={() => setRadarEnabled((prev) => !prev)}
-              aria-pressed={radarEnabled}
-              className={`min-h-[44px] min-w-[44px] px-3 py-2 rounded-xl text-xs font-semibold inline-flex items-center gap-1.5 border transition-colors ${
-                radarEnabled
-                  ? 'bg-sky-50 dark:bg-sky-950/60 border-sky-300 dark:border-sky-700 text-sky-800 dark:text-sky-200'
-                  : 'bg-white dark:bg-slate-800 border-slate-200 dark:border-slate-700 text-slate-500 dark:text-slate-400'
-              }`}
-            >
-              <Radar className="w-4 h-4 text-sky-600" aria-hidden="true" />
-              <span>Radar Chuva</span>
-            </button>
-
-            <button
-              type="button"
-              onClick={() => setShowSavedLocations((prev) => !prev)}
-              aria-pressed={showSavedLocations}
-              className={`min-h-[44px] min-w-[44px] px-3 py-2 rounded-xl text-xs font-semibold inline-flex items-center gap-1.5 border transition-colors ${
-                showSavedLocations
-                  ? 'bg-sky-50 dark:bg-sky-950/60 border-sky-300 dark:border-sky-700 text-sky-800 dark:text-sky-200'
-                  : 'bg-white dark:bg-slate-800 border-slate-200 dark:border-slate-700 text-slate-500 dark:text-slate-400'
-              }`}
-            >
-              <Bookmark className="w-4 h-4 text-sky-600" aria-hidden="true" />
-              <span>Locais ({savedLocations.length})</span>
-            </button>
-
-            <button
-              type="button"
-              onClick={() => setShowWaypoints((prev) => !prev)}
-              aria-pressed={showWaypoints}
-              className={`min-h-[44px] min-w-[44px] px-3 py-2 rounded-xl text-xs font-semibold inline-flex items-center gap-1.5 border transition-colors ${
-                showWaypoints
-                  ? 'bg-sky-50 dark:bg-sky-950/60 border-sky-300 dark:border-sky-700 text-sky-800 dark:text-sky-200'
-                  : 'bg-white dark:bg-slate-800 border-slate-200 dark:border-slate-700 text-slate-500 dark:text-slate-400'
-              }`}
-            >
-              <Camera className="w-4 h-4 text-sky-600" aria-hidden="true" />
-              <span>Waypoints ({waypoints.length})</span>
-            </button>
-
-            <button
-              type="button"
-              onClick={() => setShowTracks((prev) => !prev)}
-              aria-pressed={showTracks}
-              className={`min-h-[44px] min-w-[44px] px-3 py-2 rounded-xl text-xs font-semibold inline-flex items-center gap-1.5 border transition-colors ${
-                showTracks
-                  ? 'bg-sky-50 dark:bg-sky-950/60 border-sky-300 dark:border-sky-700 text-sky-800 dark:text-sky-200'
-                  : 'bg-white dark:bg-slate-800 border-slate-200 dark:border-slate-700 text-slate-500 dark:text-slate-400'
-              }`}
-            >
-              <Route className="w-4 h-4 text-sky-600" aria-hidden="true" />
-              <span>Trilhas ({tracks.length})</span>
-            </button>
-
-            <button
-              type="button"
-              onClick={() => setShowMissionOverlay((prev) => !prev)}
-              aria-pressed={showMissionOverlay}
-              className={`min-h-[44px] min-w-[44px] px-3 py-2 rounded-xl text-xs font-semibold inline-flex items-center gap-1.5 border transition-colors ${
-                showMissionOverlay
-                  ? 'bg-sky-50 dark:bg-sky-950/60 border-sky-300 dark:border-sky-700 text-sky-800 dark:text-sky-200'
-                  : 'bg-white dark:bg-slate-800 border-slate-200 dark:border-slate-700 text-slate-500 dark:text-slate-400'
-              }`}
-            >
-              <Square className="w-4 h-4 text-sky-600" aria-hidden="true" />
-              <span>Área Offline</span>
-            </button>
-          </div>
-        </div>
-
-        {/* Terceira Linha: Seletor de Modelo Meteorológico & Camada de Radar do Modelo */}
-        <div className="pt-2.5 border-t border-sky-100 dark:border-slate-800 flex flex-col xl:flex-row xl:items-center justify-between gap-2.5">
-          <div className="flex flex-wrap items-center gap-1.5" role="group" aria-label="Modelo meteorológico no mapa">
-            <span className="text-[11px] font-bold text-sky-800 dark:text-sky-300 mr-1">
-              Modelo Meteorológico:
-            </span>
-            {MAP_MODEL_OPTIONS.map((opt) => {
-              const active = mapModelMode === opt.id;
-              return (
-                <button
-                  key={opt.id}
-                  type="button"
-                  onClick={() => handleMapModelSelect(opt.id)}
-                  aria-pressed={active}
-                  className={`min-h-[36px] px-3 py-1 rounded-full text-xs font-bold border transition-all ${
-                    active
-                      ? 'bg-[#0080cd] text-white border-[#0080cd] shadow-sm'
-                      : 'bg-sky-50/70 dark:bg-slate-800 text-slate-700 dark:text-sky-200 border-sky-200 dark:border-slate-700 hover:bg-sky-100/70'
-                  }`}
-                >
-                  {opt.label}
-                </button>
-              );
-            })}
-          </div>
-
-          <div className="flex flex-wrap items-center gap-1.5" role="group" aria-label="Camada meteorológica do modelo">
-            <span className="text-[11px] font-bold text-sky-800 dark:text-sky-300 mr-1">
-              Camada do Modelo:
-            </span>
-            {WEATHER_LAYER_OPTIONS.filter(
-              (opt) => opt.id !== 'waves' || forecast?.marineAvailable !== false,
-            ).map(({ id, label, Icon }) => {
-              const active = activeWeatherLayer === id;
-              return (
-                <button
-                  key={id}
-                  type="button"
-                  onClick={() => setActiveWeatherLayer(id)}
-                  aria-pressed={active}
-                  className={`min-h-[36px] px-3 py-1 rounded-full text-xs font-semibold inline-flex items-center gap-1.5 border transition-all ${
-                    active
-                      ? 'bg-sky-600 text-white border-sky-600 shadow-sm'
-                      : 'bg-white dark:bg-slate-800 text-slate-700 dark:text-slate-200 border-sky-200/80 dark:border-slate-700 hover:bg-sky-50'
-                  }`}
-                >
-                  <Icon className="w-3.5 h-3.5" aria-hidden="true" />
-                  <span>{label}</span>
-                </button>
-              );
-            })}
-          </div>
-        </div>
-      </section>
-
+    <div className="space-y-4 pb-8 min-w-0">
       {/* Aviso Suave Não-Bloqueante quando RainViewer estiver degradado ou indisponível */}
-      {radarState && (radarState.degraded || !radarState.available) && (
+      {!isFullscreen && radarState && (radarState.degraded || !radarState.available) && (
         <div
           role="status"
-          className="rounded-2xl border border-amber-200 dark:border-amber-800/60 bg-white dark:bg-slate-900 px-4 py-3.5 shadow-sm flex flex-col sm:flex-row sm:items-center justify-between gap-3"
+          className="rounded-2xl border border-amber-200 dark:border-amber-800/60 bg-white dark:bg-slate-900 px-4 py-3.5 shadow-sm flex flex-col sm:flex-row sm:items-center justify-between gap-3 min-w-0"
         >
-          <div className="flex items-start gap-3">
+          <div className="flex items-start gap-3 min-w-0">
             <span
               className="w-3 h-3 rounded-full bg-amber-400 shrink-0 mt-1.5"
               aria-hidden="true"
             />
-            <div className="text-xs sm:text-sm">
+            <div className="text-xs sm:text-sm min-w-0">
               <p className="font-bold text-slate-800 dark:text-amber-200">
                 Radar RainViewer temporariamente indisponível
               </p>
@@ -1451,12 +1288,12 @@ function MapRadarTabContent({
       )}
 
       {/* Banner de Modo Desenho de Retângulo (2 Cliques) */}
-      {isDrawingMissionBox && (
+      {!isFullscreen && isDrawingMissionBox && (
         <div
           role="status"
-          className="rounded-2xl border border-sky-300 bg-sky-50/90 dark:bg-sky-950/50 px-4 py-3 flex flex-col sm:flex-row sm:items-center justify-between gap-3"
+          className="rounded-2xl border border-sky-300 bg-sky-50/90 dark:bg-sky-950/50 px-4 py-3 flex flex-col sm:flex-row sm:items-center justify-between gap-3 min-w-0"
         >
-          <div className="flex items-center gap-2.5 text-xs sm:text-sm text-sky-900 dark:text-sky-200">
+          <div className="flex items-center gap-2.5 text-xs sm:text-sm text-sky-900 dark:text-sky-200 min-w-0">
             <Maximize2 className="w-5 h-5 text-sky-600 shrink-0" aria-hidden="true" />
             <span>
               <strong>Modo Seleção de Área Offline (2 Cliques):</strong>{' '}
@@ -1479,9 +1316,197 @@ function MapRadarTabContent({
         </div>
       )}
 
-      {/* Container Principal do Mapa Leaflet + Pin Bandeirinha Windy + Player RainViewer */}
-      <section className="rounded-2xl border border-sky-200/80 dark:border-sky-900/60 bg-white dark:bg-slate-900/90 overflow-hidden shadow-sm">
-        <div className="relative w-full h-[430px] sm:h-[510px] lg:h-[550px] z-0">
+      {/* Container Principal do Mapa Leaflet + Controles Táticos (Pin-Lock, Tela Cheia, Gaveta Windy) + Player RainViewer */}
+      <section
+        data-testid="map-main-section"
+        className={
+          isFullscreen
+            ? 'fixed inset-0 z-[80] flex flex-col bg-slate-950 overflow-hidden'
+            : 'rounded-2xl border border-sky-200/80 dark:border-sky-900/60 bg-white dark:bg-slate-900/90 overflow-hidden shadow-sm min-w-0'
+        }
+      >
+        {/* Barra Tática Superior (Normal: topo do card | Tela Cheia: flutuante sobre o mapa) */}
+        <div
+          className={
+            isFullscreen
+              ? 'absolute top-2.5 left-14 right-2.5 sm:right-auto sm:max-w-[calc(100vw-22rem)] z-[520] rounded-2xl border border-slate-700/90 bg-slate-900/95 backdrop-blur-md p-2.5 sm:p-3 shadow-2xl space-y-2 min-w-0'
+              : 'border-b border-sky-100 dark:border-slate-800 bg-white dark:bg-slate-900/95 p-3.5 sm:p-4 space-y-2.5 min-w-0'
+          }
+        >
+          <div className="flex flex-col xl:flex-row xl:items-center justify-between gap-2.5 min-w-0">
+            <div className="space-y-1 min-w-0">
+              <div className="flex flex-wrap items-center gap-1.5 min-w-0">
+                <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-bold bg-sky-600 text-white shadow-sm">
+                  <MapPin className="w-3.5 h-3.5 shrink-0" aria-hidden="true" />
+                  <span>Mapa &amp; Radar</span>
+                </span>
+                {!isFullscreen && (
+                  <>
+                    <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-semibold bg-sky-50 dark:bg-sky-950/60 text-sky-700 dark:text-sky-300 border border-sky-200 dark:border-sky-800">
+                      100% Gratuito • {activeBaseStyleLabel}
+                    </span>
+                    <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-semibold bg-emerald-50 dark:bg-emerald-950/60 text-emerald-700 dark:text-emerald-300 border border-emerald-200 dark:border-emerald-800">
+                      <HardDrive className="w-3.5 h-3.5 shrink-0" aria-hidden="true" />
+                      <span>Cache Offline: {cacheStats.totalTiles} tiles</span>
+                    </span>
+                  </>
+                )}
+              </div>
+              <p
+                className={`text-xs truncate ${
+                  isFullscreen
+                    ? 'text-slate-200'
+                    : 'text-slate-600 dark:text-slate-300'
+                }`}
+              >
+                Pin ativo:{' '}
+                <strong className={isFullscreen ? 'text-white' : 'text-sky-900 dark:text-white'}>
+                  {activeLocation.name}
+                </strong>{' '}
+                ({activeLocation.latitude.toFixed(4)}°, {activeLocation.longitude.toFixed(4)}°)
+                {forecast ? ` • DEM: ${Math.round(forecast.elevationDemM)}m` : ''}
+              </p>
+            </div>
+
+            {/* Botões Principais: Pin-Lock Reativo, Gaveta Windy, Centralizar e Tela Cheia */}
+            <div className="flex flex-wrap items-center gap-2 min-w-0">
+              <button
+                type="button"
+                data-testid="map-pin-lock-btn"
+                onClick={() => setIsPinLocked((prev) => !prev)}
+                aria-pressed={isPinLocked}
+                title={
+                  isPinLocked
+                    ? 'Pin Fixado: navegue por oceanos/continentes e inspecione a grade 3x3 sem alterar a previsão ativa'
+                    : 'Pin Livre: clicar ou arrastar no mapa atualiza o marcador de previsão'
+                }
+                className={`min-h-[44px] min-w-[44px] px-3.5 py-2 rounded-xl text-xs font-bold inline-flex items-center gap-1.5 border transition-colors ${
+                  isPinLocked
+                    ? 'bg-amber-500 text-slate-950 border-amber-500 shadow-sm'
+                    : isFullscreen
+                      ? 'bg-emerald-950/80 text-emerald-200 border-emerald-700 hover:bg-emerald-900/80'
+                      : 'bg-emerald-50 dark:bg-emerald-950/60 text-emerald-800 dark:text-emerald-200 border-emerald-300 dark:border-emerald-700 hover:bg-emerald-100/80'
+                }`}
+              >
+                {isPinLocked ? (
+                  <>
+                    <Lock className="w-4 h-4 shrink-0" aria-hidden="true" />
+                    <span>Pin Fixado</span>
+                  </>
+                ) : (
+                  <>
+                    <Unlock className="w-4 h-4 shrink-0" aria-hidden="true" />
+                    <span>Pin Livre</span>
+                  </>
+                )}
+              </button>
+
+              <button
+                type="button"
+                data-testid="map-sidebar-toggle"
+                onClick={() => setIsSidebarOpen((prev) => !prev)}
+                aria-expanded={isSidebarOpen}
+                aria-controls="map-windy-controls-drawer"
+                className={`min-h-[44px] min-w-[44px] px-3.5 py-2 rounded-xl text-xs font-bold inline-flex items-center gap-1.5 border transition-colors ${
+                  isSidebarOpen
+                    ? 'bg-sky-600 text-white border-sky-600 shadow-sm'
+                    : isFullscreen
+                      ? 'bg-slate-800 text-sky-200 border-slate-700 hover:bg-slate-700'
+                      : 'bg-sky-50 dark:bg-slate-800 text-sky-900 dark:text-sky-200 border-sky-200 dark:border-slate-700 hover:bg-sky-100'
+                }`}
+              >
+                {isSidebarOpen ? (
+                  <>
+                    <PanelRightClose className="w-4 h-4 shrink-0" aria-hidden="true" />
+                    <span>Ocultar Gaveta</span>
+                  </>
+                ) : (
+                  <>
+                    <PanelRightOpen className="w-4 h-4 shrink-0" aria-hidden="true" />
+                    <span>Camadas &amp; Offline</span>
+                  </>
+                )}
+              </button>
+
+              <button
+                type="button"
+                onClick={() => setRecenterTrigger((prev) => prev + 1)}
+                className="min-h-[44px] min-w-[44px] px-3 py-2 rounded-xl text-xs font-semibold inline-flex items-center gap-1.5 bg-sky-600 hover:bg-sky-500 text-white shadow-sm transition-colors"
+                title="Centralizar mapa no Pin ativo"
+              >
+                <Crosshair className="w-4 h-4 shrink-0" aria-hidden="true" />
+                <span className="hidden sm:inline">Centralizar Pin</span>
+              </button>
+
+              <button
+                type="button"
+                data-testid="map-fullscreen-btn"
+                onClick={() => setIsFullscreen((prev) => !prev)}
+                aria-pressed={isFullscreen}
+                className={`min-h-[44px] min-w-[44px] px-3.5 py-2 rounded-xl text-xs font-bold inline-flex items-center gap-1.5 border transition-colors ${
+                  isFullscreen
+                    ? 'bg-rose-600 hover:bg-rose-500 text-white border-rose-500 shadow-sm'
+                    : 'bg-sky-50 dark:bg-slate-800 text-sky-900 dark:text-sky-200 border-sky-200 dark:border-slate-700 hover:bg-sky-100'
+                }`}
+              >
+                {isFullscreen ? (
+                  <>
+                    <Minimize2 className="w-4 h-4 shrink-0" aria-hidden="true" />
+                    <span>Reduzir Mapa</span>
+                  </>
+                ) : (
+                  <>
+                    <Maximize2 className="w-4 h-4 shrink-0" aria-hidden="true" />
+                    <span>Tela Cheia</span>
+                  </>
+                )}
+              </button>
+            </div>
+          </div>
+
+          {/* Seletor Direto de Modelo Meteorológico no Mapa (FieldCast Ensemble + ECMWF + GFS + ICON + GEM) */}
+          <div
+            className="flex flex-wrap items-center gap-1.5 pt-1.5 border-t border-sky-100/80 dark:border-slate-800 min-w-0"
+            role="group"
+            aria-label="Modelo meteorológico no mapa"
+          >
+            <span
+              className={`text-[11px] font-bold mr-1 ${
+                isFullscreen ? 'text-sky-300' : 'text-sky-800 dark:text-sky-300'
+              }`}
+            >
+              Modelo:
+            </span>
+            {MAP_MODEL_OPTIONS.map((opt) => {
+              const active = mapModelMode === opt.id;
+              return (
+                <button
+                  key={opt.id}
+                  type="button"
+                  onClick={() => handleMapModelSelect(opt.id)}
+                  aria-pressed={active}
+                  className={`min-h-[36px] px-3 py-1 rounded-full text-xs font-bold border transition-all ${
+                    active
+                      ? 'bg-[#0080cd] text-white border-[#0080cd] shadow-sm'
+                      : isFullscreen
+                        ? 'bg-slate-800/90 text-sky-100 border-slate-700 hover:bg-slate-700'
+                        : 'bg-sky-50/70 dark:bg-slate-800 text-slate-700 dark:text-sky-200 border-sky-200 dark:border-slate-700 hover:bg-sky-100/70'
+                  }`}
+                >
+                  {opt.label}
+                </button>
+              );
+            })}
+          </div>
+        </div>
+
+        <div
+          className={
+            isFullscreen
+              ? 'relative flex-1 min-h-0 w-full z-0'
+              : 'relative w-full h-[430px] sm:h-[510px] lg:h-[550px] z-0'
+          }
+        >
           <MapContainer
             center={[activeLocation.latitude, activeLocation.longitude]}
             zoom={12}
@@ -1496,6 +1521,7 @@ function MapRadarTabContent({
               centerLat={activeLocation.latitude}
               centerLon={activeLocation.longitude}
               recenterTrigger={recenterTrigger}
+              layoutKey={`${isFullscreen}_${isSidebarOpen}`}
               onViewportChange={handleViewportChange}
               onMapClick={handleMapClick}
             />
@@ -1586,13 +1612,15 @@ function MapRadarTabContent({
               />
             )}
 
-            {/* Pin Principal Estilo Bandeirinha do Windy (Arrastável!) */}
+            {/* Pin Principal Estilo Bandeirinha do Windy (Arrastável quando Pin Livre!) */}
             <Marker
+              key={isPinLocked ? 'map-active-pin-locked' : 'map-active-pin-free'}
               position={[activeLocation.latitude, activeLocation.longitude]}
               icon={activeWindyFlagIcon}
-              draggable={true}
+              draggable={!isPinLocked}
               eventHandlers={{
                 dragend(e) {
+                  if (isPinLocked) return;
                   const marker = e.target as L.Marker;
                   const pos = marker.getLatLng();
                   handleMapClick(pos.lat, pos.lng);
@@ -1898,6 +1926,7 @@ function MapRadarTabContent({
                   icon={inspectedWindyFlagIcon}
                   eventHandlers={{
                     click() {
+                      if (isPinLocked) return;
                       const trimmed = customPinName.trim();
                       const label =
                         trimmed ||
@@ -1914,10 +1943,60 @@ function MapRadarTabContent({
               )}
           </MapContainer>
 
+          {/* Badge de Consulta da Grade 3x3 quando o Pin está Fixado */}
+          {isPinLocked && inspectedPoint && (
+            <div
+              data-testid="map-locked-grid-badge"
+              className="absolute bottom-3 left-3 z-[510] max-w-[calc(100%-1.5rem)] sm:max-w-[330px] rounded-2xl border border-amber-300 dark:border-amber-700 bg-amber-50/95 dark:bg-amber-950/95 backdrop-blur-md px-3 py-2 shadow-lg text-[11px] text-amber-950 dark:text-amber-100 space-y-0.5 pointer-events-none"
+            >
+              <div className="flex items-center gap-1.5 font-bold">
+                <Lock className="w-3.5 h-3.5 text-amber-600 dark:text-amber-400 shrink-0" aria-hidden="true" />
+                <span className="truncate">
+                  Grade 3x3 ({inspectedPoint.latitude.toFixed(3)}°, {inspectedPoint.longitude.toFixed(3)}°)
+                </span>
+              </div>
+              {lockedGridSample && (
+                <div className="flex flex-wrap items-center gap-x-2 gap-y-0.5 text-[10px]">
+                  <span>
+                    Vento:{' '}
+                    <strong>
+                      {lockedGridSample.windSpeedKmh !== null
+                        ? `${Math.round(lockedGridSample.windSpeedKmh)} km/h`
+                        : '—'}
+                      {lockedGridSample.windDirectionDeg !== null
+                        ? ` (${degreesToCardinal(lockedGridSample.windDirectionDeg)})`
+                        : ''}
+                    </strong>
+                  </span>
+                  <span>
+                    Chuva:{' '}
+                    <strong>
+                      {lockedGridSample.precipMm !== null
+                        ? `${lockedGridSample.precipMm.toFixed(1)} mm`
+                        : '—'}
+                    </strong>
+                  </span>
+                  <span>
+                    Temp:{' '}
+                    <strong>
+                      {lockedGridSample.tempC !== null
+                        ? `${lockedGridSample.tempC.toFixed(1)}°C`
+                        : '—'}
+                    </strong>
+                  </span>
+                </div>
+              )}
+            </div>
+          )}
+
           {/* HUD Flutuante no Mapa: Informa Modelo Meteorológico, Radar RainViewer & Escala de Cores */}
           <div
             data-testid="map-weather-hud"
-            className="absolute top-3 right-3 z-[500] max-w-[270px] sm:max-w-[310px] rounded-2xl border border-sky-200/90 dark:border-sky-800 bg-white/95 dark:bg-slate-900/95 backdrop-blur-md p-2.5 sm:p-3 shadow-md space-y-1.5 pointer-events-auto"
+            className={`absolute z-[500] max-w-[270px] sm:max-w-[310px] rounded-2xl border border-sky-200/90 dark:border-sky-800 bg-white/95 dark:bg-slate-900/95 backdrop-blur-md p-2.5 sm:p-3 shadow-md space-y-1.5 pointer-events-auto ${
+              isFullscreen
+                ? 'bottom-3 right-3 sm:bottom-auto sm:top-3 sm:right-3'
+                : 'top-3 right-3'
+            }`}
           >
             <div className="flex items-center justify-between gap-2">
               <span className="inline-flex items-center gap-1.5 text-[11px] font-extrabold text-sky-900 dark:text-sky-100">
@@ -2010,84 +2089,14 @@ function MapRadarTabContent({
           </div>
         </div>
 
-        {/* Barra Inferior Flutuante Estilo Windy para o Pin Selecionado */}
-        <div className="border-t border-sky-100 dark:border-slate-800 bg-gradient-to-r from-sky-50/80 via-white to-sky-50/80 dark:from-slate-900 dark:via-slate-900 dark:to-slate-800/90 px-4 py-3 flex flex-col lg:flex-row lg:items-center justify-between gap-3">
-          <div className="flex flex-wrap items-center gap-2.5 flex-1">
-            <div className="inline-flex items-center gap-2 px-3 py-1.5 rounded-xl bg-white dark:bg-slate-800 border border-sky-200 dark:border-slate-700 text-xs font-semibold text-sky-900 dark:text-sky-200 shadow-sm">
-              <Navigation className="w-3.5 h-3.5 text-sky-600" aria-hidden="true" />
-              <span className="font-mono font-bold">
-                {(inspectedPoint?.latitude ?? activeLocation.latitude).toFixed(4)}°,{' '}
-                {(inspectedPoint?.longitude ?? activeLocation.longitude).toFixed(4)}°
-              </span>
-              {forecastAreaRadiusKm > 0 && (
-                <span className="px-2 py-0.5 rounded-full bg-sky-100 dark:bg-sky-900/60 text-sky-700 dark:text-sky-300 text-[10px] font-bold">
-                  Área {forecastAreaRadiusKm} km
-                </span>
-              )}
-            </div>
-
-            <input
-              type="text"
-              value={customPinName}
-              onChange={(e) => setCustomPinName(e.target.value)}
-              placeholder="Nome personalizado para este Pin ou Área (ex: Praia da Joaquina, Faz. Boa Vista)..."
-              aria-label="Nome personalizado para o Pin no mapa"
-              className="flex-1 min-w-[220px] min-h-[40px] px-3.5 py-1.5 rounded-xl border border-sky-200 dark:border-slate-700 bg-white dark:bg-slate-800 text-xs text-slate-800 dark:text-slate-100 placeholder:text-slate-400 focus:outline-none focus:ring-2 focus:ring-sky-500/40"
-            />
-          </div>
-
-          <div className="flex flex-wrap items-center gap-2">
-            {onSelectLocation && (
-              <button
-                type="button"
-                onClick={() => {
-                  const targetLat =
-                    inspectedPoint?.latitude ?? activeLocation.latitude;
-                  const targetLon =
-                    inspectedPoint?.longitude ?? activeLocation.longitude;
-                  const trimmed = customPinName.trim();
-                  const areaSuffix =
-                    forecastAreaRadiusKm > 0
-                      ? ` • Área ${forecastAreaRadiusKm}km`
-                      : '';
-                  const targetName =
-                    trimmed.length > 0
-                      ? `${trimmed}${areaSuffix}`
-                      : `Pin no Mapa (${targetLat.toFixed(3)}, ${targetLon.toFixed(3)}${areaSuffix})`;
-                  handleSelectMapCoordinate(
-                    targetLat,
-                    targetLon,
-                    targetName,
-                    'search',
-                  );
-                }}
-                className="min-h-[44px] min-w-[44px] px-4 py-2 rounded-xl text-xs font-bold bg-sky-600 hover:bg-sky-500 text-white shadow-sm inline-flex items-center gap-1.5 transition-colors"
-              >
-                <MapPin className="w-4 h-4" aria-hidden="true" />
-                <span>Previsão para este Pin</span>
-              </button>
-            )}
-
-            {onSaveLocation && (
-              <button
-                type="button"
-                onClick={() =>
-                  handleSaveInspectedCoordinate(
-                    inspectedPoint?.latitude ?? activeLocation.latitude,
-                    inspectedPoint?.longitude ?? activeLocation.longitude,
-                  )
-                }
-                className="min-h-[44px] min-w-[44px] px-3.5 py-2 rounded-xl text-xs font-semibold border border-sky-200 dark:border-slate-700 bg-white dark:bg-slate-800 hover:bg-sky-50 dark:hover:bg-slate-700 text-sky-800 dark:text-sky-200 inline-flex items-center gap-1.5 transition-colors"
-              >
-                <Bookmark className="w-4 h-4 text-sky-600" aria-hidden="true" />
-                <span>Salvar Pin nos Favoritos</span>
-              </button>
-            )}
-          </div>
-        </div>
-
         {/* Barra de Reprodução Dual: Radar ao Vivo (RainViewer) ou Linha do Tempo do Modelo */}
-        <div className="border-t border-sky-100 dark:border-slate-800 bg-sky-50/40 dark:bg-slate-950/80 p-3 sm:p-4 space-y-2.5">
+        <div
+          className={
+            isFullscreen
+              ? 'shrink-0 border-t border-slate-800 bg-slate-950/95 p-3 space-y-2.5 min-w-0'
+              : 'border-t border-sky-100 dark:border-slate-800 bg-sky-50/40 dark:bg-slate-950/80 p-3 sm:p-4 space-y-2.5 min-w-0'
+          }
+        >
           <div className="flex flex-wrap items-center justify-between gap-2">
             <div className="inline-flex items-center rounded-xl bg-white dark:bg-slate-900 p-1 border border-sky-200/80 dark:border-slate-700" role="group" aria-label="Fonte da linha do tempo do mapa">
               <button
@@ -2327,8 +2336,305 @@ function MapRadarTabContent({
         </div>
       </section>
 
+      {/* Gaveta Recolhível Estilo Windy: Camadas do Modelo, Radar, Mapa Base, Pin & Área de Missão Offline */}
+      {isSidebarOpen && (
+        <div
+          id="map-windy-controls-drawer"
+          data-testid="map-windy-drawer"
+          className={
+            isFullscreen
+              ? 'fixed bottom-24 right-3 z-[85] max-h-[55vh] w-[calc(100vw-1.5rem)] sm:w-[440px] overflow-y-auto rounded-2xl border border-slate-700 bg-slate-900/95 backdrop-blur-md p-4 shadow-2xl space-y-4 min-w-0'
+              : 'space-y-4 min-w-0'
+          }
+        >
+          {/* Card de Camadas, Mapa Base e Controles do Pin Estilo Windy */}
+          <section className="rounded-2xl border border-sky-200/80 dark:border-sky-900/60 bg-white dark:bg-slate-900/90 p-4 sm:p-5 shadow-sm space-y-3.5 min-w-0">
+            <div className="flex flex-wrap items-center justify-between gap-2 border-b border-sky-100 dark:border-slate-800 pb-2.5">
+              <div className="inline-flex items-center gap-2 text-xs sm:text-sm font-bold text-slate-900 dark:text-white min-w-0">
+                <SlidersHorizontal className="w-4 h-4 text-sky-600 shrink-0" aria-hidden="true" />
+                <span className="truncate">Gaveta de Camadas, Radar &amp; Pin (Estilo Windy)</span>
+              </div>
+
+              {/* Seletor de Estilo de Mapa Base (Padrão OSM / Costeiro Esri / Satélite Esri) */}
+              <div
+                className="inline-flex flex-wrap items-center rounded-xl bg-sky-50/90 dark:bg-slate-800 p-1 border border-sky-200/80 dark:border-slate-700 min-w-0"
+                role="group"
+                aria-label="Seletor de Estilo de Mapa Base"
+              >
+                {BASE_MAP_STYLES.map((style) => (
+                  <button
+                    key={style.id}
+                    type="button"
+                    onClick={() => setBaseStyle(style.id)}
+                    className={`min-h-[36px] px-2.5 py-1 rounded-lg text-xs font-semibold transition-all ${
+                      baseStyle === style.id
+                        ? 'bg-sky-600 text-white shadow-sm'
+                        : 'text-slate-600 dark:text-slate-300 hover:text-sky-700 hover:bg-white/60'
+                    }`}
+                  >
+                    {style.shortLabel}
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            {/* Camada Meteorológica do Modelo */}
+            <div
+              className="flex flex-wrap items-center gap-1.5 min-w-0"
+              role="group"
+              aria-label="Camada meteorológica do modelo"
+            >
+              <span className="text-[11px] font-bold text-sky-800 dark:text-sky-300 mr-1">
+                Camada do Modelo:
+              </span>
+              {WEATHER_LAYER_OPTIONS.filter(
+                (opt) => opt.id !== 'waves' || forecast?.marineAvailable !== false,
+              ).map(({ id, label, Icon }) => {
+                const active = activeWeatherLayer === id;
+                return (
+                  <button
+                    key={id}
+                    type="button"
+                    onClick={() => setActiveWeatherLayer(id)}
+                    aria-pressed={active}
+                    className={`min-h-[40px] px-3 py-1.5 rounded-full text-xs font-semibold inline-flex items-center gap-1.5 border transition-all ${
+                      active
+                        ? 'bg-sky-600 text-white border-sky-600 shadow-sm'
+                        : 'bg-white dark:bg-slate-800 text-slate-700 dark:text-slate-200 border-sky-200/80 dark:border-slate-700 hover:bg-sky-50'
+                    }`}
+                  >
+                    <Icon className="w-3.5 h-3.5 shrink-0" aria-hidden="true" />
+                    <span>{label}</span>
+                  </button>
+                );
+              })}
+            </div>
+
+            {/* Botões de Camadas Visíveis e Segurança (todos >= 44x44px) */}
+            <div className="flex flex-wrap items-center gap-2 pt-2 border-t border-sky-100 dark:border-slate-800 min-w-0">
+              <button
+                type="button"
+                data-testid="toggle-radar-safety"
+                onClick={() => {
+                  const isBareMap = !radarEnabled && activeWeatherLayer === 'none';
+                  if (isBareMap) {
+                    setRadarEnabled(true);
+                    setActiveWeatherLayer(lastActiveWeatherLayerRef.current || 'wind');
+                  } else {
+                    setIsPlayingRadar(false);
+                    setRadarEnabled(false);
+                    setActiveWeatherLayer('none');
+                  }
+                }}
+                aria-pressed={!radarEnabled && activeWeatherLayer === 'none'}
+                className={`min-h-[44px] min-w-[44px] px-3 py-2 rounded-xl text-xs font-bold inline-flex items-center gap-1.5 border transition-colors ${
+                  !radarEnabled && activeWeatherLayer === 'none'
+                    ? 'bg-amber-50 dark:bg-amber-950/60 border-amber-300 dark:border-amber-700 text-amber-800 dark:text-amber-200'
+                    : 'bg-white dark:bg-slate-800 border-sky-200 dark:border-slate-700 text-slate-700 dark:text-slate-200 hover:bg-sky-50'
+                }`}
+                title="Alternar rapidamente entre mapa limpo (sem radar/overlay) e camadas meteorológicas"
+              >
+                <XCircle className="w-4 h-4 text-sky-600 shrink-0" aria-hidden="true" />
+                <span>
+                  {!radarEnabled && activeWeatherLayer === 'none'
+                    ? 'Camada Oculta (Ativar Radar)'
+                    : 'Desativar Radar'}
+                </span>
+              </button>
+
+              <button
+                type="button"
+                onClick={() => setRadarEnabled((prev) => !prev)}
+                aria-pressed={radarEnabled}
+                className={`min-h-[44px] min-w-[44px] px-3 py-2 rounded-xl text-xs font-semibold inline-flex items-center gap-1.5 border transition-colors ${
+                  radarEnabled
+                    ? 'bg-sky-50 dark:bg-sky-950/60 border-sky-300 dark:border-sky-700 text-sky-800 dark:text-sky-200'
+                    : 'bg-white dark:bg-slate-800 border-slate-200 dark:border-slate-700 text-slate-500 dark:text-slate-400'
+                }`}
+              >
+                <Radar className="w-4 h-4 text-sky-600 shrink-0" aria-hidden="true" />
+                <span>Radar Chuva</span>
+              </button>
+
+              <button
+                type="button"
+                onClick={() => setShowSavedLocations((prev) => !prev)}
+                aria-pressed={showSavedLocations}
+                className={`min-h-[44px] min-w-[44px] px-3 py-2 rounded-xl text-xs font-semibold inline-flex items-center gap-1.5 border transition-colors ${
+                  showSavedLocations
+                    ? 'bg-sky-50 dark:bg-sky-950/60 border-sky-300 dark:border-sky-700 text-sky-800 dark:text-sky-200'
+                    : 'bg-white dark:bg-slate-800 border-slate-200 dark:border-slate-700 text-slate-500 dark:text-slate-400'
+                }`}
+              >
+                <Bookmark className="w-4 h-4 text-sky-600 shrink-0" aria-hidden="true" />
+                <span>Locais ({savedLocations.length})</span>
+              </button>
+
+              <button
+                type="button"
+                onClick={() => setShowWaypoints((prev) => !prev)}
+                aria-pressed={showWaypoints}
+                className={`min-h-[44px] min-w-[44px] px-3 py-2 rounded-xl text-xs font-semibold inline-flex items-center gap-1.5 border transition-colors ${
+                  showWaypoints
+                    ? 'bg-sky-50 dark:bg-sky-950/60 border-sky-300 dark:border-sky-700 text-sky-800 dark:text-sky-200'
+                    : 'bg-white dark:bg-slate-800 border-slate-200 dark:border-slate-700 text-slate-500 dark:text-slate-400'
+                }`}
+              >
+                <Camera className="w-4 h-4 text-sky-600 shrink-0" aria-hidden="true" />
+                <span>Waypoints ({waypoints.length})</span>
+              </button>
+
+              <button
+                type="button"
+                onClick={() => setShowTracks((prev) => !prev)}
+                aria-pressed={showTracks}
+                className={`min-h-[44px] min-w-[44px] px-3 py-2 rounded-xl text-xs font-semibold inline-flex items-center gap-1.5 border transition-colors ${
+                  showTracks
+                    ? 'bg-sky-50 dark:bg-sky-950/60 border-sky-300 dark:border-sky-700 text-sky-800 dark:text-sky-200'
+                    : 'bg-white dark:bg-slate-800 border-slate-200 dark:border-slate-700 text-slate-500 dark:text-slate-400'
+                }`}
+              >
+                <Route className="w-4 h-4 text-sky-600 shrink-0" aria-hidden="true" />
+                <span>Trilhas ({tracks.length})</span>
+              </button>
+
+              <button
+                type="button"
+                onClick={() => setShowMissionOverlay((prev) => !prev)}
+                aria-pressed={showMissionOverlay}
+                className={`min-h-[44px] min-w-[44px] px-3 py-2 rounded-xl text-xs font-semibold inline-flex items-center gap-1.5 border transition-colors ${
+                  showMissionOverlay
+                    ? 'bg-sky-50 dark:bg-sky-950/60 border-sky-300 dark:border-sky-700 text-sky-800 dark:text-sky-200'
+                    : 'bg-white dark:bg-slate-800 border-slate-200 dark:border-slate-700 text-slate-500 dark:text-slate-400'
+                }`}
+              >
+                <Square className="w-4 h-4 text-sky-600 shrink-0" aria-hidden="true" />
+                <span>Área Offline</span>
+              </button>
+            </div>
+
+            {/* Controles do Pin Estilo Windy (Modo Instantâneo, Raio de Área e Nome/Favorito) */}
+            <div className="pt-2.5 border-t border-sky-100 dark:border-slate-800 space-y-2.5 min-w-0">
+              <div className="flex flex-wrap items-center gap-2 min-w-0">
+                <button
+                  type="button"
+                  onClick={() => setInstantWindyPin((prev) => !prev)}
+                  aria-pressed={instantWindyPin}
+                  className={`min-h-[44px] px-3.5 py-2 rounded-xl text-xs font-semibold inline-flex items-center gap-1.5 border transition-colors ${
+                    instantWindyPin
+                      ? 'bg-sky-600 text-white border-sky-600 shadow-sm'
+                      : 'bg-sky-50/70 dark:bg-slate-800 border-sky-200 dark:border-slate-700 text-sky-900 dark:text-slate-200'
+                  }`}
+                >
+                  <Sparkles className="w-4 h-4 shrink-0" aria-hidden="true" />
+                  <span>
+                    {instantWindyPin
+                      ? 'Pin Instantâneo (Estilo Windy): Ativo'
+                      : 'Modo Inspeção (Confirmar antes de aplicar)'}
+                  </span>
+                </button>
+
+                <div className="inline-flex flex-wrap items-center rounded-xl bg-sky-50/80 dark:bg-slate-800 p-1 border border-sky-200/80 dark:border-slate-700 min-w-0">
+                  <span className="text-[11px] font-semibold text-sky-800 dark:text-sky-300 px-2">
+                    Área do Pin:
+                  </span>
+                  {FORECAST_AREA_RADIUS_OPTIONS_KM.map((radiusKm) => (
+                    <button
+                      key={radiusKm}
+                      type="button"
+                      onClick={() => setForecastAreaRadiusKm(radiusKm)}
+                      className={`min-h-[34px] px-2.5 py-1 rounded-lg text-xs font-semibold transition-colors ${
+                        forecastAreaRadiusKm === radiusKm
+                          ? 'bg-white dark:bg-slate-700 text-sky-700 dark:text-sky-200 shadow-sm border border-sky-200/70 dark:border-slate-600'
+                          : 'text-slate-600 dark:text-slate-400 hover:text-sky-700'
+                      }`}
+                    >
+                      {radiusKm === 0 ? 'Ponto' : `${radiusKm} km`}
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-2.5 min-w-0">
+                <div className="flex flex-wrap items-center gap-2 flex-1 min-w-0">
+                  <div className="inline-flex items-center gap-2 px-3 py-1.5 rounded-xl bg-sky-50/70 dark:bg-slate-800 border border-sky-200 dark:border-slate-700 text-xs font-semibold text-sky-900 dark:text-sky-200">
+                    <Navigation className="w-3.5 h-3.5 text-sky-600 shrink-0" aria-hidden="true" />
+                    <span className="font-mono font-bold">
+                      {(inspectedPoint?.latitude ?? activeLocation.latitude).toFixed(4)}°,{' '}
+                      {(inspectedPoint?.longitude ?? activeLocation.longitude).toFixed(4)}°
+                    </span>
+                  </div>
+
+                  <input
+                    type="text"
+                    value={customPinName}
+                    onChange={(e) => setCustomPinName(e.target.value)}
+                    placeholder="Nome personalizado para este Pin ou Área..."
+                    aria-label="Nome personalizado para o Pin no mapa"
+                    className="flex-1 min-w-0 w-full sm:w-auto min-h-[44px] px-3.5 py-1.5 rounded-xl border border-sky-200 dark:border-slate-700 bg-white dark:bg-slate-800 text-xs text-slate-800 dark:text-slate-100 placeholder:text-slate-400 focus:outline-none focus:ring-2 focus:ring-sky-500/40"
+                  />
+                </div>
+
+                <div className="flex flex-wrap items-center gap-2 min-w-0">
+                  {onSelectLocation && (
+                    <button
+                      type="button"
+                      disabled={isPinLocked}
+                      onClick={() => {
+                        const targetLat =
+                          inspectedPoint?.latitude ?? activeLocation.latitude;
+                        const targetLon =
+                          inspectedPoint?.longitude ?? activeLocation.longitude;
+                        const trimmed = customPinName.trim();
+                        const areaSuffix =
+                          forecastAreaRadiusKm > 0
+                            ? ` • Área ${forecastAreaRadiusKm}km`
+                            : '';
+                        const targetName =
+                          trimmed.length > 0
+                            ? `${trimmed}${areaSuffix}`
+                            : `Pin no Mapa (${targetLat.toFixed(3)}, ${targetLon.toFixed(3)}${areaSuffix})`;
+                        handleSelectMapCoordinate(
+                          targetLat,
+                          targetLon,
+                          targetName,
+                          'search',
+                        );
+                      }}
+                      title={
+                        isPinLocked
+                          ? 'Pin Fixado: destrave o Pin Livre para aplicar novo local'
+                          : 'Aplicar previsão para este Pin'
+                      }
+                      className="min-h-[44px] min-w-[44px] px-4 py-2 rounded-xl text-xs font-bold bg-sky-600 hover:bg-sky-500 disabled:opacity-50 disabled:cursor-not-allowed text-white shadow-sm inline-flex items-center gap-1.5 transition-colors"
+                    >
+                      <MapPin className="w-4 h-4 shrink-0" aria-hidden="true" />
+                      <span>Previsão para este Pin</span>
+                    </button>
+                  )}
+
+                  {onSaveLocation && (
+                    <button
+                      type="button"
+                      onClick={() =>
+                        handleSaveInspectedCoordinate(
+                          inspectedPoint?.latitude ?? activeLocation.latitude,
+                          inspectedPoint?.longitude ?? activeLocation.longitude,
+                        )
+                      }
+                      className="min-h-[44px] min-w-[44px] px-3.5 py-2 rounded-xl text-xs font-semibold border border-sky-200 dark:border-slate-700 bg-white dark:bg-slate-800 hover:bg-sky-50 dark:hover:bg-slate-700 text-sky-800 dark:text-sky-200 inline-flex items-center gap-1.5 transition-colors"
+                    >
+                      <Bookmark className="w-4 h-4 text-sky-600 shrink-0" aria-hidden="true" />
+                      <span>Salvar Pin nos Favoritos</span>
+                    </button>
+                  )}
+                </div>
+              </div>
+            </div>
+          </section>
+
       {/* Ferramenta: Área de Missão Offline (Cache de Tiles no IndexedDB — 100% Gratuito sem API Key) */}
-      <section className="rounded-2xl border border-sky-200/80 dark:border-sky-900/60 bg-white dark:bg-slate-900/90 p-4 sm:p-5 shadow-sm space-y-4">
+      <section className="rounded-2xl border border-sky-200/80 dark:border-sky-900/60 bg-white dark:bg-slate-900/90 p-4 sm:p-5 shadow-sm space-y-4 min-w-0">
         <div className="flex flex-col md:flex-row md:items-center justify-between gap-3 border-b border-sky-100 dark:border-slate-800 pb-3">
           <div className="space-y-1">
             <div className="flex flex-wrap items-center gap-2">
@@ -2684,7 +2990,9 @@ function MapRadarTabContent({
             </div>
           </div>
         </div>
-      </section>
+        </section>
+      </div>
+      )}
     </div>
   );
 }

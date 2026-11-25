@@ -147,6 +147,9 @@ export interface HistoricalHourRecord {
   windDirection10mDeg: number | null;
   precipitationMm: number | null;
   surfacePressureHpa: number | null;
+  relativeHumidity2mPct?: number | null;
+  apparentTemperatureC?: number | null;
+  et0FaoEvapotranspirationMm?: number | null;
   waveHeightM?: number | null;
   seaLevelHeightMsl?: number | null;
   byModel?: Partial<

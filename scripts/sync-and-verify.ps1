@@ -1,7 +1,8 @@
 param(
   [string]$SourceRepo = "C:\Users\deOliveira\.gemini\antigravity\worktrees\App_FieldCast\fieldcast_agent_swarm_setup",
   [string]$TargetRepo = "F:\Backup-data\local_data\App_FieldCast",
-  [switch]$BuildAndroid
+  [switch]$BuildAndroid,
+  [switch]$SkipSourceChecks
 )
 
 $ErrorActionPreference = "Stop"
@@ -11,25 +12,27 @@ if (Test-Path $nodeDir) {
   $env:PATH = "$nodeDir;$env:PATH"
 }
 
-Write-Host "[1/6] Running security hook self-check in $SourceRepo..."
-$hookPayload = '{"hookEventName":"PreToolUse","toolCall":{"name":"run_command","args":{"CommandLine":"npm test"}}}'
-$hookOut = $hookPayload | node "$SourceRepo\.agents\scripts\safety-gate.mjs"
-Write-Host "Hook probe output: $hookOut"
+if (-not $SkipSourceChecks) {
+  Write-Host "[1/6] Running security hook self-check in $SourceRepo..."
+  $hookPayload = '{"hookEventName":"PreToolUse","toolCall":{"name":"run_command","args":{"CommandLine":"npm test"}}}'
+  $hookOut = $hookPayload | node "$SourceRepo\.agents\scripts\safety-gate.mjs"
+  Write-Host "Hook probe output: $hookOut"
 
-Write-Host "[2/6] Validating source worktree ($SourceRepo)..."
-Push-Location $SourceRepo
-try {
-  npm run icons:generate
-  npx tsc --noEmit
-  npm run test
-  npm run build
-} finally {
-  Pop-Location
+  Write-Host "[2/6] Validating source worktree ($SourceRepo)..."
+  Push-Location $SourceRepo
+  try {
+    npm run icons:generate
+    npx tsc --noEmit
+    npm run test
+    npm run build
+  } finally {
+    Pop-Location
+  }
 }
 
 if (Test-Path $TargetRepo) {
   Write-Host "[3/6] Syncing code/assets to $TargetRepo..."
-  & robocopy $SourceRepo $TargetRepo /E /XD node_modules .git dist android\app\build android\.gradle /XF *.apk *.tsbuildinfo | Out-Null
+  & robocopy $SourceRepo $TargetRepo /E /IS /IT /XD node_modules .git dist android\app\build android\.gradle /XF *.apk *.tsbuildinfo | Out-Null
   if ($LASTEXITCODE -ge 8) {
     throw "Robocopy failed with exit code $LASTEXITCODE"
   }
@@ -52,6 +55,9 @@ if (Test-Path $TargetRepo) {
       Push-Location "$TargetRepo\android"
       try {
         .\gradlew.bat assembleDebug --no-daemon
+        if ($LASTEXITCODE -ne 0) {
+          throw "Gradle assembleDebug failed with exit code $LASTEXITCODE"
+        }
       } finally {
         Pop-Location
       }

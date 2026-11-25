@@ -9,11 +9,13 @@ import {
   ToastContainer,
 } from './components/common';
 import { AeronauticsTab } from './components/aeronautics';
+import { ModelComparisonTab } from './components/comparison';
 import { FieldDataTab } from './components/field';
-import { ForecastTab } from './components/forecast';
 import { AppShell, type AppTabId } from './components/layout';
 import { MapRadarTab } from './components/map';
 import { NavigationTab } from './components/navigation';
+import { SettingsTab } from './components/settings';
+import { DailySummaryTab } from './components/summary';
 import {
   buildLocationKey,
   checkIndexedDbHealth,
@@ -53,8 +55,14 @@ import {
   normalizeOpenMeteoForecast,
   reapplyThresholdsToForecast,
 } from './services/openMeteoService';
+import {
+  dispatchSystemNotification,
+  evaluateForecastNotificationTriggers,
+  loadNotificationPreferences,
+} from './services/notificationService';
 import { probeRainViewerHealth } from './services/rainViewerService';
 import { detectRuntimePlatform } from './services/platform';
+import type { UserNotificationPreferences } from './types/v4';
 import type {
   ActiveCoordinates,
   PrimaryLocationPreference,
@@ -287,6 +295,10 @@ export function App(): React.ReactElement {
   const [activeTab, setActiveTab] = useState<AppTabId>('forecast');
   const [viewMode, setViewMode] = useState<ForecastViewMode>('fieldcast');
   const [isLocationsModalOpen, setIsLocationsModalOpen] = useState<boolean>(false);
+  const [notificationPrefs, setNotificationPrefs] = useState<UserNotificationPreferences>(() =>
+    loadNotificationPreferences(),
+  );
+  const [unreadNotificationsCount, setUnreadNotificationsCount] = useState<number>(0);
 
   const [thresholds, setThresholds] = useState<SafeWindowThresholds>(() =>
     loadPersistedThresholds(),
@@ -1044,6 +1056,41 @@ export function App(): React.ReactElement {
     );
   }, [activeLocation.latitude, activeLocation.longitude, primaryLocation]);
 
+  // Avaliador reativo de notificações configuradas pelo usuário (respeitando opt-in e janelas horárias)
+  useEffect(() => {
+    if (!forecast || !notificationPrefs.masterEnabled) {
+      return;
+    }
+    const triggers = evaluateForecastNotificationTriggers({
+      forecast,
+      prefs: notificationPrefs,
+    });
+    if (triggers.length === 0) {
+      return;
+    }
+    setUnreadNotificationsCount((prev) => prev + triggers.length);
+    for (const trig of triggers) {
+      void dispatchSystemNotification({
+        title: trig.title,
+        message: trig.message,
+        sourceLabel: trig.sourceLabel,
+        tag: trig.key,
+      });
+      addToast({
+        type: trig.kind === 'extreme' ? 'warning' : 'info',
+        title: trig.title,
+        message: trig.message,
+      });
+    }
+  }, [addToast, forecast, notificationPrefs]);
+
+  const handleTabChange = useCallback((nextTab: AppTabId) => {
+    setActiveTab(nextTab);
+    if (nextTab === 'settings') {
+      setUnreadNotificationsCount(0);
+    }
+  }, []);
+
   return (
     <GlobalErrorBoundary
       onErrorLog={handleErrorLog}
@@ -1051,7 +1098,7 @@ export function App(): React.ReactElement {
     >
       <AppShell
         activeTab={activeTab}
-        onTabChange={setActiveTab}
+        onTabChange={handleTabChange}
         theme={theme}
         onToggleTheme={toggleTheme}
         activeLocation={activeLocation}
@@ -1059,7 +1106,10 @@ export function App(): React.ReactElement {
         primaryLocationKey={primaryLocationKey}
         onSetPrimaryLocation={handleSetPrimaryLocation}
         healthSnapshot={healthSnapshot}
-        activeAlertsCount={forecast?.alerts.length ?? 0}
+        activeAlertsCount={(forecast?.extremeEvents?.length ?? 0) + (forecast?.alerts.length ?? 0)}
+        unreadNotificationsCount={unreadNotificationsCount}
+        viewMode={viewMode}
+        onViewModeChange={setViewMode}
         isRefreshingForecast={isRefreshingForecast}
         onRefreshForecast={handleRefreshForecast}
         onSelectLocation={handleSelectLocation}
@@ -1077,13 +1127,14 @@ export function App(): React.ReactElement {
       >
         {activeTab === 'forecast' && (
           <ModuleErrorBoundary
-            moduleName="Módulo de Previsão Multi-Modelo (168h)"
+            moduleName="Módulo de Resumo Diário & Alertas Globais"
             onReset={handleRefreshForecast}
             onErrorLog={handleErrorLog}
           >
-            <ForecastTab
+            <DailySummaryTab
               forecast={forecast}
               activeLocation={activeLocation}
+              savedLocations={savedLocations}
               isLoading={isRefreshingForecast && !forecast}
               isDark={isDark}
               viewMode={viewMode}
@@ -1097,6 +1148,37 @@ export function App(): React.ReactElement {
               onSetPrimaryLocation={handleSetPrimaryLocation}
               onOpenLocationsModal={() => setIsLocationsModalOpen(true)}
               onReloadForecast={handleRefreshForecast}
+              onNavigateTab={handleTabChange}
+              onToast={addToast}
+              onErrorLog={handleErrorLog}
+            />
+          </ModuleErrorBoundary>
+        )}
+
+        {activeTab === 'comparison' && (
+          <ModuleErrorBoundary
+            moduleName="Módulo de Comparação Multi-Modelo (168h) & Gráficos"
+            onReset={handleRefreshForecast}
+            onErrorLog={handleErrorLog}
+          >
+            <ModelComparisonTab
+              forecast={forecast}
+              activeLocation={activeLocation}
+              savedLocations={savedLocations}
+              isLoading={isRefreshingForecast && !forecast}
+              isDark={isDark}
+              viewMode={viewMode}
+              onViewModeChange={setViewMode}
+              thresholds={thresholds}
+              onSaveThresholds={handleSaveThresholds}
+              onSelectLocation={handleSelectLocation}
+              onSaveLocation={handleSaveLocation}
+              onRequestGps={handleRequestGps}
+              isPrimaryLocation={isActivePrimaryLocation}
+              onSetPrimaryLocation={handleSetPrimaryLocation}
+              onOpenLocationsModal={() => setIsLocationsModalOpen(true)}
+              onReloadForecast={handleRefreshForecast}
+              onNavigateBackToSummary={() => handleTabChange('forecast')}
               onToast={addToast}
               onErrorLog={handleErrorLog}
             />
@@ -1112,6 +1194,8 @@ export function App(): React.ReactElement {
               forecast={forecast}
               activeLocation={activeLocation}
               isDark={isDark}
+              viewMode={viewMode}
+              onViewModeChange={setViewMode}
               onRequestGps={handleRequestGps}
               onOpenLocationsModal={() => setIsLocationsModalOpen(true)}
               onToast={addToast}
@@ -1129,6 +1213,8 @@ export function App(): React.ReactElement {
               forecast={forecast}
               activeLocation={activeLocation}
               isDark={isDark}
+              viewMode={viewMode}
+              onViewModeChange={setViewMode}
               onToast={addToast}
               onErrorLog={handleErrorLog}
             />
@@ -1159,7 +1245,7 @@ export function App(): React.ReactElement {
 
         {activeTab === 'field' && (
           <ModuleErrorBoundary
-            moduleName="Módulo de Armazenamento, Campo, GPS Tracker & Exportação"
+            moduleName="Módulo de Armazenamento, Campo, GPS Tracker & Relatórios"
             onErrorLog={handleErrorLog}
           >
             <FieldDataTab
@@ -1173,6 +1259,28 @@ export function App(): React.ReactElement {
               onRequestGps={handleRequestGps}
               onWaypointsChange={setWaypoints}
               onTracksChange={setTracks}
+              onToast={addToast}
+              onErrorLog={handleErrorLog}
+            />
+          </ModuleErrorBoundary>
+        )}
+
+        {activeTab === 'settings' && (
+          <ModuleErrorBoundary
+            moduleName="Central de Configurações, Notificações & Janelas Horárias"
+            onErrorLog={handleErrorLog}
+          >
+            <SettingsTab
+              forecast={forecast}
+              theme={theme}
+              isDark={isDark}
+              onToggleTheme={toggleTheme}
+              thresholds={thresholds}
+              onSaveThresholds={handleSaveThresholds}
+              onNotificationPreferencesChange={(next) => {
+                setNotificationPrefs(next);
+                setUnreadNotificationsCount(0);
+              }}
               onToast={addToast}
               onErrorLog={handleErrorLog}
             />

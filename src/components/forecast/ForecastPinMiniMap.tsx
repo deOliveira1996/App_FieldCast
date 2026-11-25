@@ -10,10 +10,14 @@ import {
   Crosshair,
   EyeOff,
   Layers,
+  Lock,
   MapPin,
+  Maximize2,
+  Minimize2,
   Navigation,
   Radar,
   Sparkles,
+  Unlock,
   Wind,
 } from 'lucide-react';
 import {
@@ -139,24 +143,61 @@ class MiniMapOverlayErrorBoundary extends Component<OverlayBoundaryProps, Overla
 const MapClickAndSyncController: React.FC<{
   centerLat: number;
   centerLon: number;
+  isFullscreen: boolean;
   onPickCoordinates: (lat: number, lon: number) => void;
-}> = ({ centerLat, centerLon, onPickCoordinates }) => {
+}> = ({ centerLat, centerLon, isFullscreen, onPickCoordinates }) => {
   const map = useMap();
+  const mapRef = useRef(map);
+  mapRef.current = map;
   const lastSyncedTargetRef = useRef<{ lat: number; lon: number }>({
     lat: centerLat,
     lon: centerLon,
   });
 
   useEffect(() => {
-    const timer = setTimeout(() => {
+    const timer = window.setTimeout(() => {
       try {
-        map.invalidateSize();
+        mapRef.current.invalidateSize();
       } catch {
         // Ignore in headless test environment
       }
-    }, 120);
-    return () => clearTimeout(timer);
-  }, [map]);
+    }, 80);
+    return () => window.clearTimeout(timer);
+  }, [isFullscreen]);
+
+  useEffect(() => {
+    let settleTimer: number | null = null;
+    const handleViewportRefresh = () => {
+      try {
+        mapRef.current.invalidateSize();
+      } catch {
+        // Ignore in headless test environment
+      }
+      if (settleTimer !== null) {
+        window.clearTimeout(settleTimer);
+      }
+      settleTimer = window.setTimeout(() => {
+        try {
+          mapRef.current.invalidateSize();
+        } catch {
+          // Ignore in headless test environment
+        }
+      }, 80);
+    };
+
+    window.addEventListener('resize', handleViewportRefresh);
+    window.addEventListener('orientationchange', handleViewportRefresh);
+    window.addEventListener('fieldcast:layout-refresh', handleViewportRefresh);
+
+    return () => {
+      if (settleTimer !== null) {
+        window.clearTimeout(settleTimer);
+      }
+      window.removeEventListener('resize', handleViewportRefresh);
+      window.removeEventListener('orientationchange', handleViewportRefresh);
+      window.removeEventListener('fieldcast:layout-refresh', handleViewportRefresh);
+    };
+  }, []);
 
   useEffect(() => {
     const prev = lastSyncedTargetRef.current;
@@ -166,15 +207,17 @@ const MapClickAndSyncController: React.FC<{
     }
     lastSyncedTargetRef.current = { lat: centerLat, lon: centerLon };
     try {
-      const current = map.getCenter();
+      const current = mapRef.current.getCenter();
       const dist = Math.hypot(current.lat - centerLat, current.lng - centerLon);
       if (dist > 0.002) {
-        map.setView([centerLat, centerLon], map.getZoom(), { animate: false });
+        mapRef.current.setView([centerLat, centerLon], mapRef.current.getZoom(), {
+          animate: false,
+        });
       }
     } catch {
       // Ignore in headless test environment
     }
-  }, [centerLat, centerLon, map]);
+  }, [centerLat, centerLon]);
 
   useMapEvents({
     click(event) {
@@ -244,6 +287,27 @@ export const ForecastPinMiniMap: React.FC<ForecastPinMiniMapProps> = ({
     useState<boolean>(false);
   const [overlayRetryTick, setOverlayRetryTick] = useState<number>(0);
   const [radarState, setRadarState] = useState<RainViewerRadarState | null>(null);
+  const [isPinLocked, setIsPinLocked] = useState<boolean>(false);
+  const [lockedClickedCoords, setLockedClickedCoords] = useState<{
+    latitude: number;
+    longitude: number;
+  } | null>(null);
+  const [isFullscreen, setIsFullscreen] = useState<boolean>(false);
+
+  useEffect(() => {
+    if (!isFullscreen) return;
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') {
+        setIsFullscreen(false);
+      }
+    };
+    window.addEventListener('keydown', handleKeyDown);
+    document.addEventListener('keydown', handleKeyDown);
+    return () => {
+      window.removeEventListener('keydown', handleKeyDown);
+      document.removeEventListener('keydown', handleKeyDown);
+    };
+  }, [isFullscreen]);
 
   useEffect(() => {
     setPinLat((prev) =>
@@ -354,6 +418,11 @@ export const ForecastPinMiniMap: React.FC<ForecastPinMiniMapProps> = ({
   const handleMapPick = (lat: number, lon: number) => {
     const clampedLat = Math.max(-85, Math.min(85, Number(lat.toFixed(5))));
     const clampedLon = Math.max(-180, Math.min(180, Number(lon.toFixed(5))));
+    if (isPinLocked) {
+      setLockedClickedCoords({ latitude: clampedLat, longitude: clampedLon });
+      return;
+    }
+    setLockedClickedCoords(null);
     setPinLat(clampedLat);
     setPinLon(clampedLon);
     if (instantApplyOnClick && onSelectLocation) {
@@ -401,204 +470,286 @@ export const ForecastPinMiniMap: React.FC<ForecastPinMiniMapProps> = ({
   };
 
   return (
-    <div className="rounded-2xl border border-slate-200/90 dark:border-sky-800/70 bg-white dark:bg-[#132a47] p-4 shadow-sm space-y-3">
-      {/* Top Toolbar: Instructions + Base Layer Switcher + Instant Mode Toggle */}
-      <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-2.5">
-        <div className="flex items-start sm:items-center gap-2.5">
-          <div className="p-2 rounded-xl bg-sky-50 dark:bg-sky-900/60 text-[#0080cd] dark:text-sky-300 border border-sky-200/80 dark:border-sky-700/60 shrink-0">
-            <MapPin className="w-4 h-4" aria-hidden="true" />
-          </div>
-          <div>
-            <div className="flex flex-wrap items-center gap-2">
-              <h3 className="text-xs sm:text-sm font-bold text-slate-900 dark:text-sky-50">
-                Mapa de Pin da Previsão (Estilo Windy)
-              </h3>
-              <span className="px-2 py-0.5 rounded-full text-[10px] font-semibold bg-sky-50 dark:bg-sky-900/70 text-[#0070b8] dark:text-sky-200 border border-sky-200/70 dark:border-sky-700/60">
-                Clique no mapa para posicionar a bandeirinha
-              </span>
+    <div
+      className={
+        isFullscreen
+          ? 'fixed inset-0 z-[80] bg-slate-900/95 p-2 sm:p-4 flex flex-col gap-2.5 overflow-y-auto'
+          : 'rounded-2xl border border-slate-200/90 dark:border-sky-800/70 bg-white dark:bg-[#132a47] p-4 shadow-sm space-y-3 min-w-0'
+      }
+    >
+      {/* Top Toolbar: Instructions + Pin Lock + Fullscreen + Base Layer Switcher */}
+      <div
+        className={
+          isFullscreen
+            ? 'rounded-2xl border border-slate-200/90 dark:border-sky-800/70 bg-white/95 dark:bg-[#132a47]/95 backdrop-blur-md p-3 shadow-md space-y-2.5 shrink-0 min-w-0'
+            : 'space-y-2.5 min-w-0'
+        }
+      >
+        <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-2.5 min-w-0">
+          <div className="flex items-start sm:items-center gap-2.5 min-w-0">
+            <div className="p-2 rounded-xl bg-sky-50 dark:bg-sky-900/60 text-[#0080cd] dark:text-sky-300 border border-sky-200/80 dark:border-sky-700/60 shrink-0">
+              <MapPin className="w-4 h-4" aria-hidden="true" />
             </div>
-            <p className="text-[11px] text-slate-500 dark:text-sky-200/75">
-              Posicione o pin em qualquer ponto costeiro, oceânico ou continental e defina um raio de área
-            </p>
+            <div className="min-w-0">
+              <div className="flex flex-wrap items-center gap-2">
+                <h3 className="text-xs sm:text-sm font-bold text-slate-900 dark:text-sky-50">
+                  Mapa de Pin da Previsão (Estilo Windy)
+                </h3>
+                <span className="px-2 py-0.5 rounded-full text-[10px] font-semibold bg-sky-50 dark:bg-sky-900/70 text-[#0070b8] dark:text-sky-200 border border-sky-200/70 dark:border-sky-700/60">
+                  {isPinLocked
+                    ? 'Pin Fixado — Arraste e inspecione sem alterar o local'
+                    : 'Clique no mapa para posicionar a bandeirinha'}
+                </span>
+              </div>
+              <p className="text-[11px] text-slate-500 dark:text-sky-200/75">
+                Posicione o pin em qualquer ponto costeiro, oceânico ou continental e defina um raio de área
+              </p>
+            </div>
+          </div>
+
+          <div className="flex flex-wrap items-center gap-2 min-w-0">
+            {/* Reactive Pin Lock / Unlock Button */}
+            <button
+              type="button"
+              data-testid="minimap-pin-lock-btn"
+              onClick={() =>
+                setIsPinLocked((prev) => {
+                  const next = !prev;
+                  if (!next) {
+                    setLockedClickedCoords(null);
+                  }
+                  return next;
+                })
+              }
+              aria-pressed={isPinLocked}
+              title={
+                isPinLocked
+                  ? 'Pin travado: navegue pelo mapa sem mover o marcador ativo. Clique para liberar.'
+                  : 'Pin livre: clicar ou arrastar no mapa atualiza o marcador. Clique para fixar.'
+              }
+              className={`min-h-[44px] min-w-[44px] px-3.5 py-2 rounded-full text-xs font-bold inline-flex items-center gap-1.5 border transition-all ${
+                isPinLocked
+                  ? 'bg-amber-500 text-slate-950 border-amber-500 shadow-sm'
+                  : 'bg-emerald-50 dark:bg-emerald-950/60 text-emerald-800 dark:text-emerald-200 border-emerald-300 dark:border-emerald-700 hover:bg-emerald-100/80'
+              }`}
+            >
+              {isPinLocked ? (
+                <>
+                  <Lock className="w-3.5 h-3.5 shrink-0" aria-hidden="true" />
+                  <span>Pin Fixado</span>
+                </>
+              ) : (
+                <>
+                  <Unlock className="w-3.5 h-3.5 shrink-0" aria-hidden="true" />
+                  <span>Pin Livre</span>
+                </>
+              )}
+            </button>
+
+            {/* Fullscreen Tactical Map Toggle Button */}
+            <button
+              type="button"
+              data-testid="minimap-fullscreen-btn"
+              onClick={() => setIsFullscreen((prev) => !prev)}
+              aria-pressed={isFullscreen}
+              className={`min-h-[44px] min-w-[44px] px-3.5 py-2 rounded-full text-xs font-bold inline-flex items-center gap-1.5 border transition-all ${
+                isFullscreen
+                  ? 'bg-rose-600 hover:bg-rose-500 text-white border-rose-500 shadow-sm'
+                  : 'bg-sky-50 dark:bg-sky-900/70 text-[#0070b8] dark:text-sky-100 border-sky-300 dark:border-sky-600 hover:bg-sky-100'
+              }`}
+            >
+              {isFullscreen ? (
+                <>
+                  <Minimize2 className="w-3.5 h-3.5 shrink-0" aria-hidden="true" />
+                  <span>Sair da Tela Cheia</span>
+                </>
+              ) : (
+                <>
+                  <Maximize2 className="w-3.5 h-3.5 shrink-0" aria-hidden="true" />
+                  <span>Tela Cheia</span>
+                </>
+              )}
+            </button>
+
+            {/* Weather Model & RainViewer Radar Quick Toggles */}
+            <button
+              type="button"
+              onClick={() => {
+                setOverlayFallbackActive(false);
+                setWeatherOverlayLayer((prev) => (prev === 'wind' ? 'none' : 'wind'));
+              }}
+              aria-pressed={weatherOverlayLayer === 'wind' && !overlayFallbackActive}
+              className={`min-h-[44px] px-3 py-1.5 rounded-full text-xs font-semibold inline-flex items-center gap-1.5 border transition-all ${
+                weatherOverlayLayer === 'wind' && !overlayFallbackActive
+                  ? 'bg-sky-50 dark:bg-sky-900/70 text-[#0070b8] dark:text-sky-100 border-sky-300 dark:border-sky-600'
+                  : 'bg-white dark:bg-[#0d1f36] text-slate-600 dark:text-sky-200 border-slate-200 dark:border-sky-800 hover:bg-sky-50'
+              }`}
+            >
+              <Wind className="w-3.5 h-3.5 text-[#0080cd]" aria-hidden="true" />
+              <span>Camada Vento</span>
+            </button>
+
+            <button
+              type="button"
+              onClick={() => setShowRainViewerOverlay((prev) => !prev)}
+              aria-pressed={showRainViewerOverlay}
+              className={`min-h-[44px] px-3 py-1.5 rounded-full text-xs font-semibold inline-flex items-center gap-1.5 border transition-all ${
+                showRainViewerOverlay
+                  ? 'bg-sky-50 dark:bg-sky-900/70 text-[#0070b8] dark:text-sky-100 border-sky-300 dark:border-sky-600'
+                  : 'bg-white dark:bg-[#0d1f36] text-slate-600 dark:text-sky-200 border-slate-200 dark:border-sky-800 hover:bg-sky-50'
+              }`}
+            >
+              <Radar className="w-3.5 h-3.5 text-[#0080cd]" aria-hidden="true" />
+              <span>Radar Chuva</span>
+            </button>
+
+            <button
+              type="button"
+              data-testid="minimap-safe-layers-toggle"
+              onClick={() => {
+                const hasAnyOverlay =
+                  (weatherOverlayLayer !== 'none' && !overlayFallbackActive) || showRainViewerOverlay;
+                if (hasAnyOverlay) {
+                  setWeatherOverlayLayer('none');
+                  setShowRainViewerOverlay(false);
+                } else {
+                  setOverlayFallbackActive(false);
+                  setOverlayRetryTick((prev) => prev + 1);
+                  setWeatherOverlayLayer('wind');
+                  setShowRainViewerOverlay(true);
+                }
+              }}
+              aria-pressed={weatherOverlayLayer === 'none' && !showRainViewerOverlay}
+              className={`min-h-[44px] px-3 py-1.5 rounded-full text-xs font-semibold inline-flex items-center gap-1.5 border transition-all ${
+                weatherOverlayLayer === 'none' && !showRainViewerOverlay
+                  ? 'bg-slate-800 text-white border-slate-700 dark:bg-sky-700 dark:border-sky-600'
+                  : 'bg-white dark:bg-[#0d1f36] text-slate-600 dark:text-sky-200 border-slate-200 dark:border-sky-800 hover:bg-sky-50'
+              }`}
+            >
+              <EyeOff className="w-3.5 h-3.5" aria-hidden="true" />
+              <span>
+                {weatherOverlayLayer === 'none' && !showRainViewerOverlay
+                  ? 'Mapa Limpo (Ativo)'
+                  : 'Mapa Limpo'}
+              </span>
+            </button>
+
+            {/* Instant Windy Click Toggle */}
+            <button
+              type="button"
+              onClick={() => setInstantApplyOnClick((prev) => !prev)}
+              aria-pressed={instantApplyOnClick}
+              className={`min-h-[44px] px-3 py-1.5 rounded-full text-xs font-semibold inline-flex items-center gap-1.5 border transition-all ${
+                instantApplyOnClick
+                  ? 'bg-[#0080cd] text-white border-[#0080cd] shadow-sm'
+                  : 'bg-white dark:bg-[#0d1f36] text-slate-600 dark:text-sky-200 border-slate-200 dark:border-sky-800 hover:bg-sky-50'
+              }`}
+            >
+              <Sparkles className="w-3.5 h-3.5" aria-hidden="true" />
+              <span>{instantApplyOnClick ? 'Atualizar ao Clicar: Ativo' : 'Atualizar ao Clicar: Pausado'}</span>
+            </button>
+
+            {/* Base Layer Switcher */}
+            <div
+              role="group"
+              aria-label="Estilo do mapa base"
+              className="inline-flex flex-wrap items-center gap-0.5 rounded-2xl sm:rounded-full border border-slate-200 dark:border-sky-800 bg-[#f4f8fb] dark:bg-[#0d1f36] p-0.5"
+            >
+              <Layers className="w-3.5 h-3.5 text-[#0080cd] ml-2.5 mr-1 hidden sm:inline" aria-hidden="true" />
+              {BASE_LAYERS.map((layer) => {
+                const active = baseLayerId === layer.id;
+                return (
+                  <button
+                    key={layer.id}
+                    type="button"
+                    onClick={() => setBaseLayerId(layer.id)}
+                    aria-pressed={active}
+                    className={`min-h-[34px] px-2.5 py-1 rounded-full text-[11px] font-semibold transition-colors ${
+                      active
+                        ? 'bg-white dark:bg-sky-700 text-[#0070b8] dark:text-white font-bold shadow-sm'
+                        : 'text-slate-600 dark:text-sky-200/80 hover:text-[#0080cd]'
+                    }`}
+                  >
+                    {layer.label}
+                  </button>
+                );
+              })}
+            </div>
           </div>
         </div>
 
-        <div className="flex flex-wrap items-center gap-2">
-          {/* Weather Model & RainViewer Radar Quick Toggles */}
-          <button
-            type="button"
-            onClick={() => {
-              setOverlayFallbackActive(false);
-              setWeatherOverlayLayer((prev) => (prev === 'wind' ? 'none' : 'wind'));
-            }}
-            aria-pressed={weatherOverlayLayer === 'wind' && !overlayFallbackActive}
-            className={`min-h-[36px] px-3 py-1 rounded-full text-xs font-semibold inline-flex items-center gap-1.5 border transition-all ${
-              weatherOverlayLayer === 'wind' && !overlayFallbackActive
-                ? 'bg-sky-50 dark:bg-sky-900/70 text-[#0070b8] dark:text-sky-100 border-sky-300 dark:border-sky-600'
-                : 'bg-white dark:bg-[#0d1f36] text-slate-600 dark:text-sky-200 border-slate-200 dark:border-sky-800 hover:bg-sky-50'
-            }`}
-          >
-            <Wind className="w-3.5 h-3.5 text-[#0080cd]" aria-hidden="true" />
-            <span>Camada Vento</span>
-          </button>
-
-          <button
-            type="button"
-            onClick={() => setShowRainViewerOverlay((prev) => !prev)}
-            aria-pressed={showRainViewerOverlay}
-            className={`min-h-[36px] px-3 py-1 rounded-full text-xs font-semibold inline-flex items-center gap-1.5 border transition-all ${
-              showRainViewerOverlay
-                ? 'bg-sky-50 dark:bg-sky-900/70 text-[#0070b8] dark:text-sky-100 border-sky-300 dark:border-sky-600'
-                : 'bg-white dark:bg-[#0d1f36] text-slate-600 dark:text-sky-200 border-slate-200 dark:border-sky-800 hover:bg-sky-50'
-            }`}
-          >
-            <Radar className="w-3.5 h-3.5 text-[#0080cd]" aria-hidden="true" />
-            <span>Radar Chuva</span>
-          </button>
-
-          <button
-            type="button"
-            data-testid="minimap-safe-layers-toggle"
-            onClick={() => {
-              const hasAnyOverlay =
-                (weatherOverlayLayer !== 'none' && !overlayFallbackActive) || showRainViewerOverlay;
-              if (hasAnyOverlay) {
-                setWeatherOverlayLayer('none');
-                setShowRainViewerOverlay(false);
-              } else {
-                setOverlayFallbackActive(false);
-                setOverlayRetryTick((prev) => prev + 1);
-                setWeatherOverlayLayer('wind');
-                setShowRainViewerOverlay(true);
-              }
-            }}
-            aria-pressed={weatherOverlayLayer === 'none' && !showRainViewerOverlay}
-            className={`min-h-[36px] px-3 py-1 rounded-full text-xs font-semibold inline-flex items-center gap-1.5 border transition-all ${
-              weatherOverlayLayer === 'none' && !showRainViewerOverlay
-                ? 'bg-slate-800 text-white border-slate-700 dark:bg-sky-700 dark:border-sky-600'
-                : 'bg-white dark:bg-[#0d1f36] text-slate-600 dark:text-sky-200 border-slate-200 dark:border-sky-800 hover:bg-sky-50'
-            }`}
-          >
-            <EyeOff className="w-3.5 h-3.5" aria-hidden="true" />
-            <span>
-              {weatherOverlayLayer === 'none' && !showRainViewerOverlay
-                ? 'Mapa Limpo (Ativo)'
-                : 'Mapa Limpo'}
+        {/* Area Radius Selector + Saved Locations Quick Chips */}
+        <div className="flex flex-wrap items-center justify-between gap-2 text-xs min-w-0">
+          <div className="flex flex-wrap items-center gap-1.5">
+            <span className="text-[11px] font-semibold text-slate-500 dark:text-sky-200/80 inline-flex items-center gap-1 mr-1">
+              <Compass className="w-3.5 h-3.5 text-[#0080cd]" aria-hidden="true" />
+              Área / Raio:
             </span>
-          </button>
-
-          {/* Instant Windy Click Toggle */}
-          <button
-            type="button"
-            onClick={() => setInstantApplyOnClick((prev) => !prev)}
-            aria-pressed={instantApplyOnClick}
-            className={`min-h-[36px] px-3 py-1 rounded-full text-xs font-semibold inline-flex items-center gap-1.5 border transition-all ${
-              instantApplyOnClick
-                ? 'bg-[#0080cd] text-white border-[#0080cd] shadow-sm'
-                : 'bg-white dark:bg-[#0d1f36] text-slate-600 dark:text-sky-200 border-slate-200 dark:border-sky-800 hover:bg-sky-50'
-            }`}
-          >
-            <Sparkles className="w-3.5 h-3.5" aria-hidden="true" />
-            <span>{instantApplyOnClick ? 'Atualizar ao Clicar: Ativo' : 'Atualizar ao Clicar: Pausado'}</span>
-          </button>
-
-          {/* Base Layer Switcher */}
-          <div
-            role="group"
-            aria-label="Estilo do mapa base"
-            className="inline-flex flex-wrap items-center gap-0.5 rounded-2xl sm:rounded-full border border-slate-200 dark:border-sky-800 bg-[#f4f8fb] dark:bg-[#0d1f36] p-0.5"
-          >
-            <Layers className="w-3.5 h-3.5 text-[#0080cd] ml-2.5 mr-1 hidden sm:inline" aria-hidden="true" />
-            {BASE_LAYERS.map((layer) => {
-              const active = baseLayerId === layer.id;
+            {RADIUS_OPTIONS_KM.map((opt) => {
+              const isSelected = areaRadiusKm === opt.km;
               return (
                 <button
-                  key={layer.id}
+                  key={opt.km}
                   type="button"
-                  onClick={() => setBaseLayerId(layer.id)}
-                  aria-pressed={active}
-                  className={`min-h-[30px] px-2.5 py-1 rounded-full text-[11px] font-semibold transition-colors ${
-                    active
-                      ? 'bg-white dark:bg-sky-700 text-[#0070b8] dark:text-white font-bold shadow-sm'
-                      : 'text-slate-600 dark:text-sky-200/80 hover:text-[#0080cd]'
+                  onClick={() => setAreaRadiusKm(opt.km)}
+                  aria-pressed={isSelected}
+                  className={`min-h-[34px] px-2.5 py-1 rounded-full text-[11px] font-semibold border transition-colors ${
+                    isSelected
+                      ? 'bg-[#0080cd] text-white border-[#0080cd] shadow-sm'
+                      : 'bg-[#f4f8fb] dark:bg-[#0d1f36] text-slate-600 dark:text-sky-200 border-slate-200 dark:border-sky-800 hover:bg-sky-50'
                   }`}
                 >
-                  {layer.label}
+                  {opt.label}
                 </button>
               );
             })}
           </div>
-        </div>
-      </div>
 
-      {/* Area Radius Selector + Saved Locations Quick Chips */}
-      <div className="flex flex-wrap items-center justify-between gap-2 text-xs">
-        <div className="flex flex-wrap items-center gap-1.5">
-          <span className="text-[11px] font-semibold text-slate-500 dark:text-sky-200/80 inline-flex items-center gap-1 mr-1">
-            <Compass className="w-3.5 h-3.5 text-[#0080cd]" aria-hidden="true" />
-            Área / Raio:
-          </span>
-          {RADIUS_OPTIONS_KM.map((opt) => {
-            const isSelected = areaRadiusKm === opt.km;
-            return (
-              <button
-                key={opt.km}
-                type="button"
-                onClick={() => setAreaRadiusKm(opt.km)}
-                aria-pressed={isSelected}
-                className={`min-h-[30px] px-2.5 py-1 rounded-full text-[11px] font-semibold border transition-colors ${
-                  isSelected
-                    ? 'bg-[#0080cd] text-white border-[#0080cd] shadow-sm'
-                    : 'bg-[#f4f8fb] dark:bg-[#0d1f36] text-slate-600 dark:text-sky-200 border-slate-200 dark:border-sky-800 hover:bg-sky-50'
-                }`}
-              >
-                {opt.label}
-              </button>
-            );
-          })}
+          {/* Quick Saved Locations & GPS Chips */}
+          {!compact && (savedLocations.length > 0 || onRequestGps) && (
+            <div className="flex items-center gap-1.5 overflow-x-auto scrollbar-thin max-w-full pb-0.5">
+              {onRequestGps && (
+                <button
+                  type="button"
+                  onClick={() => void onRequestGps()}
+                  className="min-h-[34px] px-2.5 py-1 rounded-full text-[11px] font-semibold bg-sky-50 dark:bg-sky-900/60 hover:bg-sky-100 text-[#0070b8] dark:text-sky-200 border border-sky-200 dark:border-sky-700/60 inline-flex items-center gap-1 shrink-0 transition-colors"
+                >
+                  <Navigation className="w-3 h-3 text-[#0080cd] dark:text-sky-300" aria-hidden="true" />
+                  <span>Meu GPS</span>
+                </button>
+              )}
+              {savedLocations.slice(0, 4).map((loc) => (
+                <button
+                  key={loc.id}
+                  type="button"
+                  onClick={() => {
+                    if (isPinLocked) return;
+                    setPinLat(loc.latitude);
+                    setPinLon(loc.longitude);
+                    if (onSelectLocation) {
+                      void onSelectLocation({
+                        latitude: loc.latitude,
+                        longitude: loc.longitude,
+                        name: loc.name,
+                        origin: 'saved',
+                      });
+                    }
+                  }}
+                  className="min-h-[34px] px-2.5 py-1 rounded-full text-[11px] font-medium bg-[#f4f8fb] dark:bg-[#0d1f36] hover:bg-sky-50 text-slate-700 dark:text-sky-200 border border-slate-200 dark:border-sky-800 shrink-0 transition-colors"
+                >
+                  {loc.name.split('—')[0]?.trim() || loc.name}
+                </button>
+              ))}
+            </div>
+          )}
         </div>
-
-        {/* Quick Saved Locations & GPS Chips */}
-        {!compact && (savedLocations.length > 0 || onRequestGps) && (
-          <div className="flex items-center gap-1.5 overflow-x-auto scrollbar-thin max-w-full pb-0.5">
-            {onRequestGps && (
-              <button
-                type="button"
-                onClick={() => void onRequestGps()}
-                className="min-h-[30px] px-2.5 py-1 rounded-full text-[11px] font-semibold bg-sky-50 dark:bg-sky-900/60 hover:bg-sky-100 text-[#0070b8] dark:text-sky-200 border border-sky-200 dark:border-sky-700/60 inline-flex items-center gap-1 shrink-0 transition-colors"
-              >
-                <Navigation className="w-3 h-3 text-[#0080cd] dark:text-sky-300" aria-hidden="true" />
-                <span>Meu GPS</span>
-              </button>
-            )}
-            {savedLocations.slice(0, 4).map((loc) => (
-              <button
-                key={loc.id}
-                type="button"
-                onClick={() => {
-                  setPinLat(loc.latitude);
-                  setPinLon(loc.longitude);
-                  if (onSelectLocation) {
-                    void onSelectLocation({
-                      latitude: loc.latitude,
-                      longitude: loc.longitude,
-                      name: loc.name,
-                      origin: 'saved',
-                    });
-                  }
-                }}
-                className="min-h-[30px] px-2.5 py-1 rounded-full text-[11px] font-medium bg-[#f4f8fb] dark:bg-[#0d1f36] hover:bg-sky-50 text-slate-700 dark:text-sky-200 border border-slate-200 dark:border-sky-800 shrink-0 transition-colors"
-              >
-                {loc.name.split('—')[0]?.trim() || loc.name}
-              </button>
-            ))}
-          </div>
-        )}
       </div>
 
       {/* Interactive Leaflet Map Container */}
       <div
-        className={`relative w-full ${heightClassName} rounded-2xl overflow-hidden border border-slate-200 dark:border-sky-800/80 shadow-inner bg-sky-100/60 dark:bg-[#0b192c]`}
+        className={`relative w-full ${
+          isFullscreen ? 'flex-1 min-h-[280px]' : heightClassName
+        } rounded-2xl overflow-hidden border border-slate-200 dark:border-sky-800/80 shadow-inner bg-sky-100/60 dark:bg-[#0b192c]`}
       >
         <MapContainer
           center={[pinLat, pinLon]}
@@ -642,18 +793,22 @@ export const ForecastPinMiniMap: React.FC<ForecastPinMiniMapProps> = ({
           <MapClickAndSyncController
             centerLat={pinLat}
             centerLon={pinLon}
+            isFullscreen={isFullscreen}
             onPickCoordinates={handleMapPick}
           />
 
           <Marker
+            key={isPinLocked ? 'minimap-pin-locked' : 'minimap-pin-free'}
             position={[pinLat, pinLon]}
             icon={pinIcon}
-            draggable={true}
+            draggable={!isPinLocked}
             eventHandlers={{
               click: () => {
+                if (isPinLocked) return;
                 applyPinForecast(pinLat, pinLon, areaRadiusKm);
               },
               dragend: (event) => {
+                if (isPinLocked) return;
                 const marker = event.target as L.Marker;
                 const pos = marker.getLatLng();
                 handleMapPick(pos.lat, pos.lng);
@@ -675,11 +830,24 @@ export const ForecastPinMiniMap: React.FC<ForecastPinMiniMapProps> = ({
           )}
         </MapContainer>
 
-        {/* Floating Coordinates Pill Overlay on Map */}
-        <div className="absolute bottom-2.5 left-2.5 z-[500] pointer-events-none">
-          <div className="px-3 py-1.5 rounded-full bg-white/95 dark:bg-[#0d1f36]/95 backdrop-blur-md border border-slate-200 dark:border-sky-700/70 shadow-md text-[11px] font-medium text-slate-700 dark:text-sky-100 flex items-center gap-2">
+        {/* Floating Coordinates Pill Overlay on Map + Temporary Clicked Coords Badge when Pin is Locked */}
+        <div className="absolute bottom-2.5 left-2.5 z-[500] pointer-events-none space-y-1.5 max-w-[calc(100%-1.25rem)]">
+          {isPinLocked && lockedClickedCoords && (
+            <div
+              data-testid="minimap-locked-coords-badge"
+              className="px-3 py-1 rounded-full bg-amber-50/95 dark:bg-amber-950/95 backdrop-blur-md border border-amber-300 dark:border-amber-700 shadow-md text-[11px] font-semibold text-amber-950 dark:text-amber-100 inline-flex items-center gap-1.5"
+            >
+              <Lock className="w-3 h-3 text-amber-600 dark:text-amber-400 shrink-0" aria-hidden="true" />
+              <span className="truncate">
+                Consulta: <strong className="font-mono">{lockedClickedCoords.latitude.toFixed(4)}°</strong>,{' '}
+                <strong className="font-mono">{lockedClickedCoords.longitude.toFixed(4)}°</strong> (Pin Fixado)
+              </span>
+            </div>
+          )}
+
+          <div className="px-3 py-1.5 rounded-full bg-white/95 dark:bg-[#0d1f36]/95 backdrop-blur-md border border-slate-200 dark:border-sky-700/70 shadow-md text-[11px] font-medium text-slate-700 dark:text-sky-100 inline-flex items-center gap-2 max-w-full">
             <Crosshair className="w-3.5 h-3.5 text-[#0080cd] dark:text-sky-400 shrink-0" aria-hidden="true" />
-            <span>
+            <span className="truncate">
               Pin: <strong className="font-mono">{pinLat.toFixed(4)}°</strong>,{' '}
               <strong className="font-mono">{pinLon.toFixed(4)}°</strong>
               {areaRadiusKm > 0 ? ` • Área ${areaRadiusKm} km` : ''}
@@ -751,15 +919,21 @@ export const ForecastPinMiniMap: React.FC<ForecastPinMiniMapProps> = ({
       </div>
 
       {/* Bottom Action Bar: Name Input + Apply Forecast + Save Favorite */}
-      <div className="flex flex-col sm:flex-row items-stretch sm:items-center justify-between gap-2.5 pt-0.5">
-        <div className="flex-1 flex items-center gap-2">
+      <div
+        className={
+          isFullscreen
+            ? 'rounded-2xl border border-slate-200/90 dark:border-sky-800/70 bg-white/95 dark:bg-[#132a47]/95 backdrop-blur-md p-3 shadow-md flex flex-col sm:flex-row items-stretch sm:items-center justify-between gap-2.5 shrink-0 min-w-0'
+            : 'flex flex-col sm:flex-row items-stretch sm:items-center justify-between gap-2.5 pt-0.5 min-w-0'
+        }
+      >
+        <div className="flex-1 flex items-center gap-2 min-w-0">
           <input
             type="text"
             value={customPinName}
             onChange={(e) => setCustomPinName(e.target.value)}
             placeholder="Nome opcional para este local (ex.: Praia Mole / Canal Central)..."
             aria-label="Nome personalizado para o pin no mapa"
-            className="w-full min-h-[38px] px-3.5 py-1.5 rounded-full border border-slate-200 dark:border-sky-800 bg-[#f8fafc] dark:bg-[#0d1f36] text-xs text-slate-800 dark:text-sky-100 placeholder:text-slate-400 focus:outline-none focus:ring-2 focus:ring-sky-500"
+            className="w-full min-w-0 min-h-[44px] px-3.5 py-1.5 rounded-full border border-slate-200 dark:border-sky-800 bg-[#f8fafc] dark:bg-[#0d1f36] text-xs text-slate-800 dark:text-sky-100 placeholder:text-slate-400 focus:outline-none focus:ring-2 focus:ring-sky-500"
           />
         </div>
 
@@ -767,8 +941,14 @@ export const ForecastPinMiniMap: React.FC<ForecastPinMiniMapProps> = ({
           {onSelectLocation && (
             <button
               type="button"
+              disabled={isPinLocked}
               onClick={() => applyPinForecast(pinLat, pinLon, areaRadiusKm)}
-              className="min-h-[38px] px-4 py-1.5 rounded-full text-xs font-bold inline-flex items-center justify-center gap-1.5 bg-[#0080cd] hover:bg-[#006bb3] text-white shadow-sm transition-colors"
+              title={
+                isPinLocked
+                  ? 'Pin Fixado: destrave o Pin Livre para atualizar o ponto ativo'
+                  : 'Aplicar previsão para este local'
+              }
+              className="min-h-[44px] px-4 py-1.5 rounded-full text-xs font-bold inline-flex items-center justify-center gap-1.5 bg-[#0080cd] hover:bg-[#006bb3] disabled:opacity-50 disabled:cursor-not-allowed text-white shadow-sm transition-colors"
             >
               {justApplied ? (
                 <>
@@ -788,7 +968,7 @@ export const ForecastPinMiniMap: React.FC<ForecastPinMiniMapProps> = ({
             <button
               type="button"
               onClick={handleSavePinnedLocation}
-              className="min-h-[38px] px-3.5 py-1.5 rounded-full text-xs font-semibold inline-flex items-center justify-center gap-1.5 bg-[#f4f8fb] dark:bg-sky-900/50 hover:bg-sky-50 text-[#0070b8] dark:text-sky-100 border border-sky-200 dark:border-sky-700/70 transition-colors"
+              className="min-h-[44px] px-3.5 py-1.5 rounded-full text-xs font-semibold inline-flex items-center justify-center gap-1.5 bg-[#f4f8fb] dark:bg-sky-900/50 hover:bg-sky-50 text-[#0070b8] dark:text-sky-100 border border-sky-200 dark:border-sky-700/70 transition-colors"
             >
               <Bookmark className="w-3.5 h-3.5 text-[#0080cd] dark:text-sky-300" aria-hidden="true" />
               <span>Salvar Favorito</span>

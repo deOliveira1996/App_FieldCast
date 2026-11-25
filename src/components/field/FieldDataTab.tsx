@@ -1,4 +1,6 @@
-import React, { useCallback, useEffect, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import ReactECharts from 'echarts-for-react';
+import type { EChartsOption } from 'echarts';
 import {
   Calendar,
   Camera,
@@ -14,10 +16,12 @@ import {
   FileSpreadsheet,
   FileText,
   Globe,
+  GraduationCap,
   HardDrive,
   History,
   Image as ImageIcon,
   Layers,
+  LayoutGrid,
   MapPin,
   MessageSquareShare,
   Navigation,
@@ -34,7 +38,9 @@ import {
   Waves,
   Wind,
 } from 'lucide-react';
+import { FullscreenViewer } from '../common/FullscreenViewer';
 import { ModuleErrorBoundary } from '../common/ModuleErrorBoundary';
+import { TechnicalReportsPanel } from '../reports/TechnicalReportsPanel';
 import * as dbModule from '../../db/database';
 import {
   clearOfflineTiles,
@@ -76,9 +82,25 @@ import type {
   Waypoint,
 } from '../../types/field';
 import type { ErrorLogRecord, ToastMessage } from '../../types/health';
-import type { NormalizedForecast } from '../../types/weather';
+import type { FieldSubViewId } from '../../types/v4';
+import type { ForecastViewMode, NormalizedForecast } from '../../types/weather';
+import { computePhysicalHourlyEt0FallbackMm } from '../../services/historicalWeatherService';
 import { UTF8_BOM } from '../../utils/exporters';
+import {
+  computeApparentTemperatureFallbackC,
+  computeMagnusRelativeHumidityPct,
+} from '../../utils/qualityScores';
 import { safeAction } from '../../utils/safeAction';
+
+export type FieldSubViewSelection = FieldSubViewId | 'all';
+
+const CAN_ATTACH_ECHARTS_REF =
+  (typeof ReactECharts === 'function' &&
+    Boolean(
+      (ReactECharts as unknown as { prototype?: { isReactComponent?: unknown } }).prototype
+        ?.isReactComponent,
+    )) ||
+  (typeof ReactECharts === 'object' && ReactECharts !== null);
 
 const ALL_HISTORICAL_MODELS: readonly HistoricalModelSelection[] = [
   'fieldcast',
@@ -460,13 +482,28 @@ async function defaultQueryHistoricalTimeSeries(
               }
               return null;
             };
+            const tempC = pick('temperature_2m');
+            const dewC = pick('dew_point_2m');
+            const windKmh = pick('wind_speed_10m');
+            const rh =
+              pick('relative_humidity_2m') ??
+              computeMagnusRelativeHumidityPct(tempC, dewC);
+            const apparentC =
+              pick('apparent_temperature') ??
+              computeApparentTemperatureFallbackC(tempC, rh, windKmh);
+            const et0Mm =
+              pick('et0_fao_evapotranspiration') ??
+              computePhysicalHourlyEt0FallbackMm(tempC, 6);
             hours.push({
               timestampUnix: ts,
               timestampIso: new Date(ts * 1000).toISOString(),
               source: req.models.join('+'),
-              temperature2mC: pick('temperature_2m'),
-              dewPoint2mC: pick('dew_point_2m'),
-              windSpeed10mKmh: pick('wind_speed_10m'),
+              temperature2mC: tempC,
+              dewPoint2mC: dewC,
+              relativeHumidity2mPct: rh,
+              apparentTemperatureC: apparentC,
+              et0FaoEvapotranspirationMm: et0Mm,
+              windSpeed10mKmh: windKmh,
               windGusts10mKmh: pick('wind_gusts_10m'),
               windDirection10mDeg: pick('wind_direction_10m'),
               precipitationMm: pick('precipitation'),
@@ -501,28 +538,50 @@ async function defaultQueryHistoricalTimeSeries(
   // Fallback local/offline usando previsão em cache para garantir funcionamento em modo desconectado/testes
   const fallbackHours: HistoricalHourRecord[] = (anchorForecast?.hours ?? [])
     .slice(0, Math.min(168, daysSpan * 24))
-    .map((h) => ({
-      timestampUnix: h.timestampUnix,
-      timestampIso: h.timestampIso,
-      source: req.models.join('+'),
-      temperature2mC: h.temperature2mC.mean,
-      dewPoint2mC: h.dewPoint2mC.mean,
-      windSpeed10mKmh: h.windSpeed10m.mean,
-      windGusts10mKmh: h.windGusts10m.mean,
-      windDirection10mDeg: h.windDirection10m.degree,
-      precipitationMm: h.precipitationMm.mean,
-      surfacePressureHpa: h.surfacePressureHpa.mean,
-      waveHeightM: h.marine?.waveHeight ?? null,
-      seaLevelHeightMsl: h.marine?.seaLevelHeightMsl ?? null,
-    }));
+    .map((h) => {
+      const rh =
+        h.relativeHumidity2mPct?.mean ??
+        computeMagnusRelativeHumidityPct(h.temperature2mC.mean, h.dewPoint2mC.mean);
+      const apparentC =
+        h.apparentTemperatureC?.mean ??
+        computeApparentTemperatureFallbackC(
+          h.temperature2mC.mean,
+          rh,
+          h.windSpeed10m.mean,
+        );
+      const et0Mm =
+        h.et0FaoMm?.mean ??
+        computePhysicalHourlyEt0FallbackMm(h.temperature2mC.mean, 6);
+      return {
+        timestampUnix: h.timestampUnix,
+        timestampIso: h.timestampIso,
+        source: req.models.join('+'),
+        temperature2mC: h.temperature2mC.mean,
+        dewPoint2mC: h.dewPoint2mC.mean,
+        relativeHumidity2mPct: rh,
+        apparentTemperatureC: apparentC,
+        et0FaoEvapotranspirationMm: et0Mm,
+        windSpeed10mKmh: h.windSpeed10m.mean,
+        windGusts10mKmh: h.windGusts10m.mean,
+        windDirection10mDeg: h.windDirection10m.degree,
+        precipitationMm: h.precipitationMm.mean,
+        surfacePressureHpa: h.surfacePressureHpa.mean,
+        waveHeightM: h.marine?.waveHeight ?? null,
+        seaLevelHeightMsl: h.marine?.seaLevelHeightMsl ?? null,
+      };
+    });
 
   if (fallbackHours.length === 0) {
+    const fallbackRh = computeMagnusRelativeHumidityPct(23.5, 18.2);
     fallbackHours.push({
       timestampUnix: startUnix,
       timestampIso: new Date(startUnix * 1000).toISOString(),
       source: req.models.join('+'),
       temperature2mC: 23.5,
       dewPoint2mC: 18.2,
+      relativeHumidity2mPct: fallbackRh,
+      apparentTemperatureC: computeApparentTemperatureFallbackC(23.5, fallbackRh, 16.4),
+      et0FaoEvapotranspirationMm: computePhysicalHourlyEt0FallbackMm(23.5, 6),
       windSpeed10mKmh: 16.4,
       windGusts10mKmh: 24.0,
       windDirection10mDeg: 145,
@@ -615,6 +674,11 @@ export interface FieldDataTabProps {
   tracks?: TrackSession[];
   historicalLogs?: HistoricalLogEntry[];
   recurrenceRules?: HistoricalRecurrenceRule[];
+  initialSubView?: FieldSubViewSelection;
+  activeSubView?: FieldSubViewSelection;
+  onSubViewChange?: (subView: FieldSubViewSelection) => void;
+  isDark?: boolean;
+  viewMode?: ForecastViewMode;
   onWaypointsChange?: (waypoints: Waypoint[]) => void;
   onTracksChange?: (tracks: TrackSession[]) => void;
   onFetchHistoricalSeries?: (
@@ -653,6 +717,11 @@ export const FieldDataTab: React.FC<FieldDataTabProps> = ({
   tracks: externalTracks,
   historicalLogs: externalHistoricalLogs,
   recurrenceRules: externalRecurrenceRules,
+  initialSubView = 'overview',
+  activeSubView: controlledSubView,
+  onSubViewChange,
+  isDark = false,
+  viewMode = 'fieldcast',
   primaryLocationName = null,
   onOpenLocationsModal,
   onRequestGps,
@@ -665,6 +734,20 @@ export const FieldDataTab: React.FC<FieldDataTabProps> = ({
   onToast,
   onErrorLog,
 }) => {
+  // Navegação modular de sub-vistas para eliminar página monolítica
+  const [internalSubView, setInternalSubView] = useState<FieldSubViewSelection>(initialSubView);
+  const resolvedSubView: FieldSubViewSelection = controlledSubView ?? internalSubView;
+  const histChartRef = useRef<ReactECharts | null>(null);
+
+  const handleSelectSubView = useCallback(
+    (next: FieldSubViewSelection) => {
+      if (controlledSubView === undefined) {
+        setInternalSubView(next);
+      }
+      onSubViewChange?.(next);
+    },
+    [controlledSubView, onSubViewChange],
+  );
   // Estado do GPS Tracker
   const [trackerState, setTrackerState] = useState<LocationTrackerState>(() =>
     locationTrackerService.getState(),
@@ -1425,9 +1508,191 @@ export const FieldDataTab: React.FC<FieldDataTabProps> = ({
     );
   };
 
+  const chartTargetSeries: HistoricalSeriesResult | null =
+    lastHistoricalResult ?? activeHistoricalLogs[0]?.result ?? null;
+
+  const historicalChartOption: EChartsOption | null = useMemo(() => {
+    if (!chartTargetSeries || chartTargetSeries.hours.length === 0) {
+      return null;
+    }
+    const textColor = isDark ? '#cbd5e1' : '#334155';
+    const gridColor = isDark ? 'rgba(148, 163, 184, 0.15)' : 'rgba(148, 163, 184, 0.25)';
+
+    const xLabels = chartTargetSeries.hours.map((h) => {
+      try {
+        const d = new Date(h.timestampUnix * 1000);
+        const dm = d.toLocaleDateString('pt-BR', {
+          day: '2-digit',
+          month: '2-digit',
+          timeZone: chartTargetSeries.timezone || undefined,
+        });
+        const hm = d.toLocaleTimeString('pt-BR', {
+          hour: '2-digit',
+          minute: '2-digit',
+          timeZone: chartTargetSeries.timezone || undefined,
+        });
+        return `${dm} ${hm}`;
+      } catch {
+        return h.timestampIso.slice(5, 16).replace('T', ' ');
+      }
+    });
+
+    return {
+      backgroundColor: 'transparent',
+      tooltip: {
+        trigger: 'axis',
+        backgroundColor: isDark ? 'rgba(15, 23, 42, 0.96)' : 'rgba(255, 255, 255, 0.98)',
+        borderColor: isDark ? '#334155' : '#bae6fd',
+        textStyle: { color: isDark ? '#f8fafc' : '#0f172a', fontSize: 12 },
+      },
+      legend: {
+        type: 'scroll',
+        top: 0,
+        textStyle: { color: textColor, fontSize: 11 },
+      },
+      grid: {
+        top: 44,
+        left: 14,
+        right: 18,
+        bottom: 24,
+        containLabel: true,
+      },
+      xAxis: {
+        type: 'category',
+        data: xLabels,
+        axisLabel: { color: textColor, fontSize: 10, hideOverlap: true },
+        axisLine: { lineStyle: { color: gridColor } },
+      },
+      yAxis: [
+        {
+          type: 'value',
+          name: '°C / km/h',
+          nameTextStyle: { color: textColor, fontSize: 10 },
+          axisLabel: { color: textColor, fontSize: 10 },
+          splitLine: { lineStyle: { color: gridColor } },
+        },
+        {
+          type: 'value',
+          name: 'mm/h',
+          nameTextStyle: { color: textColor, fontSize: 10 },
+          axisLabel: { color: textColor, fontSize: 10 },
+          splitLine: { show: false },
+        },
+      ],
+      series: [
+        {
+          name: 'Temp 2m (°C)',
+          type: 'line',
+          yAxisIndex: 0,
+          smooth: true,
+          symbol: 'none',
+          lineStyle: { width: 2.3, color: '#f97316' },
+          itemStyle: { color: '#f97316' },
+          data: chartTargetSeries.hours.map((h) => h.temperature2mC),
+        },
+        {
+          name: 'Vento 10m (km/h)',
+          type: 'line',
+          yAxisIndex: 0,
+          smooth: true,
+          symbol: 'none',
+          lineStyle: { width: 1.9, type: 'dashed', color: '#0284c7' },
+          itemStyle: { color: '#0284c7' },
+          data: chartTargetSeries.hours.map((h) => h.windSpeed10mKmh),
+        },
+        {
+          name: 'Precipitação (mm)',
+          type: 'bar',
+          yAxisIndex: 1,
+          itemStyle: { color: 'rgba(14, 165, 233, 0.72)' },
+          data: chartTargetSeries.hours.map((h) => h.precipitationMm),
+        },
+      ],
+    };
+  }, [chartTargetSeries, isDark]);
+
+  const histEchartsRefProps = CAN_ATTACH_ECHARTS_REF
+    ? {
+        ref: (instance: ReactECharts | null) => {
+          histChartRef.current = instance;
+        },
+      }
+    : {};
+
+  const showOverview = resolvedSubView === 'overview' || resolvedSubView === 'all';
+  const showTracker = resolvedSubView === 'tracker' || resolvedSubView === 'all';
+  const showWaypoints = resolvedSubView === 'waypoints' || resolvedSubView === 'all';
+  const showHistoryFull = resolvedSubView === 'history' || resolvedSubView === 'all';
+  const showReports = resolvedSubView === 'reports' || resolvedSubView === 'all';
+
   return (
-    <div data-testid="storage-and-field-tab" className="space-y-6 pb-8">
+    <div data-testid="storage-and-field-tab" className="space-y-5 pb-8">
+      {/* Sub-Sidebar / Barra de Modos Focada (Um Módulo por Vez sem Poluição Visual) */}
+      <nav
+        data-testid="field-subview-nav"
+        aria-label="Sub-navegação de Dados, Campo e Relatórios"
+        className="rounded-2xl border border-slate-200/90 dark:border-sky-800/70 bg-white dark:bg-[#132a47] p-2.5 shadow-sm"
+      >
+        <div className="flex flex-wrap items-center gap-2">
+          {(
+            [
+              {
+                id: 'overview' as const,
+                label: 'Resumo de Armazenamento',
+                icon: Database,
+              },
+              {
+                id: 'tracker' as const,
+                label: `GPS Tracker${savedTracks.length > 0 ? ` (${savedTracks.length})` : ''}`,
+                icon: Route,
+              },
+              {
+                id: 'waypoints' as const,
+                label: `Waypoints & Fotos${savedWaypoints.length > 0 ? ` (${savedWaypoints.length})` : ''}`,
+                icon: MapPin,
+              },
+              {
+                id: 'history' as const,
+                label: 'Séries Históricas',
+                icon: History,
+              },
+              {
+                id: 'reports' as const,
+                label: 'Relatórios Técnicos & Acadêmicos',
+                icon: GraduationCap,
+              },
+              {
+                id: 'all' as const,
+                label: 'Ver Tudo',
+                icon: LayoutGrid,
+              },
+            ] as const
+          ).map((item) => {
+            const Icon = item.icon;
+            const isActive = resolvedSubView === item.id;
+            return (
+              <button
+                key={item.id}
+                type="button"
+                data-testid={`field-subview-${item.id}`}
+                aria-pressed={isActive}
+                onClick={() => handleSelectSubView(item.id)}
+                className={`min-h-[44px] min-w-[44px] px-3.5 py-2 rounded-xl text-xs sm:text-sm font-bold inline-flex items-center gap-2 border transition-colors ${
+                  isActive
+                    ? 'bg-[#0080cd] text-white border-[#0080cd] shadow-sm'
+                    : 'bg-slate-50 dark:bg-[#0f243d] text-slate-700 dark:text-sky-100 border-slate-200/80 dark:border-sky-800/70 hover:bg-sky-50 dark:hover:bg-sky-900/40'
+                }`}
+              >
+                <Icon className="w-4 h-4 shrink-0" aria-hidden="true" />
+                <span>{item.label}</span>
+              </button>
+            );
+          })}
+        </div>
+      </nav>
+
       {/* 1. Painel de Armazenamento & Dados Locais (Zero Servidor / Privacy-First) */}
+      {showOverview && (
       <ModuleErrorBoundary
         moduleName="Painel de Armazenamento e Dados Locais"
         onErrorLog={onErrorLog}
@@ -1557,8 +1822,10 @@ export const FieldDataTab: React.FC<FieldDataTabProps> = ({
           </div>
         </section>
       </ModuleErrorBoundary>
+      )}
 
       {/* 2. Painel GPS Tracker Adaptativo */}
+      {showTracker && (
       <ModuleErrorBoundary
         moduleName="Painel GPS Tracker Adaptativo"
         onErrorLog={onErrorLog}
@@ -1770,8 +2037,10 @@ export const FieldDataTab: React.FC<FieldDataTabProps> = ({
           )}
         </section>
       </ModuleErrorBoundary>
+      )}
 
       {/* 3. Waypoints Georreferenciados + Foto (~200 KB) + Snapshot Automático */}
+      {showWaypoints && (
       <ModuleErrorBoundary
         moduleName="Waypoints Georreferenciados & Galeria Offline"
         onErrorLog={onErrorLog}
@@ -2018,8 +2287,10 @@ export const FieldDataTab: React.FC<FieldDataTabProps> = ({
           </div>
         </section>
       </ModuleErrorBoundary>
+      )}
 
       {/* 4. Central de Exportação & Compartilhamento (Zero Servidor) */}
+      {showOverview && (
       <ModuleErrorBoundary
         moduleName="Central de Exportação & Compartilhamento"
         onErrorLog={onErrorLog}
@@ -2195,8 +2466,97 @@ export const FieldDataTab: React.FC<FieldDataTabProps> = ({
           </div>
         </section>
       </ModuleErrorBoundary>
+      )}
 
-      {/* 5. Seção Opcional / Sob Demanda: Séries Históricas & Recorrência Semanal */}
+      {/* 4B. Barra Rápida de Séries Históricas em 'overview' (Mantém 100% de compatibilidade sem poluir a tela) */}
+      {resolvedSubView === 'overview' && (
+        <section
+          aria-label="Séries Históricas & Recorrência Semanal"
+          data-testid="historical-series-section"
+          className="rounded-2xl border border-slate-200/90 dark:border-sky-800/70 bg-white dark:bg-[#132a47] p-4 sm:p-5 shadow-sm space-y-3"
+        >
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <div className="flex items-center gap-2.5">
+              <div className="p-2 rounded-xl bg-sky-500/15 text-sky-600 dark:text-sky-400">
+                <History className="w-5 h-5" aria-hidden="true" />
+              </div>
+              <div>
+                <h2 className="text-sm sm:text-base font-bold text-slate-900 dark:text-white">
+                  Séries Históricas &amp; Recorrência Semanal
+                </h2>
+                <p className="text-xs text-slate-600 dark:text-slate-400">
+                  Extração rápida ({histStartDate} a {histEndDate}) ou abra as sub-telas dedicadas
+                  para gráficos ERA5 e Relatórios Técnicos/Acadêmicos
+                </p>
+              </div>
+            </div>
+
+            <div className="flex flex-wrap items-center gap-2">
+              <button
+                type="button"
+                data-testid="query-historical-series-btn"
+                onClick={handleQueryHistoricalSeries}
+                disabled={isQueryingHistorical}
+                className="min-h-[44px] min-w-[44px] px-4 py-2 rounded-xl text-xs sm:text-sm font-bold inline-flex items-center justify-center gap-2 bg-sky-600 hover:bg-sky-500 disabled:opacity-50 text-white shadow-sm transition-colors"
+              >
+                <RefreshCw
+                  className={`w-4 h-4 ${isQueryingHistorical ? 'animate-spin' : ''}`}
+                  aria-hidden="true"
+                />
+                <span>
+                  {isQueryingHistorical
+                    ? 'Consultando Série Histórica...'
+                    : 'Consultar Série Histórica'}
+                </span>
+              </button>
+
+              <button
+                type="button"
+                onClick={() => handleSelectSubView('history')}
+                className="min-h-[44px] min-w-[44px] px-3.5 py-2 rounded-xl text-xs font-bold inline-flex items-center gap-1.5 border border-slate-200 dark:border-sky-700 bg-slate-50 dark:bg-[#0f243d] text-slate-700 dark:text-sky-100 hover:bg-sky-50 transition-colors"
+              >
+                <History className="w-4 h-4 text-sky-500" aria-hidden="true" />
+                <span>Painel Completo &amp; Gráfico</span>
+              </button>
+
+              <button
+                type="button"
+                onClick={() => handleSelectSubView('reports')}
+                className="min-h-[44px] min-w-[44px] px-3.5 py-2 rounded-xl text-xs font-bold inline-flex items-center gap-1.5 bg-indigo-600 hover:bg-indigo-500 text-white shadow-sm transition-colors"
+              >
+                <GraduationCap className="w-4 h-4" aria-hidden="true" />
+                <span>Relatório Técnico ERA5</span>
+              </button>
+            </div>
+          </div>
+
+          {lastHistoricalResult && (
+            <div
+              data-testid="historical-query-result"
+              className="flex flex-wrap items-center gap-2 pt-1"
+            >
+              <span className="text-xs font-semibold text-emerald-700 dark:text-emerald-300 bg-emerald-500/10 border border-emerald-500/30 px-3 py-1.5 rounded-xl">
+                {lastHistoricalResult.hours.length} registros horários (
+                {lastHistoricalResult.locationName})
+              </span>
+              <button
+                type="button"
+                data-testid="download-historical-series-btn"
+                onClick={() =>
+                  handleDeliverHistoricalResult(lastHistoricalResult, histExportFormat)
+                }
+                className="min-h-[44px] min-w-[44px] px-4 py-2 rounded-xl text-xs font-bold inline-flex items-center gap-1.5 bg-emerald-600 hover:bg-emerald-500 text-white shadow-sm transition-colors"
+              >
+                <Download className="w-4 h-4" aria-hidden="true" />
+                <span>Baixar / Compartilhar ({histExportFormat.toUpperCase()})</span>
+              </button>
+            </div>
+          )}
+        </section>
+      )}
+
+      {/* 5. Seção Dedicada: Séries Históricas & Recorrência Semanal (com ECharts em Tela Cheia) */}
+      {showHistoryFull && (
       <ModuleErrorBoundary
         moduleName="Séries Históricas & Recorrência Semanal"
         onErrorLog={onErrorLog}
@@ -2432,9 +2792,49 @@ export const FieldDataTab: React.FC<FieldDataTabProps> = ({
                           Baixar / Compartilhar ({histExportFormat.toUpperCase()})
                         </span>
                       </button>
+                      <button
+                        type="button"
+                        onClick={() => handleSelectSubView('reports')}
+                        className="min-h-[44px] min-w-[44px] px-4 py-2 rounded-xl text-xs font-bold inline-flex items-center gap-1.5 bg-indigo-600 hover:bg-indigo-500 text-white shadow-sm transition-colors"
+                      >
+                        <GraduationCap className="w-4 h-4" aria-hidden="true" />
+                        <span>Gerar Relatório Técnico</span>
+                      </button>
                     </div>
                   )}
                 </div>
+
+                {/* Gráfico ECharts da Série Histórica com FullscreenViewer (Tela Cheia) */}
+                {historicalChartOption && chartTargetSeries && (
+                  <div className="rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 p-3.5 mt-2">
+                    <FullscreenViewer
+                      title={`Série Temporal Histórica — ${chartTargetSeries.locationName}`}
+                      subtitle={`${chartTargetSeries.startDateIso} a ${chartTargetSeries.endDateIso} • ${chartTargetSeries.hours.length} registros horários`}
+                      testId="historical-series-chart-viewer"
+                    >
+                      {({ isFullscreen }) => (
+                        <ModuleErrorBoundary moduleName="Gráfico de Série Histórica">
+                          <div
+                            className={
+                              isFullscreen
+                                ? 'h-[calc(100vh-140px)] min-h-[340px] w-full'
+                                : 'h-[260px] sm:h-[300px] w-full'
+                            }
+                          >
+                            <ReactECharts
+                              {...histEchartsRefProps}
+                              option={historicalChartOption}
+                              opts={{ renderer: 'svg' }}
+                              notMerge={true}
+                              lazyUpdate={true}
+                              style={{ width: '100%', height: '100%' }}
+                            />
+                          </div>
+                        </ModuleErrorBoundary>
+                      )}
+                    </FullscreenViewer>
+                  </div>
+                )}
               </div>
 
               {/* Subcard 2: Recorrência Automática (Logs Periódicos) */}
@@ -2556,6 +2956,28 @@ export const FieldDataTab: React.FC<FieldDataTabProps> = ({
           )}
         </section>
       </ModuleErrorBoundary>
+      )}
+
+      {/* 6. Estúdio de Análise Estatística ERA5 & Relatórios Técnicos/Acadêmicos */}
+      {showReports && (
+        <ModuleErrorBoundary
+          moduleName="Estúdio de Relatórios Técnicos e Acadêmicos"
+          onErrorLog={onErrorLog}
+        >
+          <TechnicalReportsPanel
+            forecast={forecast}
+            activeLocation={activeLocation}
+            historicalLogs={activeHistoricalLogs}
+            initialHistoricalSeries={lastHistoricalResult}
+            defaultSource={lastHistoricalResult ? 'historical' : 'forecast'}
+            viewMode={viewMode}
+            isDark={isDark}
+            onFetchHistoricalSeries={onFetchHistoricalSeries}
+            onToast={onToast}
+            onErrorLog={onErrorLog}
+          />
+        </ModuleErrorBoundary>
+      )}
     </div>
   );
 };

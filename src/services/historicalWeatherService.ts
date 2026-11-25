@@ -30,6 +30,10 @@ import {
   UTF8_BOM,
 } from '../utils/exporters';
 import { formatLocalHourBadge, formatLocalYMD } from '../utils/localTimeHour';
+import {
+  computeApparentTemperatureFallbackC,
+  computeMagnusRelativeHumidityPct,
+} from '../utils/qualityScores';
 
 export const OPEN_METEO_HISTORICAL_ARCHIVE_URL = 'https://archive-api.open-meteo.com/v1/archive';
 export const OPEN_METEO_HISTORICAL_FORECAST_URL = 'https://api.open-meteo.com/v1/forecast';
@@ -38,12 +42,58 @@ export const OPEN_METEO_HISTORICAL_MARINE_URL = 'https://marine-api.open-meteo.c
 export const HISTORICAL_HOURLY_VARIABLES = [
   'temperature_2m',
   'dew_point_2m',
+  'relative_humidity_2m',
+  'apparent_temperature',
+  'et0_fao_evapotranspiration',
   'wind_speed_10m',
   'wind_gusts_10m',
   'wind_direction_10m',
   'precipitation',
   'surface_pressure',
 ] as const;
+
+/**
+ * Estima a evapotranspiração de referência horária FAO/Hargreaves-Samani (mm/h)
+ * quando `et0_fao_evapotranspiration` bruto não está disponível no payload:
+ *   `max(0, 0.0023 * (T + 17.8) * sqrt(max(2, T_range)) * 0.42)`
+ */
+export function computePhysicalHourlyEt0FallbackMm(
+  temperature2mC: number | null | undefined,
+  dailyTemperatureRangeC = 2,
+): number | null {
+  if (typeof temperature2mC !== 'number' || !Number.isFinite(temperature2mC)) {
+    return null;
+  }
+  const safeRange =
+    typeof dailyTemperatureRangeC === 'number' && Number.isFinite(dailyTemperatureRangeC)
+      ? Math.max(2, dailyTemperatureRangeC)
+      : 2;
+  const raw = Math.max(0, 0.0023 * (temperature2mC + 17.8) * Math.sqrt(safeRange) * 0.42);
+  return Number(raw.toFixed(3));
+}
+
+function buildDailyTemperatureRangeMap(
+  entries: ReadonlyArray<{ localYmd: string; tempC: number | null }>,
+): Map<string, number> {
+  const minMaxByDay = new Map<string, { min: number; max: number }>();
+  for (const item of entries) {
+    if (item.tempC === null || !Number.isFinite(item.tempC)) {
+      continue;
+    }
+    const existing = minMaxByDay.get(item.localYmd);
+    if (!existing) {
+      minMaxByDay.set(item.localYmd, { min: item.tempC, max: item.tempC });
+    } else {
+      if (item.tempC < existing.min) existing.min = item.tempC;
+      if (item.tempC > existing.max) existing.max = item.tempC;
+    }
+  }
+  const rangeByDay = new Map<string, number>();
+  for (const [day, bounds] of minMaxByDay.entries()) {
+    rangeByDay.set(day, Math.max(2, bounds.max - bounds.min));
+  }
+  return rangeByDay;
+}
 
 export const HISTORICAL_MARINE_VARIABLES = ['wave_height', 'sea_level_height_msl'] as const;
 export const RECENT_NWP_MAX_PAST_DAYS = 60;
@@ -191,7 +241,23 @@ function normalizeRecentNwpSeries(params: {
 
   const effectiveNwp: WeatherModelId[] =
     nwpModels.length > 0 ? [...nwpModels] : [...WEATHER_MODELS];
-  const hours: HistoricalHourRecord[] = [];
+  const rawHoursBuffer: Array<{
+    ts: number;
+    localYmd: string;
+    tempMean: number | null;
+    dewMean: number | null;
+    rhDirectMean: number | null;
+    apparentDirectMean: number | null;
+    et0DirectMean: number | null;
+    windMean: number | null;
+    gustMean: number | null;
+    dirMean: number | null;
+    precipMean: number | null;
+    pressureMean: number | null;
+    waveHeightM: number | null;
+    seaLevelHeightMsl: number | null;
+    byModel: NonNullable<HistoricalHourRecord['byModel']>;
+  }> = [];
 
   for (let idx = 0; idx < times.length; idx++) {
     const ts = times[idx]!;
@@ -202,6 +268,9 @@ function normalizeRecentNwpSeries(params: {
 
     const temps: Array<number | null> = [];
     const dewPoints: Array<number | null> = [];
+    const rhs: Array<number | null> = [];
+    const apparents: Array<number | null> = [];
+    const et0s: Array<number | null> = [];
     const winds: Array<number | null> = [];
     const gusts: Array<number | null> = [];
     const dirs: Array<number | null> = [];
@@ -222,6 +291,9 @@ function normalizeRecentNwpSeries(params: {
 
       const t = readVar('temperature_2m');
       const dp = readVar('dew_point_2m');
+      const rh = readVar('relative_humidity_2m');
+      const app = readVar('apparent_temperature');
+      const et0 = readVar('et0_fao_evapotranspiration');
       const ws = readVar('wind_speed_10m');
       const wg = readVar('wind_gusts_10m');
       const wd = readVar('wind_direction_10m');
@@ -230,6 +302,9 @@ function normalizeRecentNwpSeries(params: {
 
       temps.push(t);
       dewPoints.push(dp);
+      rhs.push(rh);
+      apparents.push(app);
+      et0s.push(et0);
       winds.push(ws);
       gusts.push(wg);
       dirs.push(wd);
@@ -250,6 +325,9 @@ function normalizeRecentNwpSeries(params: {
 
     const tempMean = computeScalarStat(temps).mean;
     const dewMean = computeScalarStat(dewPoints).mean;
+    const rhDirectMean = computeScalarStat(rhs).mean;
+    const apparentDirectMean = computeScalarStat(apparents).mean;
+    const et0DirectMean = computeScalarStat(et0s).mean;
     const windMean = computeScalarStat(winds).mean;
     const gustMean = computeScalarStat(gusts).mean;
     const dirMean = computeCircularStat(dirs, winds).degree;
@@ -281,24 +359,71 @@ function normalizeRecentNwpSeries(params: {
       }
     }
 
-    hours.push({
-      timestampUnix: ts,
-      timestampIso: new Date(ts * 1000).toISOString(),
+    rawHoursBuffer.push({
+      ts,
+      localYmd,
+      tempMean,
+      dewMean,
+      rhDirectMean,
+      apparentDirectMean,
+      et0DirectMean,
+      windMean,
+      gustMean,
+      dirMean,
+      precipMean,
+      pressureMean,
+      waveHeightM,
+      seaLevelHeightMsl,
+      byModel,
+    });
+  }
+
+  const dailyRangeMap = buildDailyTemperatureRangeMap(
+    rawHoursBuffer.map((item) => ({ localYmd: item.localYmd, tempC: item.tempMean })),
+  );
+
+  const hours: HistoricalHourRecord[] = rawHoursBuffer.map((item) => {
+    const relativeHumidity2mPct =
+      item.rhDirectMean !== null
+        ? Math.max(5, Math.min(100, Number(item.rhDirectMean.toFixed(1))))
+        : computeMagnusRelativeHumidityPct(item.tempMean, item.dewMean);
+    const apparentTemperatureC =
+      item.apparentDirectMean !== null
+        ? Number(item.apparentDirectMean.toFixed(1))
+        : computeApparentTemperatureFallbackC(
+            item.tempMean,
+            relativeHumidity2mPct,
+            item.windMean,
+          );
+    const dailyRange = dailyRangeMap.get(item.localYmd) ?? 2;
+    const et0FaoEvapotranspirationMm =
+      item.et0DirectMean !== null
+        ? Number(Math.max(0, item.et0DirectMean).toFixed(3))
+        : computePhysicalHourlyEt0FallbackMm(item.tempMean, dailyRange);
+
+    return {
+      timestampUnix: item.ts,
+      timestampIso: new Date(item.ts * 1000).toISOString(),
       source:
         effectiveNwp.length === 1
           ? `Open-Meteo NWP (${effectiveNwp[0]})`
           : 'Open-Meteo NWP Multi-Modelo',
-      temperature2mC: tempMean,
-      dewPoint2mC: dewMean,
-      windSpeed10mKmh: windMean,
-      windGusts10mKmh: gustMean,
-      windDirection10mDeg: dirMean,
-      precipitationMm: precipMean,
-      surfacePressureHpa: pressureMean,
-      ...(wantsMarine ? { waveHeightM, seaLevelHeightMsl } : {}),
-      ...(Object.keys(byModel).length > 0 ? { byModel } : {}),
-    });
-  }
+      temperature2mC: item.tempMean,
+      dewPoint2mC: item.dewMean,
+      relativeHumidity2mPct,
+      apparentTemperatureC,
+      et0FaoEvapotranspirationMm,
+      windSpeed10mKmh: item.windMean,
+      windGusts10mKmh: item.gustMean,
+      windDirection10mDeg: item.dirMean,
+      precipitationMm: item.precipMean,
+      surfacePressureHpa: item.pressureMean,
+      ...(wantsMarine
+        ? { waveHeightM: item.waveHeightM, seaLevelHeightMsl: item.seaLevelHeightMsl }
+        : {}),
+      ...(Object.keys(item.byModel).length > 0 ? { byModel: item.byModel } : {}),
+    };
+  });
 
   return {
     locationName: req.locationName,
@@ -325,28 +450,61 @@ function normalizeArchiveSeries(
   const timezone = archivePayload.timezone || 'America/Sao_Paulo';
   const times = archivePayload.hourly.time;
   const h = archivePayload.hourly;
-  const hours: HistoricalHourRecord[] = [];
 
+  const selectedIndices: Array<{ idx: number; ts: number; localYmd: string; tempC: number | null }> =
+    [];
   for (let idx = 0; idx < times.length; idx++) {
     const ts = times[idx]!;
     const localYmd = formatLocalYMD(new Date(ts * 1000), timezone);
     if (localYmd < req.startDateIso || localYmd > req.endDateIso) {
       continue;
     }
+    selectedIndices.push({
+      idx,
+      ts,
+      localYmd,
+      tempC: pickFiniteNumber(h.temperature_2m, idx),
+    });
+  }
 
-    hours.push({
+  const dailyRangeMap = buildDailyTemperatureRangeMap(selectedIndices);
+
+  const hours: HistoricalHourRecord[] = selectedIndices.map(({ idx, ts, localYmd, tempC }) => {
+    const dewC = pickFiniteNumber(h.dew_point_2m, idx);
+    const windKmh = pickFiniteNumber(h.wind_speed_10m, idx);
+    const rawRh = pickFiniteNumber(h.relative_humidity_2m, idx);
+    const rawApparent = pickFiniteNumber(h.apparent_temperature, idx);
+    const rawEt0 = pickFiniteNumber(h.et0_fao_evapotranspiration, idx);
+
+    const relativeHumidity2mPct =
+      rawRh !== null
+        ? Math.max(5, Math.min(100, Number(rawRh.toFixed(1))))
+        : computeMagnusRelativeHumidityPct(tempC, dewC);
+    const apparentTemperatureC =
+      rawApparent !== null
+        ? Number(rawApparent.toFixed(1))
+        : computeApparentTemperatureFallbackC(tempC, relativeHumidity2mPct, windKmh);
+    const et0FaoEvapotranspirationMm =
+      rawEt0 !== null
+        ? Number(Math.max(0, rawEt0).toFixed(3))
+        : computePhysicalHourlyEt0FallbackMm(tempC, dailyRangeMap.get(localYmd) ?? 2);
+
+    return {
       timestampUnix: ts,
       timestampIso: new Date(ts * 1000).toISOString(),
       source: 'Open-Meteo ERA5 Archive',
-      temperature2mC: pickFiniteNumber(h.temperature_2m, idx),
-      dewPoint2mC: pickFiniteNumber(h.dew_point_2m, idx),
-      windSpeed10mKmh: pickFiniteNumber(h.wind_speed_10m, idx),
+      temperature2mC: tempC,
+      dewPoint2mC: dewC,
+      relativeHumidity2mPct,
+      apparentTemperatureC,
+      et0FaoEvapotranspirationMm,
+      windSpeed10mKmh: windKmh,
       windGusts10mKmh: pickFiniteNumber(h.wind_gusts_10m, idx),
       windDirection10mDeg: pickFiniteNumber(h.wind_direction_10m, idx),
       precipitationMm: pickFiniteNumber(h.precipitation, idx),
       surfacePressureHpa: pickFiniteNumber(h.surface_pressure, idx),
-    });
-  }
+    };
+  });
 
   return {
     locationName: req.locationName,
@@ -475,6 +633,11 @@ export async function fetchHistoricalTimeSeries(
   }
 }
 
+/**
+ * Alias semântico de `fetchHistoricalTimeSeries` para extração científica / ERA5 nos relatórios.
+ */
+export const fetchHistoricalWeatherSeries = fetchHistoricalTimeSeries;
+
 function escapeCsvCell(value: unknown): string {
   if (value === null || value === undefined) return '';
   const str = typeof value === 'number' && !Number.isFinite(value) ? '' : String(value);
@@ -574,6 +737,9 @@ export function exportHistoricalSeriesArtifact(
     'elevation_dem_m',
     'temperature_2m_c',
     'dew_point_2m_c',
+    'relative_humidity_2m_pct',
+    'apparent_temperature_c',
+    'et0_fao_evapotranspiration_mm',
     'wind_speed_10m_kmh',
     'wind_gusts_10m_kmh',
     'wind_direction_10m_deg',
@@ -615,6 +781,9 @@ export function exportHistoricalSeriesArtifact(
       fmtNum(result.elevationDemM, 1),
       fmtNum(hr.temperature2mC, 1),
       fmtNum(hr.dewPoint2mC, 1),
+      fmtNum(hr.relativeHumidity2mPct, 1),
+      fmtNum(hr.apparentTemperatureC, 1),
+      fmtNum(hr.et0FaoEvapotranspirationMm, 3),
       fmtNum(hr.windSpeed10mKmh, 1),
       fmtNum(hr.windGusts10mKmh, 1),
       fmtNum(hr.windDirection10mDeg, 0),

@@ -1,4 +1,5 @@
-import React, { useMemo, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { createPortal } from 'react-dom';
 import ReactECharts from 'echarts-for-react';
 import type { EChartsOption } from 'echarts';
 import {
@@ -7,6 +8,8 @@ import {
   CloudRain,
   Compass,
   LayoutGrid,
+  Maximize2,
+  Minimize2,
   Mountain,
   Thermometer,
   Waves,
@@ -43,11 +46,21 @@ export type ChartFocusTab =
   | 'clouds'
   | 'vertical';
 
+export type ChartHorizonHours = 24 | ForecastHorizonHours;
+
+export type FullscreenChartId =
+  | 'wind'
+  | 'vertical'
+  | 'temperature'
+  | 'rain'
+  | 'waves'
+  | 'clouds';
+
 export interface ForecastChartsProps {
   forecast: NormalizedForecast;
   viewMode: ForecastViewMode;
   showInterpolatedProfile: boolean;
-  horizonHours: ForecastHorizonHours;
+  horizonHours: ChartHorizonHours;
   selectedHourIndex: number;
   currentHourIndex?: number;
   onSelectHourIndex?: (index: number) => void;
@@ -55,6 +68,14 @@ export interface ForecastChartsProps {
   isDark?: boolean;
   visibleParams?: ForecastVisibleParams;
 }
+
+const CAN_ATTACH_ECHARTS_REF =
+  (typeof ReactECharts === 'function' &&
+    Boolean(
+      (ReactECharts as unknown as { prototype?: { isReactComponent?: unknown } }).prototype
+        ?.isReactComponent,
+    )) ||
+  (typeof ReactECharts === 'object' && ReactECharts !== null);
 
 const MODEL_LABELS: Record<WeatherModelId, string> = MODEL_DISPLAY_LABELS;
 
@@ -126,6 +147,78 @@ export const ForecastCharts: React.FC<ForecastChartsProps> = ({
   visibleParams = COMPLETE_VISIBLE_PARAMS,
 }) => {
   const [focusTab, setFocusTab] = useState<ChartFocusTab>('all');
+  const [fullscreenChartId, setFullscreenChartId] = useState<FullscreenChartId | null>(null);
+  const chartRefs = useRef<Record<string, ReactECharts | null>>({});
+
+  const getEChartsRefProps = useCallback((chartKey: string): { ref?: React.Ref<ReactECharts> } => {
+    if (!CAN_ATTACH_ECHARTS_REF) {
+      return {};
+    }
+    return {
+      ref: (instance: ReactECharts | null) => {
+        if (instance) {
+          chartRefs.current[chartKey] = instance;
+        } else {
+          delete chartRefs.current[chartKey];
+        }
+      },
+    };
+  }, []);
+
+  const resizeMountedCharts = useCallback(() => {
+    for (const instance of Object.values(chartRefs.current)) {
+      try {
+        instance?.getEchartsInstance?.()?.resize?.();
+      } catch {
+        // Ignore transient disposal during viewport rotation
+      }
+    }
+  }, []);
+
+  useEffect(() => {
+    if (typeof window === 'undefined') {
+      return;
+    }
+    let settleTimer: ReturnType<typeof setTimeout> | null = null;
+
+    const handleViewportRefresh = () => {
+      resizeMountedCharts();
+      if (settleTimer !== null) {
+        clearTimeout(settleTimer);
+      }
+      settleTimer = setTimeout(resizeMountedCharts, 160);
+    };
+
+    window.addEventListener('resize', handleViewportRefresh);
+    window.addEventListener('orientationchange', handleViewportRefresh);
+    window.addEventListener('fieldcast:layout-refresh', handleViewportRefresh);
+
+    return () => {
+      window.removeEventListener('resize', handleViewportRefresh);
+      window.removeEventListener('orientationchange', handleViewportRefresh);
+      window.removeEventListener('fieldcast:layout-refresh', handleViewportRefresh);
+      if (settleTimer !== null) {
+        clearTimeout(settleTimer);
+      }
+    };
+  }, [resizeMountedCharts]);
+
+  useEffect(() => {
+    if (!fullscreenChartId || typeof document === 'undefined') {
+      return;
+    }
+    const timer = setTimeout(resizeMountedCharts, 80);
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') {
+        setFullscreenChartId(null);
+      }
+    };
+    document.addEventListener('keydown', handleKeyDown);
+    return () => {
+      clearTimeout(timer);
+      document.removeEventListener('keydown', handleKeyDown);
+    };
+  }, [fullscreenChartId, resizeMountedCharts]);
 
   const slicedHours: EnsembleHour[] = useMemo(
     () => forecast.hours.slice(0, horizonHours),
@@ -1553,10 +1646,40 @@ export const ForecastCharts: React.FC<ForecastChartsProps> = ({
                     Vento 10m, Faixa de Oscilação &amp; Rajadas (km/h)
                   </h3>
                 </div>
-                <HelpPopover topic="ensemble_vs_native" />
+                <div className="flex items-center gap-1.5">
+                  <button
+                    type="button"
+                    data-testid="chart-fullscreen-btn"
+                    data-chart-fullscreen-target="wind"
+                    onClick={() =>
+                      setFullscreenChartId((prev) => (prev === 'wind' ? null : 'wind'))
+                    }
+                    aria-pressed={fullscreenChartId === 'wind'}
+                    aria-label={
+                      fullscreenChartId === 'wind'
+                        ? 'Reduzir gráfico de Vento'
+                        : 'Tela Cheia do gráfico de Vento'
+                    }
+                    className="min-h-[44px] min-w-[44px] px-3 py-1.5 rounded-xl text-xs font-bold inline-flex items-center justify-center gap-1.5 bg-[#f4f8fb] dark:bg-[#0d1f36] hover:bg-sky-50 dark:hover:bg-sky-900/50 text-slate-700 dark:text-sky-200 border border-slate-200 dark:border-sky-800 transition-colors focus:outline-none focus:ring-2 focus:ring-sky-500"
+                  >
+                    {fullscreenChartId === 'wind' ? (
+                      <>
+                        <Minimize2 className="w-4 h-4 text-[#0080cd] dark:text-sky-300" aria-hidden="true" />
+                        <span className="hidden sm:inline">Reduzir</span>
+                      </>
+                    ) : (
+                      <>
+                        <Maximize2 className="w-4 h-4 text-[#0080cd] dark:text-sky-300" aria-hidden="true" />
+                        <span className="hidden sm:inline">Tela Cheia</span>
+                      </>
+                    )}
+                  </button>
+                  <HelpPopover topic="ensemble_vs_native" />
+                </div>
               </div>
               <div className="h-72 sm:h-80 w-full">
                 <ReactECharts
+                  {...getEChartsRefProps('wind')}
                   option={windTimeSeriesOption}
                   style={{ height: '100%', width: '100%' }}
                   notMerge={true}
@@ -1597,7 +1720,30 @@ export const ForecastCharts: React.FC<ForecastChartsProps> = ({
                       </span>
                     )}
                   </div>
-                  <HelpPopover topic="vertical_profile" />
+                  <div className="flex items-center gap-1.5 shrink-0">
+                    <button
+                      type="button"
+                      data-testid="chart-fullscreen-btn"
+                      data-chart-fullscreen-target="vertical"
+                      onClick={() =>
+                        setFullscreenChartId((prev) => (prev === 'vertical' ? null : 'vertical'))
+                      }
+                      aria-pressed={fullscreenChartId === 'vertical'}
+                      aria-label={
+                        fullscreenChartId === 'vertical'
+                          ? 'Reduzir gráfico de Perfil Vertical'
+                          : 'Tela Cheia do gráfico de Perfil Vertical'
+                      }
+                      className="min-h-[44px] min-w-[44px] px-2.5 py-1.5 rounded-xl text-xs font-bold inline-flex items-center justify-center gap-1.5 bg-[#f4f8fb] dark:bg-[#0d1f36] hover:bg-sky-50 dark:hover:bg-sky-900/50 text-slate-700 dark:text-sky-200 border border-slate-200 dark:border-sky-800 transition-colors focus:outline-none focus:ring-2 focus:ring-sky-500"
+                    >
+                      {fullscreenChartId === 'vertical' ? (
+                        <Minimize2 className="w-4 h-4 text-[#0080cd] dark:text-sky-300" aria-hidden="true" />
+                      ) : (
+                        <Maximize2 className="w-4 h-4 text-[#0080cd] dark:text-sky-300" aria-hidden="true" />
+                      )}
+                    </button>
+                    <HelpPopover topic="vertical_profile" />
+                  </div>
                 </div>
 
                 <div className="flex flex-wrap items-center justify-between gap-2 text-xs text-slate-600 dark:text-sky-200">
@@ -1647,6 +1793,7 @@ export const ForecastCharts: React.FC<ForecastChartsProps> = ({
 
               <div className="h-64 sm:h-72 min-h-[256px] w-full shrink-0">
                 <ReactECharts
+                  {...getEChartsRefProps('vertical')}
                   option={verticalProfileOption}
                   style={{ height: '100%', minHeight: '256px', width: '100%' }}
                   notMerge={true}
@@ -1679,10 +1826,42 @@ export const ForecastCharts: React.FC<ForecastChartsProps> = ({
                     Temperatura &amp; Ponto de Orvalho (°C)
                   </h3>
                 </div>
-                <HelpPopover topic="fog_risk" />
+                <div className="flex items-center gap-1.5">
+                  <button
+                    type="button"
+                    data-testid="chart-fullscreen-btn"
+                    data-chart-fullscreen-target="temperature"
+                    onClick={() =>
+                      setFullscreenChartId((prev) =>
+                        prev === 'temperature' ? null : 'temperature',
+                      )
+                    }
+                    aria-pressed={fullscreenChartId === 'temperature'}
+                    aria-label={
+                      fullscreenChartId === 'temperature'
+                        ? 'Reduzir gráfico de Temperatura'
+                        : 'Tela Cheia do gráfico de Temperatura'
+                    }
+                    className="min-h-[44px] min-w-[44px] px-3 py-1.5 rounded-xl text-xs font-bold inline-flex items-center justify-center gap-1.5 bg-[#f4f8fb] dark:bg-[#0d1f36] hover:bg-sky-50 dark:hover:bg-sky-900/50 text-slate-700 dark:text-sky-200 border border-slate-200 dark:border-sky-800 transition-colors focus:outline-none focus:ring-2 focus:ring-sky-500"
+                  >
+                    {fullscreenChartId === 'temperature' ? (
+                      <>
+                        <Minimize2 className="w-4 h-4 text-[#0080cd] dark:text-sky-300" aria-hidden="true" />
+                        <span className="hidden sm:inline">Reduzir</span>
+                      </>
+                    ) : (
+                      <>
+                        <Maximize2 className="w-4 h-4 text-[#0080cd] dark:text-sky-300" aria-hidden="true" />
+                        <span className="hidden sm:inline">Tela Cheia</span>
+                      </>
+                    )}
+                  </button>
+                  <HelpPopover topic="fog_risk" />
+                </div>
               </div>
               <div className="h-72 sm:h-80 w-full">
                 <ReactECharts
+                  {...getEChartsRefProps('temperature')}
                   option={temperatureOption}
                   style={{ height: '100%', width: '100%' }}
                   notMerge={true}
@@ -1707,10 +1886,40 @@ export const ForecastCharts: React.FC<ForecastChartsProps> = ({
                     Chuva Horária (mm/h) &amp; Pressão Atmosférica (hPa)
                   </h3>
                 </div>
-                <HelpPopover topic="barometric_trend" />
+                <div className="flex items-center gap-1.5">
+                  <button
+                    type="button"
+                    data-testid="chart-fullscreen-btn"
+                    data-chart-fullscreen-target="rain"
+                    onClick={() =>
+                      setFullscreenChartId((prev) => (prev === 'rain' ? null : 'rain'))
+                    }
+                    aria-pressed={fullscreenChartId === 'rain'}
+                    aria-label={
+                      fullscreenChartId === 'rain'
+                        ? 'Reduzir gráfico de Chuva e Pressão'
+                        : 'Tela Cheia do gráfico de Chuva e Pressão'
+                    }
+                    className="min-h-[44px] min-w-[44px] px-3 py-1.5 rounded-xl text-xs font-bold inline-flex items-center justify-center gap-1.5 bg-[#f4f8fb] dark:bg-[#0d1f36] hover:bg-sky-50 dark:hover:bg-sky-900/50 text-slate-700 dark:text-sky-200 border border-slate-200 dark:border-sky-800 transition-colors focus:outline-none focus:ring-2 focus:ring-sky-500"
+                  >
+                    {fullscreenChartId === 'rain' ? (
+                      <>
+                        <Minimize2 className="w-4 h-4 text-[#0080cd] dark:text-sky-300" aria-hidden="true" />
+                        <span className="hidden sm:inline">Reduzir</span>
+                      </>
+                    ) : (
+                      <>
+                        <Maximize2 className="w-4 h-4 text-[#0080cd] dark:text-sky-300" aria-hidden="true" />
+                        <span className="hidden sm:inline">Tela Cheia</span>
+                      </>
+                    )}
+                  </button>
+                  <HelpPopover topic="barometric_trend" />
+                </div>
               </div>
               <div className="h-72 sm:h-80 w-full">
                 <ReactECharts
+                  {...getEChartsRefProps('rain')}
                   option={precipPressureOption}
                   style={{ height: '100%', width: '100%' }}
                   notMerge={true}
@@ -1744,13 +1953,43 @@ export const ForecastCharts: React.FC<ForecastChartsProps> = ({
                     Ondas, Ondulação (Swell) &amp; Período
                   </h3>
                 </div>
-                <HelpPopover topic="waves_swell" />
+                <div className="flex items-center gap-1.5">
+                  <button
+                    type="button"
+                    data-testid="chart-fullscreen-btn"
+                    data-chart-fullscreen-target="waves"
+                    onClick={() =>
+                      setFullscreenChartId((prev) => (prev === 'waves' ? null : 'waves'))
+                    }
+                    aria-pressed={fullscreenChartId === 'waves'}
+                    aria-label={
+                      fullscreenChartId === 'waves'
+                        ? 'Reduzir gráfico de Ondas e Maré MSL'
+                        : 'Tela Cheia do gráfico de Ondas e Maré MSL'
+                    }
+                    className="min-h-[44px] min-w-[44px] px-3 py-1.5 rounded-xl text-xs font-bold inline-flex items-center justify-center gap-1.5 bg-[#f4f8fb] dark:bg-[#0d1f36] hover:bg-sky-50 dark:hover:bg-sky-900/50 text-slate-700 dark:text-sky-200 border border-slate-200 dark:border-sky-800 transition-colors focus:outline-none focus:ring-2 focus:ring-sky-500"
+                  >
+                    {fullscreenChartId === 'waves' ? (
+                      <>
+                        <Minimize2 className="w-4 h-4 text-[#0080cd] dark:text-sky-300" aria-hidden="true" />
+                        <span className="hidden sm:inline">Reduzir</span>
+                      </>
+                    ) : (
+                      <>
+                        <Maximize2 className="w-4 h-4 text-[#0080cd] dark:text-sky-300" aria-hidden="true" />
+                        <span className="hidden sm:inline">Tela Cheia</span>
+                      </>
+                    )}
+                  </button>
+                  <HelpPopover topic="waves_swell" />
+                </div>
               </div>
 
               {forecast.marineAvailable ? (
                 <>
                   <div className="h-72 sm:h-80 min-h-[288px] w-full">
                     <ReactECharts
+                      {...getEChartsRefProps('waves')}
                       option={marineOption}
                       style={{ height: '100%', minHeight: '288px', width: '100%' }}
                       notMerge={true}
@@ -1797,10 +2036,40 @@ export const ForecastCharts: React.FC<ForecastChartsProps> = ({
                     Nebulosidade por Altitude (Baixa • Média • Alta)
                   </h3>
                 </div>
-                <HelpPopover topic="stratified_clouds" />
+                <div className="flex items-center gap-1.5">
+                  <button
+                    type="button"
+                    data-testid="chart-fullscreen-btn"
+                    data-chart-fullscreen-target="clouds"
+                    onClick={() =>
+                      setFullscreenChartId((prev) => (prev === 'clouds' ? null : 'clouds'))
+                    }
+                    aria-pressed={fullscreenChartId === 'clouds'}
+                    aria-label={
+                      fullscreenChartId === 'clouds'
+                        ? 'Reduzir gráfico de Nebulosidade'
+                        : 'Tela Cheia do gráfico de Nebulosidade'
+                    }
+                    className="min-h-[44px] min-w-[44px] px-3 py-1.5 rounded-xl text-xs font-bold inline-flex items-center justify-center gap-1.5 bg-[#f4f8fb] dark:bg-[#0d1f36] hover:bg-sky-50 dark:hover:bg-sky-900/50 text-slate-700 dark:text-sky-200 border border-slate-200 dark:border-sky-800 transition-colors focus:outline-none focus:ring-2 focus:ring-sky-500"
+                  >
+                    {fullscreenChartId === 'clouds' ? (
+                      <>
+                        <Minimize2 className="w-4 h-4 text-[#0080cd] dark:text-sky-300" aria-hidden="true" />
+                        <span className="hidden sm:inline">Reduzir</span>
+                      </>
+                    ) : (
+                      <>
+                        <Maximize2 className="w-4 h-4 text-[#0080cd] dark:text-sky-300" aria-hidden="true" />
+                        <span className="hidden sm:inline">Tela Cheia</span>
+                      </>
+                    )}
+                  </button>
+                  <HelpPopover topic="stratified_clouds" />
+                </div>
               </div>
               <div className="h-72 sm:h-80 w-full">
                 <ReactECharts
+                  {...getEChartsRefProps('clouds')}
                   option={cloudCoverOption}
                   style={{ height: '100%', width: '100%' }}
                   notMerge={true}
@@ -1812,6 +2081,127 @@ export const ForecastCharts: React.FC<ForecastChartsProps> = ({
           )}
         </div>
       )}
+
+      {/* Fullscreen Viewport Portal Modal (z-[85], 70vh chart height) */}
+      {fullscreenChartId !== null &&
+        typeof document !== 'undefined' &&
+        createPortal(
+          <div
+            role="dialog"
+            aria-modal="true"
+            aria-label="Visualização de Gráfico em Tela Cheia"
+            data-testid="chart-fullscreen-modal"
+            onClick={() => setFullscreenChartId(null)}
+            className="fixed inset-0 z-[85] bg-slate-950/80 backdrop-blur-sm flex flex-col p-3 sm:p-6 overflow-y-auto"
+          >
+            <div
+              onClick={(e) => e.stopPropagation()}
+              className="w-full max-w-7xl mx-auto my-auto rounded-3xl border border-sky-200 dark:border-sky-800 bg-white dark:bg-[#132a47] p-4 sm:p-6 shadow-2xl space-y-4"
+            >
+              <div className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-200 dark:border-sky-800 pb-3">
+                <div className="flex flex-wrap items-center gap-2">
+                  <h3 className="text-base sm:text-lg font-extrabold text-slate-900 dark:text-white">
+                    {fullscreenChartId === 'wind' &&
+                      'Vento 10m, Faixa de Oscilação & Rajadas (km/h)'}
+                    {fullscreenChartId === 'vertical' && 'Perfil Vertical de Vento (0–120m)'}
+                    {fullscreenChartId === 'temperature' &&
+                      'Temperatura & Ponto de Orvalho (°C)'}
+                    {fullscreenChartId === 'rain' &&
+                      'Chuva Horária (mm/h) & Pressão Atmosférica (hPa)'}
+                    {fullscreenChartId === 'waves' &&
+                      'Ondas, Ondulação (Swell), Período & Maré Est. (MSL)'}
+                    {fullscreenChartId === 'clouds' &&
+                      'Nebulosidade por Altitude (Baixa • Média • Alta)'}
+                  </h3>
+                  {activeSummaryMetrics && (
+                    <span className="px-2.5 py-0.5 rounded-full text-xs font-bold bg-sky-50 dark:bg-[#0d1f36] text-[#0070b8] dark:text-sky-200 border border-sky-200 dark:border-sky-700 capitalize">
+                      {activeSummaryMetrics.timeLabel} • {activeSummaryMetrics.sourceLabel}
+                    </span>
+                  )}
+                </div>
+
+                <button
+                  type="button"
+                  data-testid="chart-fullscreen-btn"
+                  onClick={() => setFullscreenChartId(null)}
+                  aria-label="Reduzir gráfico em tela cheia"
+                  className="min-h-[44px] min-w-[44px] px-4 py-2 rounded-xl text-xs font-bold inline-flex items-center justify-center gap-2 bg-[#0080cd] hover:bg-[#006bb3] text-white shadow-sm transition-colors focus:outline-none focus:ring-2 focus:ring-sky-500"
+                >
+                  <Minimize2 className="w-4 h-4" aria-hidden="true" />
+                  <span>Reduzir</span>
+                </button>
+              </div>
+
+              {fullscreenChartId === 'vertical' && onSelectHourIndex && slicedHours.length > 1 && (
+                <div className="space-y-1">
+                  <div className="flex items-center justify-between text-xs text-slate-600 dark:text-sky-200">
+                    <span>
+                      Janela inspecionada: <strong>{xLabels[safeSelectedIdx] ?? 'Agora'}</strong>
+                    </span>
+                    <span className="font-mono">
+                      α ={' '}
+                      {activeHour?.verticalProfile.alpha !== null &&
+                      activeHour?.verticalProfile.alpha !== undefined
+                        ? activeHour.verticalProfile.alpha.toFixed(3)
+                        : 'N/A'}
+                    </span>
+                  </div>
+                  <input
+                    type="range"
+                    min={0}
+                    max={slicedHours.length - 1}
+                    value={safeSelectedIdx}
+                    onChange={(e) => onSelectHourIndex(Number(e.target.value))}
+                    aria-label="Selecionar hora no perfil vertical em tela cheia"
+                    className="w-full accent-[#0080cd] cursor-pointer"
+                  />
+                </div>
+              )}
+
+              {fullscreenChartId === 'waves' && !forecast.marineAvailable ? (
+                <div className="min-h-[40vh] rounded-2xl border border-dashed border-sky-200 dark:border-sky-800 bg-[#f4f8fb] dark:bg-[#0d1f36]/60 p-8 flex flex-col items-center justify-center text-center space-y-2">
+                  <Mountain className="w-8 h-8 text-[#0080cd] dark:text-sky-300" aria-hidden="true" />
+                  <h4 className="text-base font-bold text-slate-800 dark:text-white">
+                    Localidade Continental (Sem Grade Marítima)
+                  </h4>
+                  <p className="text-xs text-slate-500 dark:text-sky-200/80 max-w-md">
+                    A coordenada selecionada está em terra firme e não possui grade oceânica costeira.
+                  </p>
+                </div>
+              ) : (
+                <div className="w-full" style={{ height: '70vh', minHeight: '360px' }}>
+                  <ReactECharts
+                    {...getEChartsRefProps('fullscreen')}
+                    option={
+                      fullscreenChartId === 'wind'
+                        ? windTimeSeriesOption
+                        : fullscreenChartId === 'vertical'
+                          ? verticalProfileOption
+                          : fullscreenChartId === 'temperature'
+                            ? temperatureOption
+                            : fullscreenChartId === 'rain'
+                              ? precipPressureOption
+                              : fullscreenChartId === 'waves'
+                                ? marineOption
+                                : cloudCoverOption
+                    }
+                    style={{ height: '70vh', minHeight: '360px', width: '100%' }}
+                    notMerge={true}
+                    lazyUpdate={true}
+                    onEvents={fullscreenChartId === 'vertical' ? undefined : timeSeriesEvents}
+                  />
+                </div>
+              )}
+
+              {fullscreenChartId === 'waves' && forecast.marineAvailable && hasSeaLevelMsl && (
+                <p className="text-xs leading-snug text-slate-600 dark:text-sky-200/85 bg-sky-50/80 dark:bg-[#0d1f36]/80 border border-sky-200/80 dark:border-sky-800/70 rounded-xl px-3.5 py-2">
+                  Nível do Mar (MSL ~8 km): estimativa barométrica/maré indicativa; não substitui Tábua de Marés oficial da DHN/Marinha.
+                </p>
+              )}
+            </div>
+          </div>,
+          document.body,
+        )}
     </section>
   );
 };

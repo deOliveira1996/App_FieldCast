@@ -37,6 +37,11 @@ export const OpenMeteoForecastHourlySchema = z
     cloud_cover_low_ecmwf_ifs025: NullableNumberArraySchema.optional(),
     cloud_cover_mid_ecmwf_ifs025: NullableNumberArraySchema.optional(),
     cloud_cover_high_ecmwf_ifs025: NullableNumberArraySchema.optional(),
+    relative_humidity_2m_ecmwf_ifs025: NullableNumberArraySchema.optional(),
+    apparent_temperature_ecmwf_ifs025: NullableNumberArraySchema.optional(),
+    cape_ecmwf_ifs025: NullableNumberArraySchema.optional(),
+    weather_code_ecmwf_ifs025: NullableNumberArraySchema.optional(),
+    et0_fao_evapotranspiration_ecmwf_ifs025: NullableNumberArraySchema.optional(),
 
     // GFS Seamless (gfs_seamless)
     wind_speed_10m_gfs_seamless: NullableNumberArraySchema.optional(),
@@ -57,6 +62,11 @@ export const OpenMeteoForecastHourlySchema = z
     cloud_cover_low_gfs_seamless: NullableNumberArraySchema.optional(),
     cloud_cover_mid_gfs_seamless: NullableNumberArraySchema.optional(),
     cloud_cover_high_gfs_seamless: NullableNumberArraySchema.optional(),
+    relative_humidity_2m_gfs_seamless: NullableNumberArraySchema.optional(),
+    apparent_temperature_gfs_seamless: NullableNumberArraySchema.optional(),
+    cape_gfs_seamless: NullableNumberArraySchema.optional(),
+    weather_code_gfs_seamless: NullableNumberArraySchema.optional(),
+    et0_fao_evapotranspiration_gfs_seamless: NullableNumberArraySchema.optional(),
 
     // DWD ICON Seamless (icon_seamless)
     wind_speed_10m_icon_seamless: NullableNumberArraySchema.optional(),
@@ -77,6 +87,11 @@ export const OpenMeteoForecastHourlySchema = z
     cloud_cover_low_icon_seamless: NullableNumberArraySchema.optional(),
     cloud_cover_mid_icon_seamless: NullableNumberArraySchema.optional(),
     cloud_cover_high_icon_seamless: NullableNumberArraySchema.optional(),
+    relative_humidity_2m_icon_seamless: NullableNumberArraySchema.optional(),
+    apparent_temperature_icon_seamless: NullableNumberArraySchema.optional(),
+    cape_icon_seamless: NullableNumberArraySchema.optional(),
+    weather_code_icon_seamless: NullableNumberArraySchema.optional(),
+    et0_fao_evapotranspiration_icon_seamless: NullableNumberArraySchema.optional(),
 
     // CMC Canada GEM Seamless (gem_seamless)
     wind_speed_10m_gem_seamless: NullableNumberArraySchema.optional(),
@@ -97,6 +112,11 @@ export const OpenMeteoForecastHourlySchema = z
     cloud_cover_low_gem_seamless: NullableNumberArraySchema.optional(),
     cloud_cover_mid_gem_seamless: NullableNumberArraySchema.optional(),
     cloud_cover_high_gem_seamless: NullableNumberArraySchema.optional(),
+    relative_humidity_2m_gem_seamless: NullableNumberArraySchema.optional(),
+    apparent_temperature_gem_seamless: NullableNumberArraySchema.optional(),
+    cape_gem_seamless: NullableNumberArraySchema.optional(),
+    weather_code_gem_seamless: NullableNumberArraySchema.optional(),
+    et0_fao_evapotranspiration_gem_seamless: NullableNumberArraySchema.optional(),
   })
   .passthrough();
 
@@ -259,6 +279,9 @@ export const OpenMeteoArchiveResponseSchema = z
         wind_direction_10m: NullableNumberArraySchema.optional(),
         precipitation: NullableNumberArraySchema.optional(),
         surface_pressure: NullableNumberArraySchema.optional(),
+        relative_humidity_2m: NullableNumberArraySchema.optional(),
+        apparent_temperature: NullableNumberArraySchema.optional(),
+        et0_fao_evapotranspiration: NullableNumberArraySchema.optional(),
       })
       .passthrough(),
   })

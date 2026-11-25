@@ -41,6 +41,13 @@ import {
   generateOperationalAlerts,
   isBarometricSquallRisk,
 } from '../utils/operationalAlerts';
+import { detectGlobalExtremeEvents } from '../utils/extremeEvents';
+import {
+  computeApparentTemperatureFallbackC,
+  computeMagnusRelativeHumidityPct,
+  computeVerticalWindShearKtPer100ft,
+} from '../utils/qualityScores';
+import type { ThunderstormRiskLevel } from '../types/v4';
 import { fetchWithCircuitBreaker } from './httpClient';
 
 export const OPEN_METEO_FORECAST_ENDPOINT = 'https://api.open-meteo.com/v1/forecast';
@@ -65,6 +72,11 @@ export const FORECAST_HOURLY_VARIABLES = [
   'cloud_cover_low',
   'cloud_cover_mid',
   'cloud_cover_high',
+  'relative_humidity_2m',
+  'apparent_temperature',
+  'cape',
+  'weather_code',
+  'et0_fao_evapotranspiration',
 ] as const;
 
 export const MARINE_HOURLY_VARIABLES = [
@@ -164,6 +176,64 @@ function extractMarineHourAt(
     oceanCurrentDirection: pick(h.ocean_current_direction),
     seaLevelHeightMsl: pick(h.sea_level_height_msl),
   };
+}
+
+function computeDominantWeatherCode(
+  codes: readonly (number | null | undefined)[],
+): number | null {
+  const valid: number[] = [];
+  for (const c of codes) {
+    if (typeof c === 'number' && Number.isFinite(c)) {
+      valid.push(Math.round(c));
+    }
+  }
+  if (valid.length === 0) {
+    return null;
+  }
+
+  const counts = new Map<number, number>();
+  for (const code of valid) {
+    counts.set(code, (counts.get(code) ?? 0) + 1);
+  }
+
+  let bestCode = valid[0]!;
+  let bestCount = -1;
+  for (const [code, count] of counts.entries()) {
+    if (count > bestCount || (count === bestCount && code > bestCode)) {
+      bestCount = count;
+      bestCode = code;
+    }
+  }
+  return bestCode;
+}
+
+function evaluateHourlyThunderstormRisk(params: {
+  weatherCodeDominant: number | null;
+  capeMeanJkg: number | null;
+  precipMeanMm: number | null;
+  pressureDelta3hHpa: number | null;
+}): ThunderstormRiskLevel {
+  const { weatherCodeDominant, capeMeanJkg, precipMeanMm, pressureDelta3hHpa } = params;
+  if (
+    (weatherCodeDominant !== null &&
+      weatherCodeDominant >= 95 &&
+      weatherCodeDominant <= 99) ||
+    (capeMeanJkg !== null && Number.isFinite(capeMeanJkg) && capeMeanJkg >= 1500)
+  ) {
+    return 'high';
+  }
+  if (
+    (capeMeanJkg !== null && Number.isFinite(capeMeanJkg) && capeMeanJkg >= 700) ||
+    (precipMeanMm !== null &&
+      Number.isFinite(precipMeanMm) &&
+      precipMeanMm >= 4 &&
+      pressureDelta3hHpa !== null &&
+      Number.isFinite(pressureDelta3hHpa) &&
+      pressureDelta3hHpa <= -2.5)
+  ) {
+    return 'moderate';
+  }
+  return 'none';
 }
 
 /**
@@ -445,6 +515,119 @@ export function normalizeOpenMeteoForecast(params: NormalizeForecastParams): Nor
       dewPointSpreadC,
     });
 
+    const rhEcmwf =
+      ecmwf.relativeHumidity2m ??
+      computeMagnusRelativeHumidityPct(ecmwf.temperature2m, ecmwf.dewPoint2m);
+    const rhGfs =
+      gfs.relativeHumidity2m ??
+      computeMagnusRelativeHumidityPct(gfs.temperature2m, gfs.dewPoint2m);
+    const rhIcon =
+      icon.relativeHumidity2m ??
+      computeMagnusRelativeHumidityPct(icon.temperature2m, icon.dewPoint2m);
+    const rhGem =
+      gem.relativeHumidity2m ??
+      computeMagnusRelativeHumidityPct(gem.temperature2m, gem.dewPoint2m);
+
+    const rhModelStat = computeModelScalarStat({
+      ecmwf_ifs025: rhEcmwf,
+      gfs_seamless: rhGfs,
+      icon_seamless: rhIcon,
+      gem_seamless: rhGem,
+    });
+    const fallbackEnsembleRh =
+      rhModelStat.mean === null
+        ? computeMagnusRelativeHumidityPct(temperature2mC.mean, dewPoint2mC.mean)
+        : null;
+    const relativeHumidity2mPct =
+      rhModelStat.mean !== null || fallbackEnsembleRh === null
+        ? rhModelStat
+        : {
+            mean: fallbackEnsembleRh,
+            min: fallbackEnsembleRh,
+            max: fallbackEnsembleRh,
+            stdDev: 0,
+            sampleCount: 1,
+            ...(rhModelStat.valuesByModel ? { valuesByModel: rhModelStat.valuesByModel } : {}),
+          };
+
+    const appEcmwf =
+      ecmwf.apparentTemperature ??
+      computeApparentTemperatureFallbackC(ecmwf.temperature2m, rhEcmwf, ecmwf.windSpeed10m);
+    const appGfs =
+      gfs.apparentTemperature ??
+      computeApparentTemperatureFallbackC(gfs.temperature2m, rhGfs, gfs.windSpeed10m);
+    const appIcon =
+      icon.apparentTemperature ??
+      computeApparentTemperatureFallbackC(icon.temperature2m, rhIcon, icon.windSpeed10m);
+    const appGem =
+      gem.apparentTemperature ??
+      computeApparentTemperatureFallbackC(gem.temperature2m, rhGem, gem.windSpeed10m);
+
+    const apparentModelStat = computeModelScalarStat({
+      ecmwf_ifs025: appEcmwf,
+      gfs_seamless: appGfs,
+      icon_seamless: appIcon,
+      gem_seamless: appGem,
+    });
+    const fallbackEnsembleApparent =
+      apparentModelStat.mean === null
+        ? computeApparentTemperatureFallbackC(
+            temperature2mC.mean,
+            relativeHumidity2mPct.mean,
+            windSpeed10m.mean,
+          )
+        : null;
+    const apparentTemperatureC =
+      apparentModelStat.mean !== null || fallbackEnsembleApparent === null
+        ? apparentModelStat
+        : {
+            mean: fallbackEnsembleApparent,
+            min: fallbackEnsembleApparent,
+            max: fallbackEnsembleApparent,
+            stdDev: 0,
+            sampleCount: 1,
+            ...(apparentModelStat.valuesByModel
+              ? { valuesByModel: apparentModelStat.valuesByModel }
+              : {}),
+          };
+
+    const capeJkg = computeModelScalarStat({
+      ecmwf_ifs025: ecmwf.cape ?? null,
+      gfs_seamless: gfs.cape ?? null,
+      icon_seamless: icon.cape ?? null,
+      gem_seamless: gem.cape ?? null,
+    });
+
+    const weatherCodeDominant = computeDominantWeatherCode([
+      ecmwf.weatherCode,
+      gfs.weatherCode,
+      icon.weatherCode,
+      gem.weatherCode,
+    ]);
+
+    const thunderstormRisk = evaluateHourlyThunderstormRisk({
+      weatherCodeDominant,
+      capeMeanJkg: capeJkg.mean,
+      precipMeanMm: precipitationMm.mean,
+      pressureDelta3hHpa,
+    });
+
+    const windShearKtPer100ft = computeVerticalWindShearKtPer100ft({
+      windSpeed10m,
+      windSpeed80m,
+      windSpeed100m,
+      windDirection10m,
+      windDirection80m,
+      windDirection100m,
+    });
+
+    const et0FaoMm = computeModelScalarStat({
+      ecmwf_ifs025: ecmwf.et0FaoEvapotranspiration ?? null,
+      gfs_seamless: gfs.et0FaoEvapotranspiration ?? null,
+      icon_seamless: icon.et0FaoEvapotranspiration ?? null,
+      gem_seamless: gem.et0FaoEvapotranspiration ?? null,
+    });
+
     return {
       timestampUnix,
       timestampIso,
@@ -474,11 +657,19 @@ export function normalizeOpenMeteoForecast(params: NormalizeForecastParams): Nor
       safeWindowReasons: safeWindowEval.reasons,
       fogRisk,
       barometricSquallRisk,
+      relativeHumidity2mPct,
+      apparentTemperatureC,
+      capeJkg,
+      weatherCodeDominant,
+      thunderstormRisk,
+      windShearKtPer100ft,
+      et0FaoMm,
     };
   });
 
   const overallConfidence = computeOverallConfidence(hours, { isContinental });
   const alerts = generateOperationalAlerts(hours);
+  const extremeEvents = detectGlobalExtremeEvents(hours, parsedForecast.timezone);
   const ephemerisByDay = computeEphemerisRange(
     parsedForecast.latitude,
     parsedForecast.longitude,
@@ -502,6 +693,7 @@ export function normalizeOpenMeteoForecast(params: NormalizeForecastParams): Nor
     alerts,
     ephemerisByDay,
     thresholdsUsed: thresholds,
+    extremeEvents,
   };
 }
 

@@ -69,6 +69,11 @@ export interface NativeModelHour {
   cloudCoverLow: number | null;
   cloudCoverMid: number | null;
   cloudCoverHigh: number | null;
+  relativeHumidity2m?: number | null;
+  apparentTemperature?: number | null;
+  cape?: number | null;
+  weatherCode?: number | null;
+  et0FaoEvapotranspiration?: number | null;
 }
 
 export interface MarineHour {
@@ -169,6 +174,13 @@ export interface EnsembleHour {
   safeWindowReasons: string[];
   fogRisk: boolean;
   barometricSquallRisk: boolean;
+  relativeHumidity2mPct?: ScalarStat;
+  apparentTemperatureC?: ScalarStat;
+  capeJkg?: ScalarStat;
+  weatherCodeDominant?: number | null;
+  thunderstormRisk?: 'none' | 'moderate' | 'high';
+  windShearKtPer100ft?: number | null;
+  et0FaoMm?: ScalarStat;
 }
 
 export interface EphemerisData {
@@ -200,4 +212,5 @@ export interface NormalizedForecast {
   alerts: OperationalAlert[];
   ephemerisByDay: EphemerisData[];
   thresholdsUsed: SafeWindowThresholds;
+  extremeEvents?: import('./v4').GlobalExtremeEventAlert[];
 }

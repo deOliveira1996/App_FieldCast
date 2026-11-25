@@ -436,5 +436,10 @@ export function extractNativeModelSeries(
     cloudCoverLow: getAt('cloud_cover_low', idx),
     cloudCoverMid: getAt('cloud_cover_mid', idx),
     cloudCoverHigh: getAt('cloud_cover_high', idx),
+    relativeHumidity2m: getAt('relative_humidity_2m', idx),
+    apparentTemperature: getAt('apparent_temperature', idx),
+    cape: getAt('cape', idx),
+    weatherCode: getAt('weather_code', idx),
+    et0FaoEvapotranspiration: getAt('et0_fao_evapotranspiration', idx),
   }));
 }

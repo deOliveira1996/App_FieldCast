@@ -1,7 +1,7 @@
 {
   "name": "fieldcast",
   "private": true,
-  "version": "1.0.0",
+  "version": "4.0.0",
   "type": "module",
   "description": "FieldCast — Plataforma open-source de previsão meteorológica, oceanográfica e apoio à decisão em campo (PWA & Android Capacitor)",
   "scripts": {

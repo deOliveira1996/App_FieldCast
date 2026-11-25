@@ -1,5 +1,14 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
-import { Compass, Eye, EyeOff, Navigation, ShieldCheck, Waves, Wind } from 'lucide-react';
+import {
+  Compass,
+  Eye,
+  EyeOff,
+  Navigation,
+  RotateCcw,
+  ShieldCheck,
+  Waves,
+  Wind,
+} from 'lucide-react';
 import type { CompassPreference, CompassReading } from '../../types/field';
 import type { ErrorLogRecord, ToastMessage } from '../../types/health';
 import { safeAction } from '../../utils/safeAction';
@@ -32,6 +41,95 @@ type AbsoluteOrientationSensorConstructor = new (options?: {
 export function normalizeCompassDeg(angleDeg: number): number {
   const mod = angleDeg % 360;
   return mod < 0 ? mod + 360 : mod === 0 ? 0 : mod;
+}
+
+function shortestAngularDeltaDeg(a: number, b: number): number {
+  const diff = Math.abs(normalizeCompassDeg(a) - normalizeCompassDeg(b));
+  return diff > 180 ? 360 - diff : diff;
+}
+
+/**
+ * Desdobra um ângulo alvo (`nextTargetDeg`) de forma contínua em relação ao ângulo acumulado anterior
+ * (`prevUnwrappedDeg`), utilizando o menor delta angular assinado em `[-180°, +180°)`.
+ * Evita o giro reverso de 358° no CSS `transform: rotate(...)` ao cruzar o Norte (`359° <-> 1°`).
+ */
+export function unwrapContinuousAngleDeg(
+  prevUnwrappedDeg: number | null,
+  nextTargetDeg: number,
+): number {
+  if (!Number.isFinite(nextTargetDeg)) {
+    return prevUnwrappedDeg !== null && Number.isFinite(prevUnwrappedDeg)
+      ? prevUnwrappedDeg
+      : 0;
+  }
+  if (prevUnwrappedDeg === null || !Number.isFinite(prevUnwrappedDeg)) {
+    return normalizeCompassDeg(nextTargetDeg);
+  }
+  const delta = ((((nextTargetDeg - prevUnwrappedDeg) % 360) + 540) % 360) - 180;
+  return prevUnwrappedDeg + delta;
+}
+
+/**
+ * Suavização exponencial circular (EMA sobre o vetor unitário `(sin, cos)` via `Math.atan2`)
+ * com zona morta (deadband) de `1.0°` após a primeira leitura válida.
+ * Garante que ruído de sensor entre `359°` e `1°` converja suavemente para `0°` sem saltos.
+ */
+export function smoothCircularHeadingDeg(
+  prevSin: number | null,
+  prevCos: number | null,
+  sampleDeg: number,
+  alpha = 0.3,
+): { headingDeg: number; sin: number; cos: number } {
+  const normalizedSample = normalizeCompassDeg(sampleDeg);
+  const sampleRad = (normalizedSample * Math.PI) / 180;
+  const sampleSin = Math.sin(sampleRad);
+  const sampleCos = Math.cos(sampleRad);
+
+  if (
+    prevSin === null ||
+    prevCos === null ||
+    !Number.isFinite(prevSin) ||
+    !Number.isFinite(prevCos) ||
+    prevSin * prevSin + prevCos * prevCos < 1e-6
+  ) {
+    return {
+      headingDeg: normalizedSample,
+      sin: sampleSin,
+      cos: sampleCos,
+    };
+  }
+
+  const prevHeadingDeg = normalizeCompassDeg((Math.atan2(prevSin, prevCos) * 180) / Math.PI);
+  if (shortestAngularDeltaDeg(prevHeadingDeg, normalizedSample) < 1.0) {
+    return {
+      headingDeg: prevHeadingDeg,
+      sin: prevSin,
+      cos: prevCos,
+    };
+  }
+
+  const clampedAlpha = Math.max(0.01, Math.min(1, Number.isFinite(alpha) ? alpha : 0.3));
+  const blendedSin = (1 - clampedAlpha) * prevSin + clampedAlpha * sampleSin;
+  const blendedCos = (1 - clampedAlpha) * prevCos + clampedAlpha * sampleCos;
+  const norm = Math.hypot(blendedSin, blendedCos);
+
+  if (norm < 1e-6) {
+    return {
+      headingDeg: normalizedSample,
+      sin: sampleSin,
+      cos: sampleCos,
+    };
+  }
+
+  const nextSin = blendedSin / norm;
+  const nextCos = blendedCos / norm;
+  const headingDeg = normalizeCompassDeg((Math.atan2(nextSin, nextCos) * 180) / Math.PI);
+
+  return {
+    headingDeg,
+    sin: nextSin,
+    cos: nextCos,
+  };
 }
 
 /**
@@ -257,11 +355,6 @@ function writeStoredCompassPreference(pref: CompassPreference): void {
   }
 }
 
-function shortestAngularDeltaDeg(a: number, b: number): number {
-  const diff = Math.abs(normalizeCompassDeg(a) - normalizeCompassDeg(b));
-  return diff > 180 ? 360 - diff : diff;
-}
-
 export interface WindCompassProps {
   windDirection10mDeg: number | null;
   windSpeed10mKmh: number | null;
@@ -284,6 +377,8 @@ export interface WindCompassProps {
  *   com compensação 3D de inclinação (`alpha, beta, gamma` + `screen.orientation.angle`).
  * - NUNCA permite que eventos relativos `deviceorientation` (`event.absolute !== true` sem `webkitCompassHeading`)
  *   sobrescrevam a proa magnética absoluta.
+ * - Aplica filtro circular EMA `(sin, cos)` + desdobramento contínuo `unwrapContinuousAngleDeg` para eliminar
+ *   definitivamente o giro reverso de 358° ao cruzar `360° <-> 0°`.
  * - Oculta automaticamente se apenas eventos relativos/instáveis existirem, ou manualmente via botão "Ocultar Bússola".
  */
 export const WindCompass: React.FC<WindCompassProps> = ({
@@ -332,7 +427,7 @@ export const WindCompass: React.FC<WindCompassProps> = ({
 
   const [sensorUnavailable, setSensorUnavailable] = useState<boolean>(false);
 
-  // Refs para travar exclusivamente em fonte absoluta e detectar oscilação errática
+  // Refs para travar exclusivamente em fonte absoluta, suavizar circularmente e detectar oscilação errática
   const hasAbsoluteSourceRef = useRef<boolean>(false);
   const hasW3cSensorActiveRef = useRef<boolean>(false);
   const relativeOnlyCountRef = useRef<number>(0);
@@ -340,34 +435,54 @@ export const WindCompass: React.FC<WindCompassProps> = ({
   const lastHeadingSampleRef = useRef<{ headingDeg: number; timestampMs: number } | null>(
     null,
   );
+  const smoothSinRef = useRef<number | null>(null);
+  const smoothCosRef = useRef<number | null>(null);
+
+  // Refs de rotação acumulada contínua (sem wraparound 360° <-> 0°) para o CSS transform
+  const unwrappedHeadingRef = useRef<number | null>(null);
+  const unwrappedRelWindRef = useRef<number | null>(null);
+  const unwrappedRelWaveRef = useRef<number | null>(null);
 
   const applyVerifiedHeading = useCallback(
-    (headingDeg: number, source: CompassReading['source']) => {
+    (rawHeadingDeg: number, source: CompassReading['source']) => {
       const nowMs = Date.now();
+      const normalizedRaw = normalizeCompassDeg(rawHeadingDeg);
       const prev = lastHeadingSampleRef.current;
 
-      if (prev && nowMs - prev.timestampMs < 350) {
-        const delta = shortestAngularDeltaDeg(prev.headingDeg, headingDeg);
-        if (delta > 115) {
+      if (prev && nowMs - prev.timestampMs < 180) {
+        const delta = shortestAngularDeltaDeg(prev.headingDeg, normalizedRaw);
+        if (delta > 145) {
           wildJumpCountRef.current += 1;
-        } else if (delta < 45) {
-          wildJumpCountRef.current = Math.max(0, wildJumpCountRef.current - 1);
+        } else {
+          wildJumpCountRef.current = 0;
         }
 
-        if (wildJumpCountRef.current >= 4) {
+        if (wildJumpCountRef.current >= 8) {
           setSensorUnavailable(true);
           setReading(null);
           return;
         }
+      } else if (prev) {
+        wildJumpCountRef.current = 0;
       }
 
-      lastHeadingSampleRef.current = { headingDeg, timestampMs: nowMs };
+      lastHeadingSampleRef.current = { headingDeg: normalizedRaw, timestampMs: nowMs };
+
+      const smoothed = smoothCircularHeadingDeg(
+        smoothSinRef.current,
+        smoothCosRef.current,
+        normalizedRaw,
+      );
+      smoothSinRef.current = smoothed.sin;
+      smoothCosRef.current = smoothed.cos;
+      const smoothedHeadingDeg = smoothed.headingDeg;
+
       setSensorUnavailable(false);
       setReading({
-        headingDeg,
-        relativeWindDeg: computeRelativeBearingDeg(windDirection10mDeg, headingDeg),
+        headingDeg: smoothedHeadingDeg,
+        relativeWindDeg: computeRelativeBearingDeg(windDirection10mDeg, smoothedHeadingDeg),
         relativeWaveDeg: marineAvailable
-          ? computeRelativeBearingDeg(waveDirectionDeg, headingDeg)
+          ? computeRelativeBearingDeg(waveDirectionDeg, smoothedHeadingDeg)
           : null,
         source,
         timestampMs: nowMs,
@@ -375,6 +490,40 @@ export const WindCompass: React.FC<WindCompassProps> = ({
     },
     [marineAvailable, waveDirectionDeg, windDirection10mDeg],
   );
+
+  const handleRecalibrateCompass = useCallback(() => {
+    smoothSinRef.current = null;
+    smoothCosRef.current = null;
+    unwrappedHeadingRef.current = null;
+    unwrappedRelWindRef.current = null;
+    unwrappedRelWaveRef.current = null;
+    wildJumpCountRef.current = 0;
+    relativeOnlyCountRef.current = 0;
+    lastHeadingSampleRef.current = null;
+    setSensorUnavailable(false);
+
+    setReading((prev) => {
+      if (!prev) {
+        return null;
+      }
+      const normalized = normalizeCompassDeg(prev.headingDeg);
+      return {
+        ...prev,
+        headingDeg: normalized,
+        relativeWindDeg: computeRelativeBearingDeg(windDirection10mDeg, normalized),
+        relativeWaveDeg: marineAvailable
+          ? computeRelativeBearingDeg(waveDirectionDeg, normalized)
+          : null,
+        timestampMs: Date.now(),
+      };
+    });
+
+    onToast?.({
+      type: 'info',
+      title: 'Bússola recalibrada',
+      message: 'Eixo contínuo e filtro circular reiniciados.',
+    });
+  }, [marineAvailable, onToast, waveDirectionDeg, windDirection10mDeg]);
 
   const handleToggleCompassPref = (nextEnabled: boolean, reason: string | null = null) => {
     const nextPref: CompassPreference = {
@@ -391,9 +540,12 @@ export const WindCompass: React.FC<WindCompassProps> = ({
       return;
     }
 
+    // Quando `simulatedHeadingDeg` é fornecido em testes, ignora EMA para manter determinismo exato
     if (typeof simulatedHeadingDeg === 'number' && Number.isFinite(simulatedHeadingDeg)) {
       const h = normalizeCompassDeg(simulatedHeadingDeg);
       hasAbsoluteSourceRef.current = true;
+      smoothSinRef.current = null;
+      smoothCosRef.current = null;
       setSensorUnavailable(false);
       setReading({
         headingDeg: h,
@@ -425,6 +577,8 @@ export const WindCompass: React.FC<WindCompassProps> = ({
     relativeOnlyCountRef.current = 0;
     wildJumpCountRef.current = 0;
     lastHeadingSampleRef.current = null;
+    smoothSinRef.current = null;
+    smoothCosRef.current = null;
 
     // 1. Tenta inicializar W3C AbsoluteOrientationSensor (quando suportado pelo navegador/WebView)
     let w3cSensor: AbsoluteOrientationSensorLike | null = null;
@@ -498,12 +652,9 @@ export const WindCompass: React.FC<WindCompassProps> = ({
       const isTrulyAbsolute = event.absolute === true || hasWebkitHeading;
 
       if (!isTrulyAbsolute) {
-        // Se já recebemos fonte absoluta, ignoramos completamente o evento relativo!
         if (hasAbsoluteSourceRef.current) {
           return;
         }
-        // Se apenas eventos relativos (`absolute: false`) existem no dispositivo,
-        // marcamos o sensor como indisponível/não confiável para ocultar com segurança.
         if (typeof event.alpha === 'number' && Number.isFinite(event.alpha)) {
           relativeOnlyCountRef.current += 1;
           if (relativeOnlyCountRef.current >= 2) {
@@ -610,7 +761,7 @@ export const WindCompass: React.FC<WindCompassProps> = ({
         <button
           type="button"
           onClick={() => handleToggleCompassPref(true, null)}
-          className="min-h-[40px] min-w-[44px] px-3 py-1.5 rounded-xl text-xs font-semibold inline-flex items-center gap-1.5 bg-sky-50 dark:bg-sky-900/50 hover:bg-sky-100 text-sky-700 dark:text-sky-200 border border-sky-200 dark:border-sky-700 transition-colors"
+          className="min-h-[44px] min-w-[44px] px-3 py-1.5 rounded-xl text-xs font-semibold inline-flex items-center gap-1.5 bg-sky-50 dark:bg-sky-900/50 hover:bg-sky-100 text-sky-700 dark:text-sky-200 border border-sky-200 dark:border-sky-700 transition-colors"
         >
           <Eye className="w-3.5 h-3.5" aria-hidden="true" />
           <span>Mostrar Bússola</span>
@@ -628,14 +779,37 @@ export const WindCompass: React.FC<WindCompassProps> = ({
     return null;
   }
 
-  const headingDeg = reading?.headingDeg ?? 0;
+  const normalizedHeadingDeg = normalizeCompassDeg(reading?.headingDeg ?? 0);
   const relWindDeg = reading
-    ? computeRelativeBearingDeg(windDirection10mDeg, reading.headingDeg)
+    ? computeRelativeBearingDeg(windDirection10mDeg, normalizedHeadingDeg)
     : null;
   const relWaveDeg =
     reading && marineAvailable
-      ? computeRelativeBearingDeg(waveDirectionDeg, reading.headingDeg)
+      ? computeRelativeBearingDeg(waveDirectionDeg, normalizedHeadingDeg)
       : null;
+
+  const unwrappedHeadingDeg = reading
+    ? unwrapContinuousAngleDeg(unwrappedHeadingRef.current, normalizedHeadingDeg)
+    : 0;
+  if (reading) {
+    unwrappedHeadingRef.current = unwrappedHeadingDeg;
+  } else {
+    unwrappedHeadingRef.current = null;
+  }
+
+  const unwrappedRelWindDeg =
+    relWindDeg !== null
+      ? unwrapContinuousAngleDeg(unwrappedRelWindRef.current, relWindDeg)
+      : null;
+  unwrappedRelWindRef.current = unwrappedRelWindDeg;
+
+  const unwrappedRelWaveDeg =
+    relWaveDeg !== null
+      ? unwrapContinuousAngleDeg(unwrappedRelWaveRef.current, relWaveDeg)
+      : null;
+  unwrappedRelWaveRef.current = unwrappedRelWaveDeg;
+
+  const dialRotationDeg = unwrappedHeadingDeg === 0 ? 0 : -unwrappedHeadingDeg;
 
   return (
     <section
@@ -661,9 +835,20 @@ export const WindCompass: React.FC<WindCompassProps> = ({
           {reading && (
             <span className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-mono font-bold bg-slate-100 dark:bg-slate-800 text-slate-800 dark:text-slate-200">
               <Navigation className="w-3.5 h-3.5 text-sky-500" aria-hidden="true" />
-              Proa: {Math.round(headingDeg)}°
+              Proa: {Math.round(normalizedHeadingDeg)}°
             </span>
           )}
+
+          <button
+            type="button"
+            data-testid="recalibrate-compass-btn"
+            onClick={handleRecalibrateCompass}
+            className="min-h-[44px] min-w-[44px] px-3 py-1.5 rounded-xl text-xs font-semibold inline-flex items-center gap-1.5 border border-sky-200 dark:border-sky-700 bg-sky-50/80 dark:bg-sky-900/40 hover:bg-sky-100 dark:hover:bg-sky-800/60 text-sky-800 dark:text-sky-200 transition-colors"
+            title="Resetar eixo acumulado e filtro circular da bússola"
+          >
+            <RotateCcw className="w-3.5 h-3.5 text-sky-600 dark:text-sky-300" aria-hidden="true" />
+            <span>Recalibrar / Resetar Eixo</span>
+          </button>
 
           <button
             type="button"
@@ -699,8 +884,9 @@ export const WindCompass: React.FC<WindCompassProps> = ({
           <div className="flex items-center justify-center py-2">
             <div className="relative w-44 h-44 rounded-full border-4 border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-950 flex items-center justify-center shadow-inner">
               <div
+                data-testid="compass-rose-dial"
                 className="absolute inset-2 rounded-full transition-transform duration-150"
-                style={{ transform: `rotate(${-headingDeg}deg)` }}
+                style={{ transform: `rotate(${dialRotationDeg}deg)` }}
               >
                 <span className="absolute top-1 left-1/2 -translate-x-1/2 text-xs font-black text-rose-600 dark:text-rose-400">
                   N
@@ -717,10 +903,11 @@ export const WindCompass: React.FC<WindCompassProps> = ({
               </div>
 
               {/* Vetor Relativo de Vento */}
-              {relWindDeg !== null && (
+              {relWindDeg !== null && unwrappedRelWindDeg !== null && (
                 <div
+                  data-testid="compass-rel-wind-vector"
                   className="absolute inset-4 pointer-events-none transition-transform duration-150"
-                  style={{ transform: `rotate(${relWindDeg}deg)` }}
+                  style={{ transform: `rotate(${unwrappedRelWindDeg}deg)` }}
                   title={`Vento relativo: ${Math.round(relWindDeg)}°`}
                 >
                   <div className="mx-auto w-1.5 h-16 bg-sky-500 rounded-full shadow" />
@@ -728,10 +915,11 @@ export const WindCompass: React.FC<WindCompassProps> = ({
               )}
 
               {/* Vetor Relativo de Onda */}
-              {relWaveDeg !== null && (
+              {relWaveDeg !== null && unwrappedRelWaveDeg !== null && (
                 <div
+                  data-testid="compass-rel-wave-vector"
                   className="absolute inset-6 pointer-events-none transition-transform duration-150"
-                  style={{ transform: `rotate(${relWaveDeg}deg)` }}
+                  style={{ transform: `rotate(${unwrappedRelWaveDeg}deg)` }}
                   title={`Onda relativa: ${Math.round(relWaveDeg)}°`}
                 >
                   <div className="mx-auto w-1.5 h-12 bg-teal-500 rounded-full opacity-85" />
@@ -740,7 +928,7 @@ export const WindCompass: React.FC<WindCompassProps> = ({
 
               <div className="z-10 px-2.5 py-1 rounded-lg bg-white/90 dark:bg-slate-900/90 border border-slate-300 dark:border-slate-700 text-center">
                 <div className="text-sm font-black font-mono text-slate-900 dark:text-white">
-                  {Math.round(headingDeg)}°
+                  {Math.round(normalizedHeadingDeg)}°
                 </div>
                 <div className="text-[10px] uppercase tracking-wider text-slate-500">Proa</div>
               </div>

@@ -165,3 +165,25 @@
   - **Mapa (`map`)**: `MapRadarTab` com modelos meteorológicos, RainViewer e cache offline de até 300 tiles.
   - **Armazenamento (`field` — `FieldDataTab.tsx`)**: Painel resumido de persistência local IndexedDB (Locais Salvos, Área Principal, Waypoints, Rotas GPX, Logs/Regras e Tiles Offline `X/300`) com limpeza de tiles, GPS Tracker, Waypoints, Exportação e Séries Históricas.
 - **Verificação V3**: `npx tsc --noEmit` (0 erros), `npm run test` (16/16 arquivos, 115/115 testes), `npm run build` (`dist/` + `PWA v0.21.2`), auditoria visual no navegador em `1280x800` e `390x844` (0 erros de console, zero overflow horizontal), e compilação Windows + Android Debug APK (`app-debug.apk`).
+
+---
+
+## Sprints V4.0 (Waves 1 a 4) — Modularização 7 Abas, Sidebar Retrátil, Bússola Contínua, GPS Background Android 14+, Notificações com Janela Horária & Relatórios Científicos ERA5 — **CONCLUÍDA**
+
+1. **Sprint 1 (Wave 1) — Shell Responsivo, Sidebar Retrátil, Tela Cheia, Trava de Pin & Separação Resumo vs. Modelos:**
+   - `AppShell.tsx`, `useViewportResize.ts`, `FullscreenViewer.tsx`, `ModelModeSwitchPill.tsx` e `index.css`: Sidebar lateral expansível/recolhível no desktop (`w-60 <-> w-[72px]`), Drawer deslizante no mobile com folga `safe-area-inset`, correção definitiva do travamento de rotação `Vertical -> Horizontal -> Vertical` (`overflow-x: clip` + `min-w-0` + evento `fieldcast:layout-refresh`), seletor global de modelo (`FieldCast Ensemble` padrão + `ECMWF`, `GFS`, `ICON`, `GEM`) e portal universal de **Tela Cheia**.
+   - `DailySummaryTab.tsx`: Visão intuitiva para o dia a dia (Temp Atual/Mín/Máx/Sensação, Umidade Relativa `%`, Probabilidade & Taxa de Chuva, Risco de Trovoada, **Span Fixo Global de Eventos Extremos** com atribuição explícita de fonte oficial + *"Mais Detalhes"*, faixas de 24h e 7 dias no fuso local, Score de Campo `0–100` e Mini-Mapa).
+   - `ModelComparisonTab.tsx` & `ForecastCharts.tsx`: Aba dedicada de comparação multi-modelo `168h` (estilo Windguru/Windy) com matriz comparativa contra o `FieldCast Ensemble`, **toggles sob demanda para abrir/ocultar plots** e botão **Tela Cheia** em cada gráfico e tabela.
+   - `ForecastPinMiniMap.tsx` & `MapRadarTab.tsx`: Botão reativo **Travar / Destravar Pin** (`Pin Fixado` vs. `Pin Livre`), modo **Tela Cheia** nos mapas e gaveta retrátil estilo Windy.
+
+2. **Sprint 2 (Wave 2) — Bússola `360° <-> 0°`, GPS Background Nativo Android 14+ & Métricas Físicas:**
+   - `WindCompass.tsx`: Eliminação definitiva do loop `360° <-> 0°` com filtro passa-baixa circular vetorial (`smoothCircularHeadingDeg` via $\sin/\cos$ EMA) e acumulador contínuo sem salto de módulo 360 (`unwrapContinuousAngleDeg`), mais botão de recalibração.
+   - `FieldCastLocationForegroundService.java`, `BackgroundGeolocationPlugin.java`, `MainActivity.java`, `AndroidManifest.xml` & `LocationTrackerService.ts`: Serviço nativo Android 14+ (`FOREGROUND_SERVICE_TYPE_LOCATION`, `PARTIAL_WAKE_LOCK`, `GPS_PROVIDER` + `NETWORK_PROVIDER`, buffer thread-safe drenado ao reabrir a tela) com consentimento explícito do usuário.
+   - `openMeteoService.ts`, `extremeEvents.ts`, `qualityScores.ts`, `NavigationTab.tsx` & `AeronauticsTab.tsx`: Ingestão de `relative_humidity_2m`, `apparent_temperature`, `cape`, `weather_code` e `et0_fao_evapotranspiration`, cálculo de **Wind Shear (`kt/100ft`)**, **Energia de Swell (`kW/m`)**, **Teto LCL**, detector global de eventos extremos e **Scores Customizáveis de Qualidade (`0–100`)** com painéis colapsáveis.
+
+3. **Sprint 3 (Wave 3) — Notificações com Janela Horária, Templates, Sub-telas de Dados & Relatórios Técnicos/Acadêmicos:**
+   - `FieldCastNotificationsPlugin.java`, `notificationService.ts` & `SettingsTab.tsx`: Disparo nativo Android (`BigTextStyle` + `POST_NOTIFICATIONS`) e Web Service Worker, alertas automáticos opcionais de eventos extremos, construtor de alertas personalizados com **Janela Horária (`startHHMM`–`endHHMM` e `notifyFromHHMM`)** e **3 Templates Guia**.
+   - `scientificAnalytics.ts`, `technicalReportGenerator.ts`, `TechnicalReportsPanel.tsx` & `FieldDataTab.tsx`: Estatística descritiva (`Média`, `Mediana`, `DP`, `P10`, `P90`, `IQR`, tendência OLS, anomalia $|Z|$), balanço hídrico agroclimático FAO-56 ($P - ET_0$), Graus-Dia (`GDD`), citações acadêmicas (*Copernicus ERA5, ECMWF, NOAA, DWD, ECCC, SRTM*), exportação em **Report HTML/PDF Imprimível**, **Markdown**, **CSV (UTF-8 BOM)** e **JSON**, e divisão de *Dados & Armazenamento* em sub-vistas interativas em tela cheia.
+
+4. **Sprint 4 (Wave 4) — Integração Raiz, Auditoria QA V4, Documentação, Build Windows/Android APK & Git (`dev` + `main`):**
+   - Integração completa das 7 abas em `src/App.tsx`, suíte automatizada V4 (`v4ArchitectureAndFeatures.test.tsx`), atualização integral do `README.md`, sincronização e compilação Android `app-debug.apk` em `F:\Backup-data\local_data\App_FieldCast`, e commits nas branches `dev` e `main`.

@@ -12,11 +12,57 @@ export const ANDROID_FOREGROUND_NOTIFICATION_BODY =
   'Rastreamento GPS ativo em segundo plano (filtro de acurácia <= 20m)';
 
 export const ANDROID_REQUIRED_PERMISSIONS = [
+  'android.permission.POST_NOTIFICATIONS',
   'android.permission.FOREGROUND_SERVICE',
   'android.permission.FOREGROUND_SERVICE_LOCATION',
   'android.permission.ACCESS_FINE_LOCATION',
   'android.permission.ACCESS_BACKGROUND_LOCATION',
 ] as const;
+
+export const BACKGROUND_GPS_CONSENT_KEY = 'fieldcast_bg_gps_consent_v4';
+
+const DEDUP_WINDOW_MS = 500;
+
+const backgroundConsentListeners = new Set<(enabled: boolean) => void>();
+
+/**
+ * Lê o consentimento explícito do usuário para operação de GPS em segundo plano.
+ * Padrão `true` quando o modo de segundo plano não foi desativado pelo usuário.
+ */
+export function getBackgroundTrackingConsent(): boolean {
+  try {
+    if (typeof localStorage === 'undefined') {
+      return true;
+    }
+    const stored = localStorage.getItem(BACKGROUND_GPS_CONSENT_KEY);
+    if (stored === null) {
+      return true;
+    }
+    return stored !== 'false' && stored !== '0';
+  } catch {
+    return true;
+  }
+}
+
+/**
+ * Define e persiste o consentimento explícito do usuário para rastreamento GPS em segundo plano.
+ */
+export function setBackgroundTrackingConsent(enabled: boolean): void {
+  try {
+    if (typeof localStorage !== 'undefined') {
+      localStorage.setItem(BACKGROUND_GPS_CONSENT_KEY, enabled ? 'true' : 'false');
+    }
+  } catch {
+    // Preserva Zero-Crash em contextos sem armazenamento
+  }
+  for (const listener of backgroundConsentListeners) {
+    try {
+      listener(enabled);
+    } catch {
+      // Preserva Zero-Crash
+    }
+  }
+}
 
 export const WEB_WAKE_LOCK_WARNING_MESSAGE =
   'Mantenha a tela ligada durante a gravação no navegador';
@@ -42,11 +88,12 @@ export interface LocationTrackerState {
   wakeLockBannerMessage: string | null;
   foregroundServiceActive: boolean;
   foregroundNotificationTitle: string | null;
+  backgroundConsentGranted: boolean;
   platform: PlatformKind;
   errorMessage: string | null;
 }
 
-interface NativeBackgroundLocationReading {
+export interface NativeBackgroundLocationReading {
   latitude: number;
   longitude: number;
   accuracy: number;
@@ -55,7 +102,7 @@ interface NativeBackgroundLocationReading {
   time?: number | null;
 }
 
-interface BackgroundGeolocationPluginBridge {
+export interface BackgroundGeolocationPluginBridge {
   addWatcher(
     options: {
       backgroundTitle: string;
@@ -67,6 +114,7 @@ interface BackgroundGeolocationPluginBridge {
     callback: (position?: NativeBackgroundLocationReading, error?: Error) => void,
   ): Promise<string>;
   removeWatcher(options: { id: string }): Promise<void>;
+  drainBufferedLocations?: () => Promise<{ locations: NativeBackgroundLocationReading[] }>;
 }
 
 const BackgroundGeolocationBridge = registerPlugin<BackgroundGeolocationPluginBridge>(
@@ -187,6 +235,8 @@ export interface LocationTrackerServiceOptions {
   isNativePlatformFn?: () => boolean;
   getPlatformFn?: () => PlatformKind;
   saveSessionFn?: (session: TrackSession) => Promise<void>;
+  backgroundConsentGranted?: boolean;
+  backgroundBridge?: BackgroundGeolocationPluginBridge;
 }
 
 /**
@@ -198,6 +248,9 @@ export class LocationTrackerService {
   private readonly isNativePlatformFn: () => boolean;
   private readonly getPlatformFn: () => PlatformKind;
   private readonly saveSessionFn: (session: TrackSession) => Promise<void>;
+  private readonly backgroundBridge: BackgroundGeolocationPluginBridge;
+  private readonly hasCustomBackgroundBridge: boolean;
+  private explicitConsentOverride: boolean | undefined;
 
   private state: LocationTrackerState;
   private listeners = new Set<(state: LocationTrackerState) => void>();
@@ -206,6 +259,14 @@ export class LocationTrackerService {
   private capacitorWatchId: string | null = null;
   private backgroundWatcherId: string | null = null;
   private wakeLockSentinel: WakeLockSentinelLike | null = null;
+  private visibilityListenerAttached = false;
+  private isDrainingBuffer = false;
+
+  private readonly handleVisibilityChange = (): void => {
+    if (typeof document !== 'undefined' && document.visibilityState === 'visible') {
+      void this.drainAndIngestBufferedLocations();
+    }
+  };
 
   constructor(options?: LocationTrackerServiceOptions) {
     this.maxAccuracyM = options?.maxAccuracyM ?? MAX_TRACK_ACCURACY_M;
@@ -220,6 +281,9 @@ export class LocationTrackerService {
       });
     this.getPlatformFn = options?.getPlatformFn ?? detectRuntimePlatform;
     this.saveSessionFn = options?.saveSessionFn ?? saveTrackSession;
+    this.backgroundBridge = options?.backgroundBridge ?? BackgroundGeolocationBridge;
+    this.hasCustomBackgroundBridge = Boolean(options?.backgroundBridge);
+    this.explicitConsentOverride = options?.backgroundConsentGranted;
 
     this.state = {
       activeSession: null,
@@ -233,14 +297,53 @@ export class LocationTrackerService {
       wakeLockBannerMessage: null,
       foregroundServiceActive: false,
       foregroundNotificationTitle: null,
+      backgroundConsentGranted: this.resolveBackgroundConsent(),
       platform: this.getPlatformFn(),
       errorMessage: null,
     };
   }
 
+  private resolveBackgroundConsent(): boolean {
+    if (typeof this.explicitConsentOverride === 'boolean') {
+      return this.explicitConsentOverride;
+    }
+    return getBackgroundTrackingConsent();
+  }
+
+  getBackgroundConsent(): boolean {
+    return this.resolveBackgroundConsent();
+  }
+
+  async setBackgroundConsent(enabled: boolean): Promise<void> {
+    this.explicitConsentOverride = undefined;
+    setBackgroundTrackingConsent(enabled);
+    this.emitState({ backgroundConsentGranted: enabled });
+
+    if (this.state.isRecording && this.isNativePlatformFn()) {
+      await this.stopPlatformWatcher();
+      await this.startPlatformWatcher();
+    }
+  }
+
+  syncExternalConsentChange(enabled: boolean): void {
+    if (typeof this.explicitConsentOverride === 'boolean') {
+      return;
+    }
+    this.emitState({ backgroundConsentGranted: enabled });
+    if (this.state.isRecording && this.isNativePlatformFn()) {
+      void (async () => {
+        await this.stopPlatformWatcher();
+        if (this.state.isRecording) {
+          await this.startPlatformWatcher();
+        }
+      })();
+    }
+  }
+
   getState(): LocationTrackerState {
     return {
       ...this.state,
+      backgroundConsentGranted: this.resolveBackgroundConsent(),
       activeSession: this.state.activeSession
         ? {
             ...this.state.activeSession,
@@ -270,6 +373,128 @@ export class LocationTrackerService {
       } catch {
         // Preserva Zero-Crash
       }
+    }
+  }
+
+  private attachVisibilityListener(): void {
+    if (this.visibilityListenerAttached || typeof document === 'undefined') {
+      return;
+    }
+    document.addEventListener('visibilitychange', this.handleVisibilityChange);
+    this.visibilityListenerAttached = true;
+  }
+
+  private detachVisibilityListener(): void {
+    if (!this.visibilityListenerAttached || typeof document === 'undefined') {
+      return;
+    }
+    document.removeEventListener('visibilitychange', this.handleVisibilityChange);
+    this.visibilityListenerAttached = false;
+  }
+
+  private isDuplicateOfLastAccepted(readingTimeMs: number): boolean {
+    const lastIso = this.state.lastAcceptedPoint?.timestampUtcIso;
+    if (!lastIso) {
+      return false;
+    }
+    const lastMs = Date.parse(lastIso);
+    if (!Number.isFinite(lastMs)) {
+      return false;
+    }
+    return readingTimeMs <= lastMs + DEDUP_WINDOW_MS;
+  }
+
+  /**
+   * Drena pontos gravados em memória nativa (`FieldCastLocationForegroundService`) enquanto
+   * a tela estava desligada/no bolso e ingere pontos com timestamp mais recente que
+   * `lastAcceptedPoint` (deduplicando dentro de `500ms`).
+   */
+  async drainAndIngestBufferedLocations(): Promise<number> {
+    if (this.isDrainingBuffer) {
+      return 0;
+    }
+    const current = this.state.activeSession;
+    if (
+      !current ||
+      current.status !== 'recording' ||
+      !this.state.isRecording ||
+      !this.isNativePlatformFn() ||
+      this.getPlatformFn() !== 'android' ||
+      !this.state.foregroundServiceActive
+    ) {
+      return 0;
+    }
+
+    const drainFn = this.backgroundBridge?.drainBufferedLocations;
+    if (typeof drainFn !== 'function') {
+      return 0;
+    }
+    if (
+      !this.hasCustomBackgroundBridge &&
+      !Capacitor.isPluginAvailable('BackgroundGeolocation')
+    ) {
+      return 0;
+    }
+
+    this.isDrainingBuffer = true;
+    try {
+      const response = await drainFn.call(this.backgroundBridge);
+      const rawLocations = Array.isArray(response?.locations) ? response.locations : [];
+      if (rawLocations.length === 0) {
+        return 0;
+      }
+
+      const sortedLocations = [...rawLocations].sort((a, b) => {
+        const ta = typeof a.time === 'number' && Number.isFinite(a.time) ? a.time : 0;
+        const tb = typeof b.time === 'number' && Number.isFinite(b.time) ? b.time : 0;
+        return ta - tb;
+      });
+
+      let acceptedCount = 0;
+      let lastRejectedMs: number | null = null;
+
+      for (const item of sortedLocations) {
+        if (!this.state.activeSession || this.state.activeSession.status !== 'recording') {
+          break;
+        }
+
+        const itemTimeMs =
+          typeof item.time === 'number' && Number.isFinite(item.time) ? item.time : Date.now();
+
+        if (this.isDuplicateOfLastAccepted(itemTimeMs)) {
+          continue;
+        }
+
+        const candidateAcceptable = isTrackAccuracyAcceptable(item.accuracy, this.maxAccuracyM);
+        if (
+          !candidateAcceptable &&
+          lastRejectedMs !== null &&
+          Math.abs(itemTimeMs - lastRejectedMs) <= DEDUP_WINDOW_MS
+        ) {
+          continue;
+        }
+
+        const res = await this.ingestPositionReading({
+          latitude: item.latitude,
+          longitude: item.longitude,
+          accuracyM: item.accuracy,
+          speedMs: item.speed ?? null,
+          headingDeg: item.bearing ?? null,
+          timestampUtcIso: new Date(itemTimeMs).toISOString(),
+        });
+
+        if (res.accepted) {
+          acceptedCount += 1;
+        } else {
+          lastRejectedMs = itemTimeMs;
+        }
+      }
+
+      return acceptedCount;
+    } catch {
+      return 0;
+    } finally {
+      this.isDrainingBuffer = false;
     }
   }
 
@@ -303,98 +528,121 @@ export class LocationTrackerService {
 
   private async startPlatformWatcher(): Promise<void> {
     const isNative = this.isNativePlatformFn();
+    const consentGranted = this.resolveBackgroundConsent();
 
     if (isNative) {
-      this.emitState({
-        foregroundServiceActive: true,
-        foregroundNotificationTitle: ANDROID_FOREGROUND_NOTIFICATION_TITLE,
-        keepScreenOnWarning: false,
-        wakeLockBannerMessage: null,
-      });
+      if (consentGranted !== false) {
+        this.emitState({
+          foregroundServiceActive: true,
+          foregroundNotificationTitle: ANDROID_FOREGROUND_NOTIFICATION_TITLE,
+          backgroundConsentGranted: true,
+          keepScreenOnWarning: false,
+          wakeLockBannerMessage: null,
+        });
 
-      // Tenta adaptador Foreground Service (@capacitor-community/background-geolocation) se disponível
-      let bgStarted = false;
-      try {
-        if (
-          BackgroundGeolocationBridge &&
-          typeof BackgroundGeolocationBridge.addWatcher === 'function' &&
-          Capacitor.isPluginAvailable('BackgroundGeolocation')
-        ) {
-          this.backgroundWatcherId = await BackgroundGeolocationBridge.addWatcher(
-            {
-              backgroundTitle: ANDROID_FOREGROUND_NOTIFICATION_TITLE,
-              backgroundMessage: ANDROID_FOREGROUND_NOTIFICATION_BODY,
-              requestPermissions: true,
-              stale: false,
-              distanceFilter: 5,
-            },
-            (position, err) => {
-              if (err) {
-                this.emitState({ errorMessage: err.message });
-                return;
-              }
-              if (position) {
-                void this.ingestPositionReading({
-                  latitude: position.latitude,
-                  longitude: position.longitude,
-                  accuracyM: position.accuracy,
-                  speedMs: position.speed ?? null,
-                  headingDeg: position.bearing ?? null,
-                  timestampUtcIso: position.time
-                    ? new Date(position.time).toISOString()
-                    : new Date().toISOString(),
-                });
-              }
-            },
-          );
-          bgStarted = true;
+        this.attachVisibilityListener();
+
+        // Inicia Foreground Service nativo (BackgroundGeolocationPlugin -> FieldCastLocationForegroundService)
+        let bgStarted = false;
+        try {
+          if (
+            this.backgroundBridge &&
+            typeof this.backgroundBridge.addWatcher === 'function' &&
+            (this.hasCustomBackgroundBridge ||
+              Capacitor.isPluginAvailable('BackgroundGeolocation'))
+          ) {
+            this.backgroundWatcherId = await this.backgroundBridge.addWatcher(
+              {
+                backgroundTitle: ANDROID_FOREGROUND_NOTIFICATION_TITLE,
+                backgroundMessage: ANDROID_FOREGROUND_NOTIFICATION_BODY,
+                requestPermissions: true,
+                stale: false,
+                distanceFilter: 3,
+              },
+              (position, err) => {
+                if (err) {
+                  this.emitState({ errorMessage: err.message });
+                  return;
+                }
+                if (position) {
+                  const fixTimeMs =
+                    typeof position.time === 'number' && Number.isFinite(position.time)
+                      ? position.time
+                      : Date.now();
+                  if (this.isDuplicateOfLastAccepted(fixTimeMs)) {
+                    return;
+                  }
+                  void this.ingestPositionReading({
+                    latitude: position.latitude,
+                    longitude: position.longitude,
+                    accuracyM: position.accuracy,
+                    speedMs: position.speed ?? null,
+                    headingDeg: position.bearing ?? null,
+                    timestampUtcIso: new Date(fixTimeMs).toISOString(),
+                  });
+                }
+              },
+            );
+            bgStarted = true;
+          }
+        } catch {
+          bgStarted = false;
         }
-      } catch {
-        bgStarted = false;
+
+        if (bgStarted) {
+          return;
+        }
+      } else {
+        this.emitState({
+          foregroundServiceActive: false,
+          foregroundNotificationTitle: null,
+          backgroundConsentGranted: false,
+          keepScreenOnWarning: true,
+          wakeLockBannerMessage: WEB_WAKE_LOCK_WARNING_MESSAGE,
+        });
       }
 
-      if (!bgStarted) {
+      // Fallback para receptor GPS em primeiro plano (@capacitor/geolocation)
+      try {
         try {
-          try {
-            await Geolocation.requestPermissions();
-          } catch {
-            // Prossegue caso permissão já esteja concedida
-          }
-          this.capacitorWatchId = await Geolocation.watchPosition(
-            {
-              enableHighAccuracy: true,
-              timeout: 10000,
-              maximumAge: 0,
-              minimumUpdateInterval: 3000,
-            },
-            (position, err) => {
-              if (err) {
-                this.emitState({
-                  errorMessage:
-                    err instanceof Error ? err.message : 'Aviso do receptor GPS nativo.',
-                });
-                return;
-              }
-              if (position) {
-                void this.ingestPositionReading({
-                  latitude: position.coords.latitude,
-                  longitude: position.coords.longitude,
-                  accuracyM: position.coords.accuracy,
-                  speedMs: position.coords.speed ?? null,
-                  headingDeg: position.coords.heading ?? null,
-                  timestampUtcIso: new Date(position.timestamp).toISOString(),
-                });
-              }
-            },
-          );
-        } catch (err) {
-          this.emitState({
-            errorMessage:
-              err instanceof Error
-                ? err.message
-                : 'Não foi possível iniciar o receptor GPS nativo.',
-          });
+          await Geolocation.requestPermissions();
+        } catch {
+          // Prossegue caso permissão já esteja concedida
         }
+        this.capacitorWatchId = await Geolocation.watchPosition(
+          {
+            enableHighAccuracy: true,
+            timeout: 10000,
+            maximumAge: 0,
+            minimumUpdateInterval: 3000,
+          },
+          (position, err) => {
+            if (err) {
+              this.emitState({
+                errorMessage:
+                  err instanceof Error ? err.message : 'Aviso do receptor GPS nativo.',
+              });
+              return;
+            }
+            if (position) {
+              void this.ingestPositionReading({
+                latitude: position.coords.latitude,
+                longitude: position.coords.longitude,
+                accuracyM: position.coords.accuracy,
+                speedMs: position.coords.speed ?? null,
+                headingDeg: position.coords.heading ?? null,
+                timestampUtcIso: new Date(position.timestamp).toISOString(),
+              });
+            }
+          },
+        );
+      } catch (err) {
+        this.emitState({
+          errorMessage:
+            err instanceof Error
+              ? err.message
+              : 'Não foi possível iniciar o receptor GPS nativo.',
+        });
       }
       return;
     }
@@ -407,6 +655,7 @@ export class LocationTrackerService {
       wakeLockBannerMessage: WEB_WAKE_LOCK_WARNING_MESSAGE,
       foregroundServiceActive: false,
       foregroundNotificationTitle: null,
+      backgroundConsentGranted: consentGranted,
     });
 
     if (typeof navigator !== 'undefined' && navigator.geolocation) {
@@ -443,9 +692,11 @@ export class LocationTrackerService {
   }
 
   private async stopPlatformWatcher(): Promise<void> {
+    this.detachVisibilityListener();
+
     if (this.backgroundWatcherId) {
       try {
-        await BackgroundGeolocationBridge.removeWatcher({ id: this.backgroundWatcherId });
+        await this.backgroundBridge.removeWatcher({ id: this.backgroundWatcherId });
       } catch {
         // Ignora
       }
@@ -504,6 +755,7 @@ export class LocationTrackerService {
       lastAccuracyM: null,
       lastAcceptedPoint: null,
       lastReadingWasDiscarded: false,
+      backgroundConsentGranted: this.resolveBackgroundConsent(),
       platform,
       errorMessage: null,
     });
@@ -516,13 +768,15 @@ export class LocationTrackerService {
    * Pausa a sessão de gravação ativa.
    */
   async pauseTracking(): Promise<TrackSession | null> {
-    const current = this.state.activeSession;
-    if (!current || current.status !== 'recording') {
-      return current;
+    const initial = this.state.activeSession;
+    if (!initial || initial.status !== 'recording') {
+      return initial;
     }
 
+    await this.drainAndIngestBufferedLocations();
     await this.stopPlatformWatcher();
 
+    const current = this.state.activeSession ?? initial;
     const pausedSession: TrackSession = {
       ...current,
       status: 'paused',
@@ -561,6 +815,7 @@ export class LocationTrackerService {
       activeSession: resumedSession,
       isRecording: true,
       isPaused: false,
+      backgroundConsentGranted: this.resolveBackgroundConsent(),
       errorMessage: null,
     });
 
@@ -572,6 +827,9 @@ export class LocationTrackerService {
    * Encerra a sessão de gravação, libera Wake Lock / Foreground Service e salva no Dexie.
    */
   async stopTracking(): Promise<TrackSession | null> {
+    if (this.state.activeSession && this.state.activeSession.status === 'recording') {
+      await this.drainAndIngestBufferedLocations();
+    }
     const current = this.state.activeSession;
     await this.stopPlatformWatcher();
 
@@ -647,3 +905,6 @@ export class LocationTrackerService {
 }
 
 export const locationTrackerService = new LocationTrackerService();
+backgroundConsentListeners.add((enabled) => {
+  locationTrackerService.syncExternalConsentChange(enabled);
+});
