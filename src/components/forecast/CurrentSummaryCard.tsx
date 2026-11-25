@@ -33,6 +33,12 @@ import {
   useCurrentLocalHourIndex,
 } from '../../utils/localTimeHour';
 import { safeAction } from '../../utils/safeAction';
+import {
+  convertTemperature,
+  convertWindSpeed,
+  getTempUnitLabel,
+} from '../../utils/units';
+import { useUnits } from '../../context/UnitsContext';
 import { HelpPopover } from '../common/HelpPopover';
 import {
   COMPLETE_VISIBLE_PARAMS,
@@ -174,6 +180,14 @@ export const CurrentSummaryCard: React.FC<CurrentSummaryCardProps> = ({
   isPrimaryLocation = false,
   onSetPrimaryLocation,
 }) => {
+  const {
+    units,
+    windLabel,
+    formatTempValue,
+    formatWaveValue,
+    formatPressureValue,
+    formatPrecipValue,
+  } = useUnits();
   const [showConfidenceDetails, setShowConfidenceDetails] = useState(false);
   const [isSettingPrimary, setIsSettingPrimary] = useState(false);
 
@@ -239,13 +253,17 @@ export const CurrentSummaryCard: React.FC<CurrentSummaryCardProps> = ({
   }, [currentHour, forecast.ephemerisByDay, forecast.timezone, safeIndex]);
 
   const windCardDir = degreesToCardinalShort(currentHour?.windDirection10m.degree);
-  const windSpd =
-    currentHour?.windSpeed10m.mean !== null && currentHour?.windSpeed10m.mean !== undefined
-      ? Math.round(currentHour.windSpeed10m.mean)
+  const windSpdRaw = convertWindSpeed(currentHour?.windSpeed10m.mean, units.wind);
+  const windSpd = windSpdRaw !== null ? Math.round(windSpdRaw) : null;
+  const gustSpdRaw = convertWindSpeed(currentHour?.windGusts10m.mean, units.wind);
+  const gustSpd = gustSpdRaw !== null ? Math.round(gustSpdRaw) : null;
+  const dayTempMinDisplay =
+    dayTempStats.min !== null
+      ? Math.round(convertTemperature(dayTempStats.min, units.temperature) ?? dayTempStats.min)
       : null;
-  const gustSpd =
-    currentHour?.windGusts10m.mean !== null && currentHour?.windGusts10m.mean !== undefined
-      ? Math.round(currentHour.windGusts10m.mean)
+  const dayTempMaxDisplay =
+    dayTempStats.max !== null
+      ? Math.round(convertTemperature(dayTempStats.max, units.temperature) ?? dayTempStats.max)
       : null;
 
   return (
@@ -504,32 +522,28 @@ export const CurrentSummaryCard: React.FC<CurrentSummaryCardProps> = ({
                     <span className="text-[11px] text-slate-500 dark:text-sky-300/75 block">
                       Agora:{' '}
                       <strong className="text-slate-800 dark:text-white">
-                        {currentHour.temperature2mC.mean !== null
-                          ? `${currentHour.temperature2mC.mean.toFixed(1)}°C`
-                          : '—'}
+                        {formatTempValue(currentHour.temperature2mC.mean, 1)}
                       </strong>{' '}
                       • Orvalho{' '}
-                      {currentHour.dewPoint2mC.mean !== null
-                        ? `${currentHour.dewPoint2mC.mean.toFixed(0)}°`
-                        : '—'}
+                      {formatTempValue(currentHour.dewPoint2mC.mean, 0)}
                     </span>
                   </div>
                 </div>
 
                 <div className="flex items-center gap-3 text-base font-extrabold shrink-0">
                   <span
-                    title="Mínima do dia"
+                    title={`Mínima do dia (${getTempUnitLabel(units.temperature)})`}
                     className="inline-flex items-center gap-0.5 text-[#0080cd] dark:text-sky-400"
                   >
                     <ArrowDown className="w-3.5 h-3.5" />
-                    {dayTempStats.min !== null ? `${dayTempStats.min}°` : '—'}
+                    {dayTempMinDisplay !== null ? `${dayTempMinDisplay}°` : '—'}
                   </span>
                   <span
-                    title="Máxima do dia"
+                    title={`Máxima do dia (${getTempUnitLabel(units.temperature)})`}
                     className="inline-flex items-center gap-0.5 text-orange-500 dark:text-orange-400"
                   >
                     <ArrowUp className="w-3.5 h-3.5" />
-                    {dayTempStats.max !== null ? `${dayTempStats.max}°` : '—'}
+                    {dayTempMaxDisplay !== null ? `${dayTempMaxDisplay}°` : '—'}
                   </span>
                 </div>
               </div>
@@ -567,8 +581,8 @@ export const CurrentSummaryCard: React.FC<CurrentSummaryCardProps> = ({
                 <div className="text-right shrink-0">
                   <span className="text-sm font-extrabold text-slate-900 dark:text-white whitespace-nowrap">
                     {currentHour.precipitationMm.mean !== null
-                      ? `${currentHour.precipitationMm.mean.toFixed(1)}mm`
-                      : '0mm'}{' '}
+                      ? formatPrecipValue(currentHour.precipitationMm.mean, 1)
+                      : formatPrecipValue(0, 0)}{' '}
                     -{' '}
                     <span className="text-[#0080cd] dark:text-sky-300">
                       {currentHour.precipitationProbabilityPct.mean !== null
@@ -595,7 +609,7 @@ export const CurrentSummaryCard: React.FC<CurrentSummaryCardProps> = ({
                     <span className="text-[11px] text-slate-500 dark:text-sky-300/75 block">
                       Rajada de vento:{' '}
                       <strong className="text-slate-800 dark:text-sky-100">
-                        {gustSpd !== null ? `${windCardDir} - ${gustSpd} km/h` : '—'}
+                        {gustSpd !== null ? `${windCardDir} - ${gustSpd} ${windLabel}` : '—'}
                       </strong>
                     </span>
                   </div>
@@ -603,7 +617,7 @@ export const CurrentSummaryCard: React.FC<CurrentSummaryCardProps> = ({
 
                 <div className="text-right shrink-0">
                   <span className="text-sm font-extrabold text-slate-900 dark:text-white whitespace-nowrap">
-                    {windSpd !== null ? `← ${windCardDir} - ${windSpd} km/h` : '—'}
+                    {windSpd !== null ? `← ${windCardDir} - ${windSpd} ${windLabel}` : '—'}
                   </span>
                 </div>
               </div>
@@ -625,7 +639,7 @@ export const CurrentSummaryCard: React.FC<CurrentSummaryCardProps> = ({
                       {forecast.marineAvailable && currentHour.marine
                         ? `Swell: ${
                             currentHour.marine.swellWaveHeight !== null
-                              ? `${currentHour.marine.swellWaveHeight.toFixed(1)}m (${
+                              ? `${formatWaveValue(currentHour.marine.swellWaveHeight, 1)} (${
                                   currentHour.marine.swellWavePeriod !== null &&
                                   currentHour.marine.swellWavePeriod !== undefined
                                     ? Math.round(currentHour.marine.swellWavePeriod)
@@ -641,9 +655,7 @@ export const CurrentSummaryCard: React.FC<CurrentSummaryCardProps> = ({
                 <div className="text-right shrink-0">
                   {forecast.marineAvailable && currentHour.marine ? (
                     <span className="text-sm font-extrabold text-slate-900 dark:text-white whitespace-nowrap">
-                      {currentHour.marine.waveHeight !== null
-                        ? `${currentHour.marine.waveHeight.toFixed(1)}m`
-                        : '—'}{' '}
+                      {formatWaveValue(currentHour.marine.waveHeight, 1)}{' '}
                       <span className="text-xs font-semibold text-slate-500 dark:text-sky-300">
                         (
                         {currentHour.marine.wavePeriod !== null &&
@@ -687,9 +699,7 @@ export const CurrentSummaryCard: React.FC<CurrentSummaryCardProps> = ({
 
                 <div className="text-right shrink-0">
                   <span className="text-sm font-extrabold text-slate-900 dark:text-white whitespace-nowrap">
-                    {currentHour.surfacePressureHpa.mean !== null
-                      ? `${Math.round(currentHour.surfacePressureHpa.mean)} hPa`
-                      : '—'}
+                    {formatPressureValue(currentHour.surfacePressureHpa.mean)}
                   </span>
                 </div>
               </div>
@@ -751,25 +761,28 @@ export const CurrentSummaryCard: React.FC<CurrentSummaryCardProps> = ({
                   <span>
                     80m:{' '}
                     <strong className="text-[#0080cd] dark:text-sky-300">
-                      {currentHour.windSpeed80m.mean !== null
-                        ? `${Math.round(currentHour.windSpeed80m.mean)} km/h`
-                        : '—'}
+                      {(() => {
+                        const v = convertWindSpeed(currentHour.windSpeed80m.mean, units.wind);
+                        return v !== null ? `${Math.round(v)} ${windLabel}` : '—';
+                      })()}
                     </strong>
                   </span>
                   <span>
                     100m:{' '}
                     <strong className="text-[#0080cd] dark:text-sky-300">
-                      {currentHour.windSpeed100m.mean !== null
-                        ? `${Math.round(currentHour.windSpeed100m.mean)} km/h`
-                        : '—'}
+                      {(() => {
+                        const v = convertWindSpeed(currentHour.windSpeed100m.mean, units.wind);
+                        return v !== null ? `${Math.round(v)} ${windLabel}` : '—';
+                      })()}
                     </strong>
                   </span>
                   <span>
                     120m:{' '}
                     <strong className="text-[#0080cd] dark:text-sky-300">
-                      {currentHour.windSpeed120m.mean !== null
-                        ? `${Math.round(currentHour.windSpeed120m.mean)} km/h`
-                        : '—'}
+                      {(() => {
+                        const v = convertWindSpeed(currentHour.windSpeed120m.mean, units.wind);
+                        return v !== null ? `${Math.round(v)} ${windLabel}` : '—';
+                      })()}
                     </strong>
                   </span>
                 </div>

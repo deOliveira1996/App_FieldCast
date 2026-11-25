@@ -105,11 +105,18 @@ export interface ConfidenceScore {
   reasons: string[];
 }
 
+export type SafeWindowThresholdKey =
+  | 'maxWindKmh'
+  | 'maxGustKmh'
+  | 'maxWaveM'
+  | 'maxPrecipProbPct';
+
 export interface SafeWindowThresholds {
   maxWindKmh: number;
   maxGustKmh: number;
   maxWaveM: number;
   maxPrecipProbPct: number;
+  enabled?: Partial<Record<SafeWindowThresholdKey, boolean>>;
 }
 
 export const DEFAULT_SAFE_WINDOW_THRESHOLDS: SafeWindowThresholds = {

@@ -20,6 +20,7 @@ import {
   Wind,
   Zap,
 } from 'lucide-react';
+import { useUnits } from '../../context/UnitsContext';
 import {
   buildFallbackKpDataset,
   classifyKpScale,
@@ -41,9 +42,17 @@ import type {
 import {
   computeDroneFlightAssessment,
   DEFAULT_DRONE_FLIGHT_LIMITS,
+  type DroneFlightLimitKey,
   type DroneFlightLimits,
   getWindSpeedAtAltitude,
 } from '../../utils/droneFlightIndex';
+import {
+  convertPressure,
+  convertWindSpeed,
+  getPressureUnitLabel,
+  getWindUnitLabel,
+  windSpeedToKmh,
+} from '../../utils/units';
 import {
   formatLocalHourBadge,
   formatLocalYMD,
@@ -540,6 +549,7 @@ function loadSavedDroneLimits(): DroneFlightLimits {
         typeof parsed.minVisibilityKm === 'number' && Number.isFinite(parsed.minVisibilityKm)
           ? Math.max(0.2, Math.min(20, parsed.minVisibilityKm))
           : DEFAULT_DRONE_FLIGHT_LIMITS.minVisibilityKm,
+      ...(parsed.enabled ? { enabled: { ...parsed.enabled } } : {}),
     };
   } catch {
     return DEFAULT_DRONE_FLIGHT_LIMITS;
@@ -557,6 +567,7 @@ export const AeronauticsTab: React.FC<AeronauticsTabProps> = ({
   onToast,
   onErrorLog,
 }) => {
+  const { units } = useUnits();
   const hours = forecast?.hours ?? [];
   const currentHourIndex = useCurrentLocalHourIndex(hours, forecast?.timezone);
   const [selectedOffset, setSelectedOffset] = useState<number>(0);
@@ -1199,7 +1210,7 @@ export const AeronauticsTab: React.FC<AeronauticsTabProps> = ({
                   </span>
                   <strong className="text-sm text-slate-900 dark:text-white">
                     {flightAssessment.altitudeWindKmh !== null
-                      ? `${flightAssessment.altitudeWindKmh.toFixed(1)} km/h`
+                      ? `${(convertWindSpeed(flightAssessment.altitudeWindKmh, units.wind) ?? flightAssessment.altitudeWindKmh).toFixed(1)} ${getWindUnitLabel(units.wind)}`
                       : 'N/D'}
                   </strong>
                 </div>
@@ -1209,7 +1220,7 @@ export const AeronauticsTab: React.FC<AeronauticsTabProps> = ({
                   </span>
                   <strong className="text-sm text-slate-900 dark:text-white">
                     {flightAssessment.gust10mKmh !== null
-                      ? `${flightAssessment.gust10mKmh.toFixed(1)} km/h`
+                      ? `${(convertWindSpeed(flightAssessment.gust10mKmh, units.wind) ?? flightAssessment.gust10mKmh).toFixed(1)} ${getWindUnitLabel(units.wind)}`
                       : 'N/D'}
                   </strong>
                 </div>
@@ -1269,75 +1280,114 @@ export const AeronauticsTab: React.FC<AeronauticsTabProps> = ({
                 </div>
 
                 <div className="grid grid-cols-2 sm:grid-cols-4 gap-2.5">
-                  <label className="block text-[11px] text-slate-600 dark:text-slate-300">
-                    Vento Máx (km/h)
-                    <input
-                      type="number"
-                      min={10}
-                      max={90}
-                      value={droneLimits.maxWindKmh}
-                      onChange={(e) =>
-                        setDroneLimits((prev) => ({
-                          ...prev,
-                          maxWindKmh: Math.max(10, Number(e.target.value) || 36),
-                        }))
-                      }
-                      className="mt-1 w-full min-h-[44px] px-2.5 rounded-xl border border-slate-300 dark:border-sky-700 bg-white dark:bg-[#0f243d] text-xs font-bold text-slate-900 dark:text-white"
-                    />
-                  </label>
-
-                  <label className="block text-[11px] text-slate-600 dark:text-slate-300">
-                    Rajada Máx (km/h)
-                    <input
-                      type="number"
-                      min={15}
-                      max={110}
-                      value={droneLimits.maxGustKmh}
-                      onChange={(e) =>
-                        setDroneLimits((prev) => ({
-                          ...prev,
-                          maxGustKmh: Math.max(15, Number(e.target.value) || 48),
-                        }))
-                      }
-                      className="mt-1 w-full min-h-[44px] px-2.5 rounded-xl border border-slate-300 dark:border-sky-700 bg-white dark:bg-[#0f243d] text-xs font-bold text-slate-900 dark:text-white"
-                    />
-                  </label>
-
-                  <label className="block text-[11px] text-slate-600 dark:text-slate-300">
-                    Kp Máx Tolerado
-                    <input
-                      type="number"
-                      min={1}
-                      max={9}
-                      step={0.5}
-                      value={droneLimits.maxKpIndex}
-                      onChange={(e) =>
-                        setDroneLimits((prev) => ({
-                          ...prev,
-                          maxKpIndex: Math.max(1, Math.min(9, Number(e.target.value) || 4.5)),
-                        }))
-                      }
-                      className="mt-1 w-full min-h-[44px] px-2.5 rounded-xl border border-slate-300 dark:border-sky-700 bg-white dark:bg-[#0f243d] text-xs font-bold text-slate-900 dark:text-white"
-                    />
-                  </label>
-
-                  <label className="block text-[11px] text-slate-600 dark:text-slate-300">
-                    Visib. Mín (km)
-                    <input
-                      type="number"
-                      min={0.5}
-                      max={15}
-                      step={0.5}
-                      value={droneLimits.minVisibilityKm}
-                      onChange={(e) =>
-                        setDroneLimits((prev) => ({
-                          ...prev,
-                          minVisibilityKm: Math.max(0.5, Number(e.target.value) || 3),
-                        }))
-                      }
-                      className="mt-1 w-full min-h-[44px] px-2.5 rounded-xl border border-slate-300 dark:border-sky-700 bg-white dark:bg-[#0f243d] text-xs font-bold text-slate-900 dark:text-white"
-                    />
-                  </label>
+                  {(
+                    [
+                      {
+                        key: 'maxWindKmh' as DroneFlightLimitKey,
+                        label: `Vento Máx (${getWindUnitLabel(units.wind)})`,
+                        testId: 'drone-limit-max-wind',
+                        toggleTestId: 'drone-limit-enable-wind',
+                        min: 5,
+                        max: 150,
+                        step: 1,
+                        value: Number(
+                          (
+                            convertWindSpeed(droneLimits.maxWindKmh, units.wind) ??
+                            droneLimits.maxWindKmh
+                          ).toFixed(1),
+                        ),
+                        onValueChange: (val: number) => ({
+                          maxWindKmh: Math.max(5, windSpeedToKmh(val, units.wind)),
+                        }),
+                      },
+                      {
+                        key: 'maxGustKmh' as DroneFlightLimitKey,
+                        label: `Rajada Máx (${getWindUnitLabel(units.wind)})`,
+                        testId: 'drone-limit-max-gust',
+                        toggleTestId: 'drone-limit-enable-gust',
+                        min: 5,
+                        max: 200,
+                        step: 1,
+                        value: Number(
+                          (
+                            convertWindSpeed(droneLimits.maxGustKmh, units.wind) ??
+                            droneLimits.maxGustKmh
+                          ).toFixed(1),
+                        ),
+                        onValueChange: (val: number) => ({
+                          maxGustKmh: Math.max(5, windSpeedToKmh(val, units.wind)),
+                        }),
+                      },
+                      {
+                        key: 'maxKpIndex' as DroneFlightLimitKey,
+                        label: 'Kp Máx Tolerado',
+                        testId: 'drone-limit-max-kp',
+                        toggleTestId: 'drone-limit-enable-kp',
+                        min: 1,
+                        max: 9,
+                        step: 0.5,
+                        value: droneLimits.maxKpIndex,
+                        onValueChange: (val: number) => ({
+                          maxKpIndex: Math.max(1, Math.min(9, val || 4.5)),
+                        }),
+                      },
+                      {
+                        key: 'minVisibilityKm' as DroneFlightLimitKey,
+                        label: 'Visib. Mín (km)',
+                        testId: 'drone-limit-min-vis',
+                        toggleTestId: 'drone-limit-enable-visibility',
+                        min: 0.2,
+                        max: 20,
+                        step: 0.5,
+                        value: droneLimits.minVisibilityKm,
+                        onValueChange: (val: number) => ({
+                          minVisibilityKm: Math.max(0.2, val || 3),
+                        }),
+                      },
+                    ] as const
+                  ).map((item) => {
+                    const checked = droneLimits.enabled?.[item.key] ?? true;
+                    return (
+                      <div key={item.key} className="text-[11px] text-slate-600 dark:text-slate-300">
+                        <label className="flex items-center justify-between gap-1 cursor-pointer">
+                          <span className="truncate">{item.label}</span>
+                          <input
+                            type="checkbox"
+                            data-testid={item.toggleTestId}
+                            checked={checked}
+                            onChange={(e) =>
+                              setDroneLimits((prev) => ({
+                                ...prev,
+                                enabled: {
+                                  ...(prev.enabled ?? {}),
+                                  [item.key]: e.target.checked,
+                                },
+                              }))
+                            }
+                            className="h-4 w-4 accent-sky-600 rounded shrink-0"
+                          />
+                        </label>
+                        <input
+                          type="number"
+                          data-testid={item.testId}
+                          min={item.min}
+                          max={item.max}
+                          step={item.step}
+                          disabled={!checked}
+                          value={item.value}
+                          onChange={(e) => {
+                            const num = Number(e.target.value);
+                            if (!Number.isFinite(num)) return;
+                            setDroneLimits((prev) => ({
+                              ...prev,
+                              ...item.onValueChange(num),
+                            }));
+                          }}
+                          className={`mt-1 w-full min-h-[44px] px-2.5 rounded-xl border border-slate-300 dark:border-sky-700 bg-white dark:bg-[#0f243d] text-xs font-bold text-slate-900 dark:text-white ${!checked ? 'opacity-45' : ''}`}
+                        />
+                      </div>
+                    );
+                  })}
                 </div>
               </div>
             </>
@@ -1526,7 +1576,11 @@ export const AeronauticsTab: React.FC<AeronauticsTabProps> = ({
                 <strong>
                   {selectedHour?.pressureDelta3hHpa !== null &&
                   selectedHour?.pressureDelta3hHpa !== undefined
-                    ? `${selectedHour.pressureDelta3hHpa >= 0 ? '+' : ''}${selectedHour.pressureDelta3hHpa.toFixed(1)} hPa`
+                    ? `${selectedHour.pressureDelta3hHpa >= 0 ? '+' : ''}${
+                        units.pressure === 'inhg'
+                          ? `${(convertPressure(selectedHour.pressureDelta3hHpa, 'inhg') ?? 0).toFixed(2)}`
+                          : selectedHour.pressureDelta3hHpa.toFixed(1)
+                      } ${getPressureUnitLabel(units.pressure)}`
                     : 'N/D'}
                 </strong>
               </p>

@@ -1,6 +1,13 @@
 import type { EnsembleHour, SafeWindowStatus } from '../types/weather';
 import { formatLocalHourBadge, formatLocalYMD } from './localTimeHour';
 
+export type DroneFlightLimitKey =
+  | 'maxWindKmh'
+  | 'maxGustKmh'
+  | 'maxKpIndex'
+  | 'maxPrecipMm'
+  | 'minVisibilityKm';
+
 export interface DroneFlightLimits {
   targetAltitudeM: 30 | 50 | 80 | 100 | 120;
   maxWindKmh: number;
@@ -8,6 +15,7 @@ export interface DroneFlightLimits {
   maxKpIndex: number;
   maxPrecipMm: number;
   minVisibilityKm: number;
+  enabled?: Partial<Record<DroneFlightLimitKey, boolean>>;
 }
 
 export const DEFAULT_DRONE_FLIGHT_LIMITS: DroneFlightLimits = {
@@ -84,7 +92,9 @@ export function computeDroneFlightAssessment(
   const precipProb = hour.precipitationProbabilityPct.mean ?? 0;
   const visKm = hour.visibilityM.mean !== null ? hour.visibilityM.mean / 1000 : null;
 
-  if (altWind !== null) {
+  const enabled = limits.enabled;
+
+  if (enabled?.maxWindKmh !== false && altWind !== null) {
     if (altWind > limits.maxWindKmh) {
       score -= 38;
       reasons.push(
@@ -96,7 +106,7 @@ export function computeDroneFlightAssessment(
     }
   }
 
-  if (gust10m !== null) {
+  if (enabled?.maxGustKmh !== false && gust10m !== null) {
     if (gust10m > limits.maxGustKmh) {
       score -= 34;
       reasons.push(`Rajadas em ${gust10m.toFixed(1)} km/h (limite ${limits.maxGustKmh} km/h)`);
@@ -106,15 +116,15 @@ export function computeDroneFlightAssessment(
     }
   }
 
-  if (precipMm > limits.maxPrecipMm || precipProb >= 70) {
+  if (enabled?.maxPrecipMm !== false && (precipMm > limits.maxPrecipMm || precipProb >= 70)) {
     score -= 28;
     reasons.push(`Risco de chuva (${precipMm.toFixed(1)} mm • ${Math.round(precipProb)}%)`);
-  } else if (precipProb >= 40) {
+  } else if (enabled?.maxPrecipMm !== false && precipProb >= 40) {
     score -= 10;
     reasons.push(`Probabilidade moderada de precipitação (${Math.round(precipProb)}%)`);
   }
 
-  if (hour.fogRisk || (visKm !== null && visKm < limits.minVisibilityKm)) {
+  if (enabled?.minVisibilityKm !== false && (hour.fogRisk || (visKm !== null && visKm < limits.minVisibilityKm))) {
     score -= 24;
     reasons.push(
       visKm !== null
@@ -132,15 +142,17 @@ export function computeDroneFlightAssessment(
     );
   }
 
-  if (safeKp >= 6) {
-    score -= 36;
-    reasons.push(`Tempestade geomagnética Kp ${safeKp.toFixed(1)} — risco severo de GNSS/bússola`);
-  } else if (safeKp > limits.maxKpIndex) {
-    score -= 22;
-    reasons.push(`Índice Kp ${safeKp.toFixed(1)} acima do limite (${limits.maxKpIndex.toFixed(1)})`);
-  } else if (safeKp >= 3.8) {
-    score -= 8;
-    reasons.push(`Atividade geomagnética moderada (Kp ${safeKp.toFixed(1)})`);
+  if (enabled?.maxKpIndex !== false) {
+    if (safeKp >= 6) {
+      score -= 36;
+      reasons.push(`Tempestade geomagnética Kp ${safeKp.toFixed(1)} — risco severo de GNSS/bússola`);
+    } else if (safeKp > limits.maxKpIndex) {
+      score -= 22;
+      reasons.push(`Índice Kp ${safeKp.toFixed(1)} acima do limite (${limits.maxKpIndex.toFixed(1)})`);
+    } else if (safeKp >= 3.8) {
+      score -= 8;
+      reasons.push(`Atividade geomagnética moderada (Kp ${safeKp.toFixed(1)})`);
+    }
   }
 
   const clampedScore = Math.max(0, Math.min(100, Math.round(score)));

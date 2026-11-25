@@ -52,10 +52,32 @@ export function evaluateSafeWindow(
     }
   };
 
-  checkMetric(input.windSpeed10mKmh, thresholds.maxWindKmh, 'Vento 10m', 'km/h', 1);
-  checkMetric(input.windGusts10mKmh, thresholds.maxGustKmh, 'Rajada 10m', 'km/h', 1);
-  checkMetric(input.waveHeightM, thresholds.maxWaveM, 'Altura de onda', 'm', 2);
-  checkMetric(input.precipProbPct, thresholds.maxPrecipProbPct, 'Prob. de chuva', '%', 0);
+  const isEnabled = thresholds.enabled;
+  if (isEnabled?.maxWindKmh !== false) {
+    checkMetric(input.windSpeed10mKmh, thresholds.maxWindKmh, 'Vento 10m', 'km/h', 1);
+  }
+  if (isEnabled?.maxGustKmh !== false) {
+    checkMetric(input.windGusts10mKmh, thresholds.maxGustKmh, 'Rajada 10m', 'km/h', 1);
+  }
+  if (isEnabled?.maxWaveM !== false) {
+    checkMetric(input.waveHeightM, thresholds.maxWaveM, 'Altura de onda', 'm', 2);
+  }
+  if (isEnabled?.maxPrecipProbPct !== false) {
+    checkMetric(input.precipProbPct, thresholds.maxPrecipProbPct, 'Prob. de chuva', '%', 0);
+  }
+
+  const anyEnabled =
+    isEnabled?.maxWindKmh !== false ||
+    isEnabled?.maxGustKmh !== false ||
+    isEnabled?.maxWaveM !== false ||
+    isEnabled?.maxPrecipProbPct !== false;
+
+  if (!anyEnabled) {
+    return {
+      status: 'green',
+      reasons: ['Monitoramento de limites da janela segura desativado pelo usuário'],
+    };
+  }
 
   if (redReasons.length > 0) {
     return { status: 'red', reasons: redReasons };

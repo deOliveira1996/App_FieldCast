@@ -38,6 +38,7 @@ import {
   Waves,
   Wind,
 } from 'lucide-react';
+import { CollapsibleModule } from '../common/CollapsibleModule';
 import { FullscreenViewer } from '../common/FullscreenViewer';
 import { ModuleErrorBoundary } from '../common/ModuleErrorBoundary';
 import { TechnicalReportsPanel } from '../reports/TechnicalReportsPanel';
@@ -2295,35 +2296,30 @@ export const FieldDataTab: React.FC<FieldDataTabProps> = ({
         moduleName="Central de Exportação & Compartilhamento"
         onErrorLog={onErrorLog}
       >
-        <section
-          aria-label="Central de Exportação e Compartilhamento"
-          className="rounded-2xl border border-slate-200/90 dark:border-sky-800/70 bg-white dark:bg-[#132a47] p-5 shadow-sm space-y-4"
-        >
-          <div className="flex flex-wrap items-center justify-between gap-3">
-            <div className="flex items-center gap-2.5">
-              <div className="p-2 rounded-xl bg-indigo-500/15 text-indigo-600 dark:text-indigo-400">
-                <Share2 className="w-5 h-5" aria-hidden="true" />
-              </div>
-              <div>
-                <h2 className="text-base md:text-lg font-bold text-slate-900 dark:text-white">
-                  Central de Exportação &amp; Compartilhamento
-                </h2>
-                <p className="text-xs text-slate-600 dark:text-slate-400">
-                  CSV (UTF-8 BOM), JSON, GPX 1.1, GeoJSON (RFC 7946), Google Earth (KML / KMZ) e
-                  Boletim WhatsApp
-                </p>
-              </div>
-            </div>
-
+        <CollapsibleModule
+          title="Central de Exportação & Compartilhamento"
+          subtitle="CSV, JSON, GPX, GeoJSON, Google Earth (KML / KMZ) e WhatsApp"
+          icon={<Share2 className="w-5 h-5 text-indigo-600 dark:text-indigo-400" />}
+          defaultOpen={false}
+          keepMounted={true}
+          hideIconStyle="eye"
+          testId="field-export-module"
+          headerActions={
             <button
               type="button"
               onClick={handleShareWhatsApp}
-              className="min-h-[44px] min-w-[44px] px-4 py-2.5 rounded-xl font-bold text-xs sm:text-sm inline-flex items-center justify-center gap-2 bg-emerald-600 hover:bg-emerald-500 text-white shadow-sm transition-colors"
+              className="min-h-[44px] min-w-[44px] px-3 py-2 rounded-xl font-bold text-xs inline-flex items-center justify-center gap-1.5 bg-emerald-600 hover:bg-emerald-500 text-white shadow-sm transition-colors"
+              title="Compartilhar Boletim via WhatsApp"
             >
               <MessageSquareShare className="w-4 h-4" aria-hidden="true" />
-              <span>Compartilhar Boletim via WhatsApp</span>
+              <span className="hidden sm:inline">WhatsApp</span>
             </button>
-          </div>
+          }
+        >
+        <div
+          aria-label="Central de Exportação e Compartilhamento"
+          className="space-y-4"
+        >
 
           {/* Seletor de Escopo de Dados */}
           <div className="flex flex-wrap gap-2">
@@ -2464,7 +2460,8 @@ export const FieldDataTab: React.FC<FieldDataTabProps> = ({
               Desktop realiza download imediato do arquivo.
             </span>
           </div>
-        </section>
+        </div>
+        </CollapsibleModule>
       </ModuleErrorBoundary>
       )}
 

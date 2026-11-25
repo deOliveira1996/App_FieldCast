@@ -21,6 +21,7 @@ import {
   Wind,
   Zap,
 } from 'lucide-react';
+import { useUnits } from '../../context/UnitsContext';
 import type { ActiveCoordinates } from '../../types/field';
 import type { ErrorLogRecord, ToastMessage } from '../../types/health';
 import type {
@@ -37,6 +38,14 @@ import {
 } from '../../utils/localTimeHour';
 import { safeAction } from '../../utils/safeAction';
 import {
+  convertWaveHeight,
+  convertWindSpeed,
+  getWaveUnitLabel,
+  getWindUnitLabel,
+  waveHeightToM,
+  windSpeedToKmh,
+} from '../../utils/units';
+import {
   FullscreenViewer,
   ModelModeSwitchPill,
   ModuleErrorBoundary,
@@ -50,6 +59,7 @@ export interface NavigationQualityLimits {
   maxWindKmh: number;
   maxWaveM: number;
   maxCurrentKmh: number;
+  enabled?: Partial<Record<'maxWindKmh' | 'maxWaveM' | 'maxCurrentKmh', boolean>>;
 }
 
 export const DEFAULT_NAVIGATION_QUALITY_LIMITS: NavigationQualityLimits = {
@@ -129,6 +139,7 @@ function loadSavedNavigationLimits(): NavigationQualityLimits {
         typeof parsed.maxCurrentKmh === 'number' && Number.isFinite(parsed.maxCurrentKmh)
           ? Math.max(0.2, Math.min(20, parsed.maxCurrentKmh))
           : DEFAULT_NAVIGATION_QUALITY_LIMITS.maxCurrentKmh,
+      ...(parsed.enabled ? { enabled: { ...parsed.enabled } } : {}),
     };
   } catch {
     return DEFAULT_NAVIGATION_QUALITY_LIMITS;
@@ -232,6 +243,7 @@ export const NavigationTab: React.FC<NavigationTabProps> = ({
   onToast,
   onErrorLog,
 }) => {
+  const { units } = useUnits();
   const hours = forecast?.hours ?? [];
   const currentHourIndex = useCurrentLocalHourIndex(hours, forecast?.timezone);
   const [selectedOffset, setSelectedOffset] = useState<number>(0);
@@ -418,47 +430,56 @@ export const NavigationTab: React.FC<NavigationTabProps> = ({
     const gust = resolvedSurface.windGusts10mKmh;
     const visKm =
       resolvedSurface.visibilityM !== null ? resolvedSurface.visibilityM / 1000 : null;
+    const checkWind = navLimits.enabled?.maxWindKmh ?? true;
+    const checkWave = navLimits.enabled?.maxWaveM ?? true;
+    const checkCurrent = navLimits.enabled?.maxCurrentKmh ?? true;
+    const windLabel = getWindUnitLabel(units.wind);
+    const waveLabel = getWaveUnitLabel(units.wave);
+    const fmtWind = (kmh: number) =>
+      (convertWindSpeed(kmh, units.wind) ?? kmh).toFixed(1);
+    const fmtWave = (m: number) =>
+      (convertWaveHeight(m, units.wave) ?? m).toFixed(units.wave === 'ft' ? 1 : 2);
 
-    if (wind !== null) {
+    if (checkWind && wind !== null) {
       if (wind > navLimits.maxWindKmh) {
         score -= 34;
         reasons.push(
-          `Vento 10m em ${wind.toFixed(1)} km/h acima do limite (${navLimits.maxWindKmh} km/h)`,
+          `Vento 10m em ${fmtWind(wind)} ${windLabel} acima do limite (${fmtWind(navLimits.maxWindKmh)} ${windLabel})`,
         );
       } else if (wind > navLimits.maxWindKmh * 0.78) {
         score -= 15;
-        reasons.push(`Vento de superfície moderado (${wind.toFixed(1)} km/h)`);
+        reasons.push(`Vento de superfície moderado (${fmtWind(wind)} ${windLabel})`);
       }
     }
 
-    if (gust !== null && gust > navLimits.maxWindKmh * 1.45) {
+    if (checkWind && gust !== null && gust > navLimits.maxWindKmh * 1.45) {
       score -= 14;
-      reasons.push(`Rajadas costeiras fortes (${gust.toFixed(1)} km/h)`);
+      reasons.push(`Rajadas costeiras fortes (${fmtWind(gust)} ${windLabel})`);
     }
 
     if (forecast?.marineAvailable && marine) {
-      if (marine.waveHeight !== null && marine.waveHeight !== undefined) {
+      if (checkWave && marine.waveHeight !== null && marine.waveHeight !== undefined) {
         if (marine.waveHeight > navLimits.maxWaveM) {
           score -= 34;
           reasons.push(
-            `Onda significativa ${marine.waveHeight.toFixed(2)} m acima do limite (${navLimits.maxWaveM.toFixed(1)} m)`,
+            `Onda significativa ${fmtWave(marine.waveHeight)} ${waveLabel} acima do limite (${fmtWave(navLimits.maxWaveM)} ${waveLabel})`,
           );
         } else if (marine.waveHeight > navLimits.maxWaveM * 0.78) {
           score -= 16;
-          reasons.push(`Ondulação próxima ao limite operacional (${marine.waveHeight.toFixed(2)} m)`);
+          reasons.push(`Ondulação próxima ao limite operacional (${fmtWave(marine.waveHeight)} ${waveLabel})`);
         }
       }
 
-      if (marine.oceanCurrentVelocity !== null && marine.oceanCurrentVelocity !== undefined) {
+      if (checkCurrent && marine.oceanCurrentVelocity !== null && marine.oceanCurrentVelocity !== undefined) {
         if (marine.oceanCurrentVelocity > navLimits.maxCurrentKmh) {
           score -= 18;
           reasons.push(
-            `Corrente oceânica intensa (${marine.oceanCurrentVelocity.toFixed(2)} km/h > ${navLimits.maxCurrentKmh.toFixed(1)} km/h)`,
+            `Corrente oceânica intensa (${fmtWind(marine.oceanCurrentVelocity)} ${windLabel} > ${fmtWind(navLimits.maxCurrentKmh)} ${windLabel})`,
           );
         } else if (marine.oceanCurrentVelocity > navLimits.maxCurrentKmh * 0.8) {
           score -= 8;
           reasons.push(
-            `Corrente moderada (${marine.oceanCurrentVelocity.toFixed(2)} km/h)`,
+            `Corrente moderada (${fmtWind(marine.oceanCurrentVelocity)} ${windLabel})`,
           );
         }
       }
@@ -512,7 +533,16 @@ export const NavigationTab: React.FC<NavigationTabProps> = ({
       label,
       reasons,
     };
-  }, [activeHour, forecast?.marineAvailable, marine, navLimits, resolvedSurface, waveSteepness]);
+  }, [
+    activeHour,
+    forecast?.marineAvailable,
+    marine,
+    navLimits,
+    resolvedSurface,
+    units.wave,
+    units.wind,
+    waveSteepness,
+  ]);
 
   const tideExtrema = useMemo(() => {
     const windowHours =
@@ -898,65 +928,119 @@ export const NavigationTab: React.FC<NavigationTabProps> = ({
               </div>
 
               <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
-                <label className="block text-[11px] text-slate-600 dark:text-slate-300">
-                  Vento Máx (km/h)
+                <div className="text-[11px] text-slate-600 dark:text-slate-300">
+                  <label className="flex items-center justify-between gap-1 cursor-pointer">
+                    <span>Vento Máx ({getWindUnitLabel(units.wind)})</span>
+                    <input
+                      type="checkbox"
+                      data-testid="nav-limit-enable-wind"
+                      checked={navLimits.enabled?.maxWindKmh ?? true}
+                      onChange={(e) =>
+                        setNavLimits((prev) => ({
+                          ...prev,
+                          enabled: { ...(prev.enabled ?? {}), maxWindKmh: e.target.checked },
+                        }))
+                      }
+                      className="h-4 w-4 accent-sky-600 rounded"
+                    />
+                  </label>
                   <input
                     type="number"
                     data-testid="nav-limit-max-wind"
-                    min={5}
-                    max={110}
-                    step={1}
-                    value={navLimits.maxWindKmh}
-                    onChange={(e) =>
+                    min={1}
+                    max={150}
+                    step={0.5}
+                    disabled={!(navLimits.enabled?.maxWindKmh ?? true)}
+                    value={Number(
+                      (convertWindSpeed(navLimits.maxWindKmh, units.wind) ?? navLimits.maxWindKmh).toFixed(1),
+                    )}
+                    onChange={(e) => {
+                      const num = Number(e.target.value);
+                      if (!Number.isFinite(num)) return;
                       setNavLimits((prev) => ({
                         ...prev,
-                        maxWindKmh: Math.max(5, Math.min(110, Number(e.target.value) || 30)),
-                      }))
-                    }
-                    className="mt-1 w-full min-h-[44px] px-3 rounded-xl border border-slate-300 dark:border-sky-700 bg-white dark:bg-[#0f243d] text-xs font-bold text-slate-900 dark:text-white"
+                        maxWindKmh: Math.max(5, Math.min(110, windSpeedToKmh(num, units.wind))),
+                      }));
+                    }}
+                    className="mt-1 w-full min-h-[44px] px-3 rounded-xl border border-slate-300 dark:border-sky-700 bg-white dark:bg-[#0f243d] text-xs font-bold text-slate-900 dark:text-white disabled:opacity-45"
                   />
-                </label>
+                </div>
 
-                <label className="block text-[11px] text-slate-600 dark:text-slate-300">
-                  Onda Máx Hs (m)
+                <div className="text-[11px] text-slate-600 dark:text-slate-300">
+                  <label className="flex items-center justify-between gap-1 cursor-pointer">
+                    <span>Onda Máx Hs ({getWaveUnitLabel(units.wave)})</span>
+                    <input
+                      type="checkbox"
+                      data-testid="nav-limit-enable-wave"
+                      checked={navLimits.enabled?.maxWaveM ?? true}
+                      onChange={(e) =>
+                        setNavLimits((prev) => ({
+                          ...prev,
+                          enabled: { ...(prev.enabled ?? {}), maxWaveM: e.target.checked },
+                        }))
+                      }
+                      className="h-4 w-4 accent-sky-600 rounded"
+                    />
+                  </label>
                   <input
                     type="number"
                     data-testid="nav-limit-max-wave"
                     min={0.2}
-                    max={12}
+                    max={40}
                     step={0.1}
-                    value={navLimits.maxWaveM}
-                    onChange={(e) =>
+                    disabled={!(navLimits.enabled?.maxWaveM ?? true)}
+                    value={Number(
+                      (convertWaveHeight(navLimits.maxWaveM, units.wave) ?? navLimits.maxWaveM).toFixed(1),
+                    )}
+                    onChange={(e) => {
+                      const num = Number(e.target.value);
+                      if (!Number.isFinite(num)) return;
                       setNavLimits((prev) => ({
                         ...prev,
-                        maxWaveM: Math.max(0.2, Math.min(12, Number(e.target.value) || 2.0)),
-                      }))
-                    }
-                    className="mt-1 w-full min-h-[44px] px-3 rounded-xl border border-slate-300 dark:border-sky-700 bg-white dark:bg-[#0f243d] text-xs font-bold text-slate-900 dark:text-white"
+                        maxWaveM: Math.max(0.2, Math.min(12, waveHeightToM(num, units.wave))),
+                      }));
+                    }}
+                    className="mt-1 w-full min-h-[44px] px-3 rounded-xl border border-slate-300 dark:border-sky-700 bg-white dark:bg-[#0f243d] text-xs font-bold text-slate-900 dark:text-white disabled:opacity-45"
                   />
-                </label>
+                </div>
 
-                <label className="block text-[11px] text-slate-600 dark:text-slate-300">
-                  Corrente Máx (km/h)
+                <div className="text-[11px] text-slate-600 dark:text-slate-300">
+                  <label className="flex items-center justify-between gap-1 cursor-pointer">
+                    <span>Corrente Máx ({getWindUnitLabel(units.wind)})</span>
+                    <input
+                      type="checkbox"
+                      data-testid="nav-limit-enable-current"
+                      checked={navLimits.enabled?.maxCurrentKmh ?? true}
+                      onChange={(e) =>
+                        setNavLimits((prev) => ({
+                          ...prev,
+                          enabled: { ...(prev.enabled ?? {}), maxCurrentKmh: e.target.checked },
+                        }))
+                      }
+                      className="h-4 w-4 accent-sky-600 rounded"
+                    />
+                  </label>
                   <input
                     type="number"
                     data-testid="nav-limit-max-current"
-                    min={0.2}
-                    max={20}
+                    min={0.1}
+                    max={25}
                     step={0.1}
-                    value={navLimits.maxCurrentKmh}
-                    onChange={(e) =>
+                    disabled={!(navLimits.enabled?.maxCurrentKmh ?? true)}
+                    value={Number(
+                      (convertWindSpeed(navLimits.maxCurrentKmh, units.wind) ?? navLimits.maxCurrentKmh).toFixed(1),
+                    )}
+                    onChange={(e) => {
+                      const num = Number(e.target.value);
+                      if (!Number.isFinite(num)) return;
                       setNavLimits((prev) => ({
                         ...prev,
-                        maxCurrentKmh: Math.max(
-                          0.2,
-                          Math.min(20, Number(e.target.value) || 3.5),
-                        ),
-                      }))
-                    }
-                    className="mt-1 w-full min-h-[44px] px-3 rounded-xl border border-slate-300 dark:border-sky-700 bg-white dark:bg-[#0f243d] text-xs font-bold text-slate-900 dark:text-white"
+                        maxCurrentKmh: Math.max(0.2, Math.min(20, windSpeedToKmh(num, units.wind))),
+                      }));
+                    }}
+                    className="mt-1 w-full min-h-[44px] px-3 rounded-xl border border-slate-300 dark:border-sky-700 bg-white dark:bg-[#0f243d] text-xs font-bold text-slate-900 dark:text-white disabled:opacity-45"
                   />
-                </label>
+                </div>
               </div>
             </div>
           </div>

@@ -1,14 +1,24 @@
-import React, { useMemo, useRef, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import {
   ChevronDown,
   ChevronUp,
   Clock,
+  Eye,
+  EyeOff,
   GitCompare,
   Navigation,
   Sliders,
   SlidersHorizontal,
   Table,
 } from 'lucide-react';
+import { useUnits } from '../../context/UnitsContext';
+import {
+  convertPrecipitation,
+  convertPressure,
+  convertTemperature,
+  convertWaveHeight,
+  convertWindSpeed,
+} from '../../utils/units';
 import type {
   EnsembleHour,
   ForecastViewMode,
@@ -224,10 +234,12 @@ export const WindguruTable: React.FC<WindguruTableProps> = ({
   onToggleParam,
   onOpenThresholdModal,
 }) => {
+  const { units, windLabel, tempLabel, waveLabel, pressureLabel, precipLabel } = useUnits();
   const [expandedCompareVars, setExpandedCompareVars] = useState<
     Partial<Record<ComparableVariableId, boolean>>
   >({});
   const [isInlineTuneOpen, setIsInlineTuneOpen] = useState<boolean>(false);
+  const [isHudCompact, setIsHudCompact] = useState<boolean>(false);
   const tableScrollRef = useRef<HTMLDivElement | null>(null);
   const currentHourHeaderRef = useRef<HTMLTableCellElement | null>(null);
 
@@ -248,21 +260,60 @@ export const WindguruTable: React.FC<WindguruTableProps> = ({
     ? formatLocalHourBadge(hours[resolvedCurrentHourIndex]!.timestampUnix, forecast.timezone)
     : null;
 
-  const scrollCurrentHourHorizontally = () => {
+  const scrollCurrentHourHorizontally = (smooth = true) => {
     const container = tableScrollRef.current;
     const headerEl = currentHourHeaderRef.current;
     if (!container || !headerEl) {
       return;
     }
-    const targetLeft = Math.max(
-      0,
-      headerEl.offsetLeft - container.clientWidth / 2 + headerEl.offsetWidth / 2,
-    );
-    if (typeof container.scrollTo === 'function') {
+    const stickyColWidth = container.clientWidth > 0 && container.clientWidth < 640 ? 116 : 148;
+    const targetLeft = Math.max(0, headerEl.offsetLeft - stickyColWidth);
+    if (smooth && typeof container.scrollTo === 'function') {
       container.scrollTo({ left: targetLeft, behavior: 'smooth' });
     } else {
       container.scrollLeft = targetLeft;
     }
+  };
+
+  // Posiciona horizontalmente no horário local atual na abertura/troca de estação (sem scrollIntoView)
+  useEffect(() => {
+    const container = tableScrollRef.current;
+    const headerEl = currentHourHeaderRef.current;
+    if (!container || !headerEl) {
+      return;
+    }
+    const stickyColWidth = container.clientWidth > 0 && container.clientWidth < 640 ? 116 : 148;
+    container.scrollLeft = Math.max(0, headerEl.offsetLeft - stickyColWidth);
+  }, [forecast.latitude, forecast.longitude, resolvedCurrentHourIndex, viewMode, horizonHours]);
+
+  const fmtWindCell = (kmh: number | null | undefined, suffix = ''): string => {
+    const v = convertWindSpeed(kmh, units.wind);
+    if (v === null) return '—';
+    const rounded = units.wind === 'ms' ? v.toFixed(1) : String(Math.round(v));
+    return `${rounded}${suffix}`;
+  };
+
+  const fmtTempCell = (c: number | null | undefined): string => {
+    const v = convertTemperature(c, units.temperature);
+    return v !== null ? String(Math.round(v)) : '—';
+  };
+
+  const fmtWaveCell = (m: number | null | undefined): string => {
+    const v = convertWaveHeight(m, units.wave);
+    return v !== null ? v.toFixed(1) : '—';
+  };
+
+  const fmtPrecipCell = (mm: number | null | undefined, showZero = false): string => {
+    const v = convertPrecipitation(mm, units.precipitation);
+    if (v === null) return showZero ? '—' : '';
+    if (!showZero && (mm ?? 0) <= 0.05) return '';
+    return units.precipitation === 'in' ? v.toFixed(2) : v.toFixed(1);
+  };
+
+  const fmtPressCell = (hpa: number | null | undefined): string => {
+    const v = convertPressure(hpa, units.pressure);
+    if (v === null) return '—';
+    return units.pressure === 'inhg' ? v.toFixed(2) : String(Math.round(v));
   };
 
   const isNative =
@@ -462,25 +513,25 @@ export const WindguruTable: React.FC<WindguruTableProps> = ({
       className="rounded-2xl border border-slate-200/90 dark:border-sky-800/70 bg-white dark:bg-[#132a47] shadow-sm"
     >
       {/* Windguru-Style Clean Action Toolbar (Tune / Compare / Limites) */}
-      <div className="px-4 py-3 rounded-t-2xl border-b border-slate-200 dark:border-sky-800/70 flex flex-wrap items-center justify-between gap-2.5 bg-white dark:bg-[#132a47]">
-        <div className="flex flex-wrap items-center gap-2.5">
-          <div className="px-2.5 py-1 rounded-lg bg-[#0080cd] text-white text-xs font-extrabold tracking-tight flex items-center gap-1.5">
+      <div className="px-3 py-2 sm:px-4 sm:py-2.5 rounded-t-2xl border-b border-slate-200 dark:border-sky-800/70 flex flex-wrap items-center justify-between gap-2 bg-white dark:bg-[#132a47]">
+        <div className="flex flex-wrap items-center gap-2">
+          <div className="px-2 py-0.5 rounded-lg bg-[#0080cd] text-white text-[11px] font-extrabold tracking-tight flex items-center gap-1">
             <Table className="w-3.5 h-3.5" aria-hidden="true" />
-            <span>FieldCast BLEND</span>
+            <span>FieldCast</span>
           </div>
-          <div>
-            <h2 className="text-sm sm:text-base font-extrabold text-slate-900 dark:text-white">
-              Tabela Horária de Previsão ({hours.length}h)
+          {!isHudCompact && (
+            <h2 className="text-xs sm:text-sm font-extrabold text-slate-900 dark:text-white">
+              Tabela ({hours.length}h)
             </h2>
-          </div>
+          )}
           {hasCurrentHourInSlice && currentHourBadgeText && (
             <button
               type="button"
               onClick={() => {
                 onSelectHourIndex(resolvedCurrentHourIndex);
-                scrollCurrentHourHorizontally();
+                scrollCurrentHourHorizontally(true);
               }}
-              className="min-h-[28px] px-2.5 py-0.5 rounded-full text-[11px] font-bold bg-amber-100 hover:bg-amber-200 dark:bg-amber-950/60 dark:hover:bg-amber-900/70 text-amber-900 dark:text-amber-200 border border-amber-300 dark:border-amber-700 inline-flex items-center gap-1 transition-colors"
+              className="min-h-[30px] px-2.5 py-0.5 rounded-full text-[11px] font-bold bg-amber-100 hover:bg-amber-200 dark:bg-amber-950/60 dark:hover:bg-amber-900/70 text-amber-900 dark:text-amber-200 border border-amber-300 dark:border-amber-700 inline-flex items-center gap-1 transition-colors"
             >
               <Clock className="w-3 h-3 text-amber-600 dark:text-amber-400" aria-hidden="true" />
               <span>Agora: {currentHourBadgeText}</span>
@@ -490,19 +541,23 @@ export const WindguruTable: React.FC<WindguruTableProps> = ({
 
         {/* Windguru Action Buttons: Parâmetros (Tune), Comparar Modelos (Expandir/Recolher Todas), Limites */}
         <div className="flex flex-wrap items-center gap-1.5">
-          <button
-            type="button"
-            onClick={() => setIsInlineTuneOpen((prev) => !prev)}
-            aria-expanded={isInlineTuneOpen}
-            className={`min-h-[34px] px-3 py-1 rounded-lg text-xs font-bold inline-flex items-center gap-1.5 border transition-colors ${
-              isInlineTuneOpen
-                ? 'bg-[#0080cd] text-white border-[#0080cd]'
-                : 'bg-[#f4f8fb] dark:bg-[#0d1f36] text-slate-700 dark:text-sky-200 border-slate-200 dark:border-sky-800 hover:bg-sky-50'
-            }`}
-          >
-            <SlidersHorizontal className="w-3.5 h-3.5" aria-hidden="true" />
-            <span>Parâmetros (Tune)</span>
-          </button>
+          {!isHudCompact && (
+            <button
+              type="button"
+              onClick={() => setIsInlineTuneOpen((prev) => !prev)}
+              aria-expanded={isInlineTuneOpen}
+              aria-label="Parâmetros da tabela (Tune)"
+              title="Parâmetros da tabela"
+              className={`min-h-[34px] px-2.5 py-1 rounded-lg text-xs font-bold inline-flex items-center gap-1 border transition-colors ${
+                isInlineTuneOpen
+                  ? 'bg-[#0080cd] text-white border-[#0080cd]'
+                  : 'bg-[#f4f8fb] dark:bg-[#0d1f36] text-slate-700 dark:text-sky-200 border-slate-200 dark:border-sky-800 hover:bg-sky-50'
+              }`}
+            >
+              <SlidersHorizontal className="w-3.5 h-3.5" aria-hidden="true" />
+              <span className="hidden sm:inline">Tune</span>
+            </button>
+          )}
 
           <button
             type="button"
@@ -510,7 +565,7 @@ export const WindguruTable: React.FC<WindguruTableProps> = ({
             aria-pressed={allComparableExpanded}
             data-testid="compare-all-toggle"
             disabled={visibleComparableVarIds.length === 0}
-            className={`min-h-[34px] px-3 py-1 rounded-lg text-xs font-bold inline-flex items-center gap-1.5 border transition-colors disabled:opacity-50 ${
+            className={`min-h-[34px] px-2.5 py-1 rounded-lg text-xs font-bold inline-flex items-center gap-1 border transition-colors disabled:opacity-50 ${
               allComparableExpanded || someComparableExpanded
                 ? 'bg-[#0080cd] text-white border-[#0080cd] shadow-sm'
                 : 'bg-[#f4f8fb] dark:bg-[#0d1f36] text-slate-700 dark:text-sky-200 border-slate-200 dark:border-sky-800 hover:bg-sky-50'
@@ -537,18 +592,31 @@ export const WindguruTable: React.FC<WindguruTableProps> = ({
             </button>
           )}
 
-          {onOpenThresholdModal && (
+          {!isHudCompact && onOpenThresholdModal && (
             <button
               type="button"
               onClick={onOpenThresholdModal}
-              className="min-h-[34px] px-3 py-1 rounded-lg text-xs font-semibold inline-flex items-center gap-1.5 bg-[#f4f8fb] dark:bg-[#0d1f36] text-slate-700 dark:text-sky-200 border border-slate-200 dark:border-sky-800 hover:bg-sky-50 transition-colors"
+              aria-label="Limites da Janela Segura"
+              title="Limites da Janela Segura"
+              className="min-h-[34px] px-2.5 py-1 rounded-lg text-xs font-semibold inline-flex items-center gap-1 bg-[#f4f8fb] dark:bg-[#0d1f36] text-slate-700 dark:text-sky-200 border border-slate-200 dark:border-sky-800 hover:bg-sky-50 transition-colors"
             >
               <Sliders className="w-3.5 h-3.5 text-[#0080cd]" aria-hidden="true" />
-              <span>Limites</span>
             </button>
           )}
 
-          <HelpPopover topic="safe_window" />
+          {!isHudCompact && <HelpPopover topic="safe_window" />}
+
+          <button
+            type="button"
+            data-testid="windguru-hud-toggle"
+            onClick={() => setIsHudCompact((prev) => !prev)}
+            aria-expanded={!isHudCompact}
+            aria-label={isHudCompact ? 'Mostrar controles da tabela' : 'Minimizar controles da tabela'}
+            title={isHudCompact ? 'Mostrar controles' : 'Minimizar controles'}
+            className="min-h-[34px] min-w-[34px] p-1.5 rounded-lg bg-[#f4f8fb] dark:bg-[#0d1f36] text-slate-600 dark:text-sky-200 border border-slate-200 dark:border-sky-800 hover:bg-sky-50 inline-flex items-center justify-center transition-colors"
+          >
+            {isHudCompact ? <Eye className="w-3.5 h-3.5" aria-hidden="true" /> : <EyeOff className="w-3.5 h-3.5" aria-hidden="true" />}
+          </button>
         </div>
       </div>
 
@@ -593,7 +661,7 @@ export const WindguruTable: React.FC<WindguruTableProps> = ({
           <thead>
             {/* Day Header Row */}
             <tr className="bg-[#f4f8fb] dark:bg-[#0d1f36] text-slate-800 dark:text-sky-100 border-b border-slate-200 dark:border-sky-800">
-              <th className="sticky left-0 z-20 bg-[#f4f8fb] dark:bg-[#0d1f36] px-3 py-1.5 text-left font-bold min-w-[140px] sm:min-w-[180px] border-r border-slate-200 dark:border-sky-800">
+              <th className="sticky left-0 z-20 bg-[#f4f8fb] dark:bg-[#0d1f36] px-2.5 py-1 text-left font-bold min-w-[112px] sm:min-w-[144px] border-r border-slate-200 dark:border-sky-800">
                 Dia / Parâmetro
               </th>
               {dayGroups.map((g, idx) => (
@@ -653,7 +721,7 @@ export const WindguruTable: React.FC<WindguruTableProps> = ({
             {visibleParams.wind10m && (
               <>
                 <tr>
-                  {renderVariableHeaderCell('Vento (km/h)', 'windSpeed10m', {
+                  {renderVariableHeaderCell(`Vento (${windLabel})`, 'windSpeed10m', {
                     extraBadge: (
                       <span className="px-1.5 py-0.2 rounded text-[9px] font-extrabold bg-emerald-100 text-emerald-800 dark:bg-emerald-900 dark:text-emerald-200 shrink-0">
                         {Math.round(forecast.overallConfidence.total)}%
@@ -673,20 +741,20 @@ export const WindguruTable: React.FC<WindguruTableProps> = ({
                           val,
                         )} ${getCurrentColBorderClass(idx)}`}
                       >
-                        {val !== null ? Math.round(val) : '—'}
+                        {fmtWindCell(val)}
                       </td>
                     );
                   })}
                 </tr>
                 {renderCompareSubRows(
                   'windSpeed10m',
-                  (m) => (m?.windSpeed10m !== null && m?.windSpeed10m !== undefined ? Math.round(m.windSpeed10m) : '—'),
+                  (m) => fmtWindCell(m?.windSpeed10m),
                   (m) => getWindSpeedBgClass(m?.windSpeed10m ?? null),
                 )}
 
                 {/* Wind Gusts 10m */}
                 <tr>
-                  {renderVariableHeaderCell('Rajadas (km/h)', 'windGusts10m')}
+                  {renderVariableHeaderCell(`Rajadas (${windLabel})`, 'windGusts10m')}
                   {hours.map((h, idx) => {
                     const val = isNative
                       ? nativeList[idx]?.windGusts10m ?? null
@@ -700,14 +768,14 @@ export const WindguruTable: React.FC<WindguruTableProps> = ({
                           val,
                         )} ${getCurrentColBorderClass(idx)}`}
                       >
-                        {val !== null ? Math.round(val) : '—'}
+                        {fmtWindCell(val)}
                       </td>
                     );
                   })}
                 </tr>
                 {renderCompareSubRows(
                   'windGusts10m',
-                  (m) => (m?.windGusts10m !== null && m?.windGusts10m !== undefined ? Math.round(m.windGusts10m) : '—'),
+                  (m) => fmtWindCell(m?.windGusts10m),
                   (m) => getWindSpeedBgClass(m?.windGusts10m ?? null),
                 )}
 
@@ -747,7 +815,7 @@ export const WindguruTable: React.FC<WindguruTableProps> = ({
             {visibleParams.waves && forecast.marineAvailable && (
               <>
                 <tr>
-                  {renderVariableHeaderCell('Ondas (m)')}
+                  {renderVariableHeaderCell(`Ondas (${waveLabel})`)}
                   {hours.map((h, idx) => (
                     <td
                       key={h.timestampUnix}
@@ -757,9 +825,7 @@ export const WindguruTable: React.FC<WindguruTableProps> = ({
                         h.marine?.waveHeight,
                       )} ${getCurrentColBorderClass(idx)}`}
                     >
-                      {h.marine?.waveHeight !== null && h.marine?.waveHeight !== undefined
-                        ? h.marine.waveHeight.toFixed(1)
-                        : '—'}
+                      {fmtWaveCell(h.marine?.waveHeight)}
                     </td>
                   ))}
                 </tr>
@@ -810,7 +876,7 @@ export const WindguruTable: React.FC<WindguruTableProps> = ({
             {visibleParams.verticalProfile && (
               <>
                 <tr>
-                  {renderVariableHeaderCell('Vento 80m (km/h)', 'windSpeed80m', {
+                  {renderVariableHeaderCell(`Vento 80m (${windLabel})`, 'windSpeed80m', {
                     thClassName:
                       'sticky left-0 z-10 bg-white dark:bg-[#132a47] px-3 py-1.5 text-left font-semibold text-slate-700 dark:text-sky-200 border-r border-slate-200 dark:border-sky-800',
                   })}
@@ -829,14 +895,14 @@ export const WindguruTable: React.FC<WindguruTableProps> = ({
                           finalVal,
                         )} ${getCurrentColBorderClass(idx)}`}
                       >
-                        {finalVal !== null ? `${Math.round(finalVal)}${interpVal !== null ? '*' : ''}` : '—'}
+                        {fmtWindCell(finalVal, interpVal !== null ? '*' : '')}
                       </td>
                     );
                   })}
                 </tr>
                 {renderCompareSubRows(
                   'windSpeed80m',
-                  (m) => (m?.windSpeed80m !== null && m?.windSpeed80m !== undefined ? Math.round(m.windSpeed80m) : '—'),
+                  (m) => fmtWindCell(m?.windSpeed80m),
                   (m) => getWindSpeedBgClass(m?.windSpeed80m ?? null),
                 )}
 
@@ -870,7 +936,7 @@ export const WindguruTable: React.FC<WindguruTableProps> = ({
                 )}
 
                 <tr>
-                  {renderVariableHeaderCell('Vento 100m (km/h)', 'windSpeed100m', {
+                  {renderVariableHeaderCell(`Vento 100m (${windLabel})`, 'windSpeed100m', {
                     thClassName:
                       'sticky left-0 z-10 bg-white dark:bg-[#132a47] px-3 py-1.5 text-left font-semibold text-slate-700 dark:text-sky-200 border-r border-slate-200 dark:border-sky-800',
                   })}
@@ -889,14 +955,14 @@ export const WindguruTable: React.FC<WindguruTableProps> = ({
                           finalVal,
                         )} ${getCurrentColBorderClass(idx)}`}
                       >
-                        {finalVal !== null ? `${Math.round(finalVal)}${interpVal !== null ? '*' : ''}` : '—'}
+                        {fmtWindCell(finalVal, interpVal !== null ? '*' : '')}
                       </td>
                     );
                   })}
                 </tr>
                 {renderCompareSubRows(
                   'windSpeed100m',
-                  (m) => (m?.windSpeed100m !== null && m?.windSpeed100m !== undefined ? Math.round(m.windSpeed100m) : '—'),
+                  (m) => fmtWindCell(m?.windSpeed100m),
                   (m) => getWindSpeedBgClass(m?.windSpeed100m ?? null),
                 )}
 
@@ -930,7 +996,7 @@ export const WindguruTable: React.FC<WindguruTableProps> = ({
                 )}
 
                 <tr>
-                  {renderVariableHeaderCell('Vento 120m (km/h)', 'windSpeed120m', {
+                  {renderVariableHeaderCell(`Vento 120m (${windLabel})`, 'windSpeed120m', {
                     thClassName:
                       'sticky left-0 z-10 bg-white dark:bg-[#132a47] px-3 py-1.5 text-left font-semibold text-slate-700 dark:text-sky-200 border-r border-slate-200 dark:border-sky-800',
                   })}
@@ -949,14 +1015,14 @@ export const WindguruTable: React.FC<WindguruTableProps> = ({
                           finalVal,
                         )} ${getCurrentColBorderClass(idx)}`}
                       >
-                        {finalVal !== null ? `${Math.round(finalVal)}${interpVal !== null ? '*' : ''}` : '—'}
+                        {fmtWindCell(finalVal, interpVal !== null ? '*' : '')}
                       </td>
                     );
                   })}
                 </tr>
                 {renderCompareSubRows(
                   'windSpeed120m',
-                  (m) => (m?.windSpeed120m !== null && m?.windSpeed120m !== undefined ? Math.round(m.windSpeed120m) : '—'),
+                  (m) => fmtWindCell(m?.windSpeed120m),
                   (m) => getWindSpeedBgClass(m?.windSpeed120m ?? null),
                 )}
 
@@ -995,7 +1061,7 @@ export const WindguruTable: React.FC<WindguruTableProps> = ({
             {visibleParams.tempVisibility && (
               <>
                 <tr>
-                  {renderVariableHeaderCell('Temperatura (°C)', 'temperature2m')}
+                  {renderVariableHeaderCell(`Temperatura (${tempLabel})`, 'temperature2m')}
                   {hours.map((h, idx) => {
                     const val = isNative
                       ? nativeList[idx]?.temperature2m ?? null
@@ -1009,19 +1075,19 @@ export const WindguruTable: React.FC<WindguruTableProps> = ({
                           val,
                         )} ${getCurrentColBorderClass(idx)}`}
                       >
-                        {val !== null ? Math.round(val) : '—'}
+                        {fmtTempCell(val)}
                       </td>
                     );
                   })}
                 </tr>
                 {renderCompareSubRows(
                   'temperature2m',
-                  (m) => (m?.temperature2m !== null && m?.temperature2m !== undefined ? Math.round(m.temperature2m) : '—'),
+                  (m) => fmtTempCell(m?.temperature2m),
                   (m) => getTempBgClass(m?.temperature2m ?? null),
                 )}
 
                 <tr>
-                  {renderVariableHeaderCell('Ponto de Orvalho (°C)', 'dewPoint2m', {
+                  {renderVariableHeaderCell(`Ponto de Orvalho (${tempLabel})`, 'dewPoint2m', {
                     thClassName:
                       'sticky left-0 z-10 bg-white dark:bg-[#132a47] px-3 py-1 text-left font-semibold text-slate-600 dark:text-sky-200 border-r border-slate-200 dark:border-sky-800',
                   })}
@@ -1038,14 +1104,14 @@ export const WindguruTable: React.FC<WindguruTableProps> = ({
                           val,
                         )} ${getCurrentColBorderClass(idx)}`}
                       >
-                        {val !== null ? Math.round(val) : '—'}
+                        {fmtTempCell(val)}
                       </td>
                     );
                   })}
                 </tr>
                 {renderCompareSubRows(
                   'dewPoint2m',
-                  (m) => (m?.dewPoint2m !== null && m?.dewPoint2m !== undefined ? Math.round(m.dewPoint2m) : '—'),
+                  (m) => fmtTempCell(m?.dewPoint2m),
                   (m) => getTempBgClass(m?.dewPoint2m ?? null),
                 )}
 
@@ -1172,11 +1238,11 @@ export const WindguruTable: React.FC<WindguruTableProps> = ({
               </>
             )}
 
-            {/* 6. Precipitation (mm/h), Precip Prob (%) & Surface Pressure (hPa) */}
+            {/* 6. Precipitation, Precip Prob (%) & Surface Pressure */}
             {visibleParams.rainPressure && (
               <>
                 <tr>
-                  {renderVariableHeaderCell('Precipitação (mm/h)', 'precipitation')}
+                  {renderVariableHeaderCell(`Precipitação (${precipLabel}/h)`, 'precipitation')}
                   {hours.map((h, idx) => {
                     const val = isNative
                       ? nativeList[idx]?.precipitation ?? null
@@ -1190,19 +1256,14 @@ export const WindguruTable: React.FC<WindguruTableProps> = ({
                           val,
                         )} ${getCurrentColBorderClass(idx)}`}
                       >
-                        {val !== null && val > 0.05 ? val.toFixed(1) : ''}
+                        {fmtPrecipCell(val, false)}
                       </td>
                     );
                   })}
                 </tr>
                 {renderCompareSubRows(
                   'precipitation',
-                  (m) =>
-                    m?.precipitation !== null && m?.precipitation !== undefined
-                      ? m.precipitation > 0.05
-                        ? m.precipitation.toFixed(1)
-                        : '0.0'
-                      : '—',
+                  (m) => fmtPrecipCell(m?.precipitation, true),
                   (m) => getRainBgClass(m?.precipitation ?? null),
                 )}
 
@@ -1240,7 +1301,7 @@ export const WindguruTable: React.FC<WindguruTableProps> = ({
                 )}
 
                 <tr>
-                  {renderVariableHeaderCell('Pressão (hPa)', 'surfacePressure', {
+                  {renderVariableHeaderCell(`Pressão (${pressureLabel})`, 'surfacePressure', {
                     thClassName:
                       'sticky left-0 z-10 bg-white dark:bg-[#132a47] px-3 py-1 text-left font-semibold text-slate-600 dark:text-sky-200 border-r border-slate-200 dark:border-sky-800',
                   })}
@@ -1259,17 +1320,14 @@ export const WindguruTable: React.FC<WindguruTableProps> = ({
                             : 'bg-white dark:bg-[#132a47] text-slate-600 dark:text-sky-200/80'
                         } ${getCurrentColBorderClass(idx)}`}
                       >
-                        {val !== null ? Math.round(val) : '—'}
+                        {fmtPressCell(val)}
                       </td>
                     );
                   })}
                 </tr>
                 {renderCompareSubRows(
                   'surfacePressure',
-                  (m) =>
-                    m?.surfacePressure !== null && m?.surfacePressure !== undefined
-                      ? Math.round(m.surfacePressure)
-                      : '—',
+                  (m) => fmtPressCell(m?.surfacePressure),
                   () => 'bg-white dark:bg-[#132a47] text-slate-600 dark:text-sky-200/80',
                 )}
               </>

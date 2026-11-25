@@ -16,6 +16,7 @@ export interface WeatherModelOverlayLayerProps {
   hourTimestamp?: number | null;
   opacity?: number;
   animateFlow?: boolean;
+  showWindStreamlines?: boolean;
   onLayerError?: (error: Error) => void;
 }
 
@@ -24,6 +25,7 @@ interface FlowParticle {
   y: number;
   age: number;
   maxAge: number;
+  trail: Array<{ x: number; y: number }>;
 }
 
 interface CachedFlowVector {
@@ -97,6 +99,7 @@ export const WeatherModelOverlayLayer: React.FC<WeatherModelOverlayLayerProps> =
   hourTimestamp = null,
   opacity = 0.72,
   animateFlow = true,
+  showWindStreamlines,
   onLayerError,
 }) => {
   const map = useMap();
@@ -105,8 +108,12 @@ export const WeatherModelOverlayLayer: React.FC<WeatherModelOverlayLayerProps> =
   const onLayerErrorRef = useRef<((error: Error) => void) | undefined>(onLayerError);
   onLayerErrorRef.current = onLayerError;
 
+  const shouldRenderStreamlines =
+    showWindStreamlines ?? (layerId === 'wind' || layerId === 'waves');
+
   useEffect(() => {
-    if (layerId === 'none') {
+    const isVisibleLayer = layerId !== 'none' || shouldRenderStreamlines;
+    if (!isVisibleLayer) {
       if (canvasRef.current && canvasRef.current.parentNode) {
         canvasRef.current.parentNode.removeChild(canvasRef.current);
         canvasRef.current = null;
@@ -137,6 +144,7 @@ export const WeatherModelOverlayLayer: React.FC<WeatherModelOverlayLayerProps> =
     canvas.style.height = '100%';
     canvas.style.pointerEvents = 'none';
     canvas.style.zIndex = '220';
+    canvas.style.transition = 'opacity 220ms ease-out';
     canvasRef.current = canvas;
     container.appendChild(canvas);
 
@@ -165,7 +173,7 @@ export const WeatherModelOverlayLayer: React.FC<WeatherModelOverlayLayerProps> =
     let staticRenderCount = 0;
     let cachedWidth = 0;
     let cachedHeight = 0;
-    const cellSize = 36;
+    const cellSize = 26;
     let flowCols = 0;
     let flowRows = 0;
     let flowGrid: CachedFlowVector[] = [];
@@ -173,13 +181,14 @@ export const WeatherModelOverlayLayer: React.FC<WeatherModelOverlayLayerProps> =
     const particles: FlowParticle[] = [];
     const initParticles = (width: number, height: number) => {
       particles.length = 0;
-      const count = Math.min(42, Math.max(16, Math.round((width * height) / 15000)));
+      const count = Math.min(110, Math.max(40, Math.round((width * height) / 4800)));
       for (let i = 0; i < count; i++) {
         particles.push({
           x: Math.random() * width,
           y: Math.random() * height,
-          age: Math.floor(Math.random() * 60),
-          maxAge: 50 + Math.floor(Math.random() * 45),
+          age: Math.floor(Math.random() * 55),
+          maxAge: 42 + Math.floor(Math.random() * 44),
+          trail: [],
         });
       }
     };
@@ -219,12 +228,13 @@ export const WeatherModelOverlayLayer: React.FC<WeatherModelOverlayLayerProps> =
         }
 
         offscreenCtx.clearRect(0, 0, width, height);
+        offscreenCtx.imageSmoothingEnabled = true;
 
         flowCols = Math.max(1, Math.ceil(width / cellSize));
         flowRows = Math.max(1, Math.ceil(height / cellSize));
         flowGrid = new Array<CachedFlowVector>(flowCols * flowRows);
 
-        // 1. Coarse interpolated meteorological heat cells rendered ONLY to offscreenCanvas
+        // 1. Interpolated meteorological heat cells rendered ONLY to offscreenCanvas
         for (let row = 0; row < flowRows; row++) {
           const y = row * cellSize;
           for (let col = 0; col < flowCols; col++) {
@@ -240,23 +250,30 @@ export const WeatherModelOverlayLayer: React.FC<WeatherModelOverlayLayerProps> =
               continue;
             }
 
-            const sample = interpolateGridValueAtPoint(
-              points,
-              latLng.lat,
-              latLng.lng,
-              layerId,
-            );
-            const [r, g, b, a] = getWeatherOverlayRgba(layerId, sample.value);
-            if (a > 0) {
-              const finalAlpha = Math.max(0.03, Math.min(0.68, (a / 255) * opacity));
-              offscreenCtx.fillStyle = `rgba(${r}, ${g}, ${b}, ${finalAlpha.toFixed(3)})`;
-              offscreenCtx.fillRect(x, y, cellSize + 1, cellSize + 1);
+            if (layerId !== 'none') {
+              const sample = interpolateGridValueAtPoint(
+                points,
+                latLng.lat,
+                latLng.lng,
+                layerId,
+              );
+              const [r, g, b, a] = getWeatherOverlayRgba(layerId, sample.value);
+              if (a > 0) {
+                const finalAlpha = Math.max(0.03, Math.min(0.68, (a / 255) * opacity));
+                offscreenCtx.fillStyle = `rgba(${r}, ${g}, ${b}, ${finalAlpha.toFixed(3)})`;
+                offscreenCtx.fillRect(x, y, cellSize + 1, cellSize + 1);
+              }
             }
 
-            if (sample.windDirectionDeg !== null) {
-              const speed = sample.value ?? 10;
-              const blowToRad = (((sample.windDirectionDeg + 180) % 360) * Math.PI) / 180;
-              const stepPx = Math.max(1.2, Math.min(4.8, 0.9 + speed * 0.08));
+            const vectorSample =
+              layerId === 'waves'
+                ? interpolateGridValueAtPoint(points, latLng.lat, latLng.lng, 'waves')
+                : interpolateGridValueAtPoint(points, latLng.lat, latLng.lng, 'wind');
+
+            if (vectorSample.windDirectionDeg !== null) {
+              const speed = vectorSample.value ?? 10;
+              const blowToRad = (((vectorSample.windDirectionDeg + 180) % 360) * Math.PI) / 180;
+              const stepPx = Math.max(1.3, Math.min(5.2, 1.0 + speed * 0.085));
               flowGrid[cellIdx] = {
                 dxStep: Math.sin(blowToRad) * stepPx,
                 dyStep: -Math.cos(blowToRad) * stepPx,
@@ -269,56 +286,59 @@ export const WeatherModelOverlayLayer: React.FC<WeatherModelOverlayLayerProps> =
         }
 
         // 2. Vector arrows (for wind / waves) or grid numerical badges (for temp / rain) on offscreenCanvas
-        const stepX = Math.max(64, Math.floor(width / 8));
-        const stepY = Math.max(60, Math.floor(height / 5));
+        if (layerId !== 'none') {
+          const stepX = Math.max(64, Math.floor(width / 8));
+          const stepY = Math.max(60, Math.floor(height / 5));
 
-        for (let y = Math.floor(stepY * 0.55); y < height - 20; y += stepY) {
-          for (let x = Math.floor(stepX * 0.55); x < width - 20; x += stepX) {
-            let latLng: L.LatLng;
-            try {
-              latLng = map.containerPointToLatLng(L.point(x, y));
-            } catch {
-              continue;
-            }
-            const sample = interpolateGridValueAtPoint(
-              points,
-              latLng.lat,
-              latLng.lng,
-              layerId,
-            );
-
-            if (layerId === 'wind' || layerId === 'waves') {
-              if (sample.windDirectionDeg !== null) {
-                const speed = sample.value ?? 8;
-                drawArrowVector(
-                  offscreenCtx,
-                  x,
-                  y,
-                  sample.windDirectionDeg,
-                  layerId === 'waves' ? speed * 8 : speed,
-                  'rgba(15, 23, 42, 0.62)',
-                );
+          for (let y = Math.floor(stepY * 0.55); y < height - 20; y += stepY) {
+            for (let x = Math.floor(stepX * 0.55); x < width - 20; x += stepX) {
+              let latLng: L.LatLng;
+              try {
+                latLng = map.containerPointToLatLng(L.point(x, y));
+              } catch {
+                continue;
               }
-            } else if (sample.value !== null) {
-              const text =
-                layerId === 'temperature'
-                  ? `${Math.round(sample.value)}°`
-                  : `${sample.value.toFixed(1)}`;
-              offscreenCtx.save();
-              offscreenCtx.font = '700 10px system-ui, -apple-system, sans-serif';
-              offscreenCtx.textAlign = 'center';
-              offscreenCtx.textBaseline = 'middle';
-              offscreenCtx.fillStyle = 'rgba(255,255,255,0.85)';
-              offscreenCtx.fillRect(x - 15, y - 8, 30, 16);
-              offscreenCtx.fillStyle = '#0f172a';
-              offscreenCtx.fillText(text, x, y);
-              offscreenCtx.restore();
+              const sample = interpolateGridValueAtPoint(
+                points,
+                latLng.lat,
+                latLng.lng,
+                layerId,
+              );
+
+              if (layerId === 'wind' || layerId === 'waves') {
+                if (sample.windDirectionDeg !== null) {
+                  const speed = sample.value ?? 8;
+                  drawArrowVector(
+                    offscreenCtx,
+                    x,
+                    y,
+                    sample.windDirectionDeg,
+                    layerId === 'waves' ? speed * 8 : speed,
+                    'rgba(15, 23, 42, 0.54)',
+                  );
+                }
+              } else if (sample.value !== null) {
+                const text =
+                  layerId === 'temperature'
+                    ? `${Math.round(sample.value)}°`
+                    : `${sample.value.toFixed(1)}`;
+                offscreenCtx.save();
+                offscreenCtx.font = '700 10px system-ui, -apple-system, sans-serif';
+                offscreenCtx.textAlign = 'center';
+                offscreenCtx.textBaseline = 'middle';
+                offscreenCtx.fillStyle = 'rgba(255,255,255,0.85)';
+                offscreenCtx.fillRect(x - 15, y - 8, 30, 16);
+                offscreenCtx.fillStyle = '#0f172a';
+                offscreenCtx.fillText(text, x, y);
+                offscreenCtx.restore();
+              }
             }
           }
         }
 
         // Blit cached static field onto the visible canvas immediately
         ctx.clearRect(0, 0, width, height);
+        ctx.imageSmoothingEnabled = true;
         ctx.drawImage(offscreenCanvas, 0, 0);
 
         return { width, height };
@@ -337,7 +357,7 @@ export const WeatherModelOverlayLayer: React.FC<WeatherModelOverlayLayerProps> =
 
     const canAnimate =
       animateFlow &&
-      (layerId === 'wind' || layerId === 'waves') &&
+      (shouldRenderStreamlines || layerId === 'wind' || layerId === 'waves') &&
       Boolean(ctx) &&
       Boolean(offscreenCtx) &&
       points.length > 0 &&
@@ -345,8 +365,7 @@ export const WeatherModelOverlayLayer: React.FC<WeatherModelOverlayLayerProps> =
       typeof window.requestAnimationFrame === 'function';
 
     let lastFrameMs = 0;
-    // Target ~18-20 fps (52ms interval) to keep mobile WebView silky smooth
-    const FRAME_INTERVAL_MS = 52;
+    const FRAME_INTERVAL_MS = 45;
 
     const renderLoop = (nowMs: number) => {
       if (isDisposed || !ctx || !offscreenCanvasRef.current) return;
@@ -367,7 +386,8 @@ export const WeatherModelOverlayLayer: React.FC<WeatherModelOverlayLayerProps> =
           if (flowCols > 0 && flowRows > 0 && flowGrid.length > 0) {
             ctx.save();
             ctx.lineCap = 'round';
-            ctx.lineWidth = 1.6;
+            ctx.lineJoin = 'round';
+            const streakRgb = layerId === 'waves' ? '224, 242, 254' : '255, 255, 255';
 
             for (const p of particles) {
               const col = Math.max(0, Math.min(flowCols - 1, Math.floor(p.x / cellSize)));
@@ -375,10 +395,28 @@ export const WeatherModelOverlayLayer: React.FC<WeatherModelOverlayLayerProps> =
               const vec = flowGrid[row * flowCols + col];
 
               if (vec && vec.valid) {
+                p.trail.push({ x: p.x, y: p.y });
+                if (p.trail.length > 5) {
+                  p.trail.shift();
+                }
+
                 const nextX = p.x + vec.dxStep;
                 const nextY = p.y + vec.dyStep;
-                const lifeAlpha = Math.sin((p.age / p.maxAge) * Math.PI) * 0.65;
-                ctx.strokeStyle = `rgba(255, 255, 255, ${Math.max(0.12, lifeAlpha).toFixed(2)})`;
+                const lifeAlpha = Math.sin((p.age / p.maxAge) * Math.PI) * 0.78;
+
+                if (p.trail.length >= 2) {
+                  for (let t = 1; t < p.trail.length; t++) {
+                    const segFrac = t / p.trail.length;
+                    ctx.strokeStyle = `rgba(${streakRgb}, ${(Math.max(0.1, lifeAlpha) * segFrac).toFixed(2)})`;
+                    ctx.lineWidth = 1.0 + segFrac * 0.9;
+                    ctx.beginPath();
+                    ctx.moveTo(p.trail[t - 1]!.x, p.trail[t - 1]!.y);
+                    ctx.lineTo(p.trail[t]!.x, p.trail[t]!.y);
+                    ctx.stroke();
+                  }
+                }
+                ctx.strokeStyle = `rgba(${streakRgb}, ${Math.max(0.18, lifeAlpha).toFixed(2)})`;
+                ctx.lineWidth = 1.9;
                 ctx.beginPath();
                 ctx.moveTo(p.x, p.y);
                 ctx.lineTo(nextX, nextY);
@@ -399,6 +437,7 @@ export const WeatherModelOverlayLayer: React.FC<WeatherModelOverlayLayerProps> =
                 p.x = Math.random() * width;
                 p.y = Math.random() * height;
                 p.age = 0;
+                p.trail.length = 0;
               }
             }
             ctx.restore();
@@ -440,7 +479,7 @@ export const WeatherModelOverlayLayer: React.FC<WeatherModelOverlayLayerProps> =
       canvasRef.current = null;
       offscreenCanvasRef.current = null;
     };
-  }, [animateFlow, hourTimestamp, layerId, map, modelMode, opacity, points]);
+  }, [animateFlow, hourTimestamp, layerId, map, modelMode, opacity, points, shouldRenderStreamlines]);
 
   return null;
 };

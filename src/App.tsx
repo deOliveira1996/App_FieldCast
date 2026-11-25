@@ -40,6 +40,7 @@ import {
 import { useSmartLocation } from './hooks/useSmartLocation';
 import { useTheme } from './hooks/useTheme';
 import { useToast } from './hooks/useToast';
+import { UnitsProvider } from './context/UnitsContext';
 import {
   probeIpWhoisHealth,
   probeNominatimHealth,
@@ -1092,10 +1093,11 @@ export function App(): React.ReactElement {
   }, []);
 
   return (
-    <GlobalErrorBoundary
-      onErrorLog={handleErrorLog}
-      onClearCache={resetDatabaseForTests}
-    >
+    <UnitsProvider>
+      <GlobalErrorBoundary
+        onErrorLog={handleErrorLog}
+        onClearCache={resetDatabaseForTests}
+      >
       <AppShell
         activeTab={activeTab}
         onTabChange={handleTabChange}
@@ -1289,7 +1291,8 @@ export function App(): React.ReactElement {
       </AppShell>
 
       <ToastContainer toasts={toasts} onDismiss={dismissToast} />
-    </GlobalErrorBoundary>
+      </GlobalErrorBoundary>
+    </UnitsProvider>
   );
 }
 

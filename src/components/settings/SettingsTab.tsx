@@ -6,6 +6,7 @@ import {
   CheckCircle2,
   Clock,
   Compass,
+  Gauge,
   Moon,
   Navigation,
   Plus,
@@ -18,6 +19,7 @@ import {
   Sun,
   Trash2,
 } from 'lucide-react';
+import { useUnits } from '../../context/UnitsContext';
 import { useTheme, type ThemeMode } from '../../hooks/useTheme';
 import {
   dispatchSystemNotification,
@@ -35,14 +37,17 @@ import type { ErrorLogRecord, ToastMessage } from '../../types/health';
 import { SafeWindowThresholdsSchema } from '../../types/schemas';
 import type {
   ActivityQualityThresholds,
+  CoastalNavThresholdKey,
   CustomNotificationConditions,
   CustomNotificationRule,
+  DailyFieldThresholdKey,
   NotificationRuleTemplate,
   UserNotificationPreferences,
 } from '../../types/v4';
 import {
   DEFAULT_SAFE_WINDOW_THRESHOLDS,
   type NormalizedForecast,
+  type SafeWindowThresholdKey,
   type SafeWindowThresholds,
 } from '../../types/weather';
 import {
@@ -51,6 +56,24 @@ import {
   saveActivityQualityThresholds,
 } from '../../utils/qualityScores';
 import { safeAction } from '../../utils/safeAction';
+import {
+  convertTemperature,
+  convertWaveHeight,
+  convertWindSpeed,
+  getTempUnitLabel,
+  getWaveUnitLabel,
+  getWindUnitLabel,
+  temperatureToC,
+  waveHeightToM,
+  windSpeedToKmh,
+  type PrecipitationUnit,
+  type PressureUnit,
+  type TemperatureUnit,
+  type UnitPreferences,
+  type WaveHeightUnit,
+  type WindSpeedUnit,
+} from '../../utils/units';
+import { CollapsibleModule } from '../common';
 
 const SAFE_WINDOW_STORAGE_KEY = 'fieldcast_safe_window_thresholds';
 
@@ -119,6 +142,27 @@ const INITIAL_RULE_DRAFT: RuleBuilderDraft = {
   customMessage: '',
 };
 
+type RuleConditionKey =
+  | 'minTempC'
+  | 'maxTempC'
+  | 'minPrecipProbPct'
+  | 'maxWindKmh'
+  | 'maxGustKmh'
+  | 'maxCloudCoverPct'
+  | 'maxWaveM'
+  | 'maxKpIndex';
+
+const DEFAULT_ENABLED_RULE_FIELDS: Record<RuleConditionKey, boolean> = {
+  minTempC: false,
+  maxTempC: false,
+  minPrecipProbPct: false,
+  maxWindKmh: false,
+  maxGustKmh: false,
+  maxCloudCoverPct: false,
+  maxWaveM: false,
+  maxKpIndex: false,
+};
+
 function parseOptionalInputNumber(raw: string): number | null {
   const trimmed = raw.trim();
   if (!trimmed) {
@@ -128,28 +172,42 @@ function parseOptionalInputNumber(raw: string): number | null {
   return Number.isFinite(num) ? num : null;
 }
 
-function formatRuleConditionChips(conditions: CustomNotificationConditions): string[] {
+function formatRuleConditionChips(
+  conditions: CustomNotificationConditions,
+  units?: UnitPreferences,
+): string[] {
   const chips: string[] = [];
+  const tempLabel = units ? getTempUnitLabel(units.temperature) : '°C';
+  const windLabel = units ? getWindUnitLabel(units.wind) : 'km/h';
+  const waveLabel = units ? getWaveUnitLabel(units.wave) : 'm';
+
+  const fmtTemp = (c: number) =>
+    units ? Number((convertTemperature(c, units.temperature) ?? c).toFixed(1)) : c;
+  const fmtWind = (kmh: number) =>
+    units ? Number((convertWindSpeed(kmh, units.wind) ?? kmh).toFixed(1)) : kmh;
+  const fmtWave = (m: number) =>
+    units ? Number((convertWaveHeight(m, units.wave) ?? m).toFixed(1)) : m;
+
   if (conditions.minTempC !== undefined && conditions.minTempC !== null) {
-    chips.push(`Temp < ${conditions.minTempC} °C`);
+    chips.push(`Temp < ${fmtTemp(conditions.minTempC)} ${tempLabel}`);
   }
   if (conditions.maxTempC !== undefined && conditions.maxTempC !== null) {
-    chips.push(`Temp > ${conditions.maxTempC} °C`);
+    chips.push(`Temp > ${fmtTemp(conditions.maxTempC)} ${tempLabel}`);
   }
   if (conditions.minPrecipProbPct !== undefined && conditions.minPrecipProbPct !== null) {
     chips.push(`Chuva >= ${conditions.minPrecipProbPct}%`);
   }
   if (conditions.maxWindKmh !== undefined && conditions.maxWindKmh !== null) {
-    chips.push(`Vento >= ${conditions.maxWindKmh} km/h`);
+    chips.push(`Vento >= ${fmtWind(conditions.maxWindKmh)} ${windLabel}`);
   }
   if (conditions.maxGustKmh !== undefined && conditions.maxGustKmh !== null) {
-    chips.push(`Rajada >= ${conditions.maxGustKmh} km/h`);
+    chips.push(`Rajada >= ${fmtWind(conditions.maxGustKmh)} ${windLabel}`);
   }
   if (conditions.maxCloudCoverPct !== undefined && conditions.maxCloudCoverPct !== null) {
     chips.push(`Nuvens >= ${conditions.maxCloudCoverPct}%`);
   }
   if (conditions.maxWaveM !== undefined && conditions.maxWaveM !== null) {
-    chips.push(`Onda >= ${conditions.maxWaveM} m`);
+    chips.push(`Onda >= ${fmtWave(conditions.maxWaveM)} ${waveLabel}`);
   }
   if (conditions.maxKpIndex !== undefined && conditions.maxKpIndex !== null) {
     chips.push(`Kp >= ${conditions.maxKpIndex}`);
@@ -168,6 +226,15 @@ export function SettingsTab({
   onToast,
   onErrorLog,
 }: SettingsTabProps): React.ReactElement {
+  const {
+    units,
+    setWindUnit,
+    setTemperatureUnit,
+    setWaveUnit,
+    setPressureUnit,
+    setPrecipitationUnit,
+    resetUnits,
+  } = useUnits();
   const fallbackThemeHook = useTheme('light');
   const activeTheme: ThemeMode = externalTheme ?? fallbackThemeHook.theme;
   const handleThemeSwitch = onToggleTheme ?? fallbackThemeHook.toggleTheme;
@@ -181,7 +248,11 @@ export function SettingsTab({
   const [statusFeedback, setStatusFeedback] = useState<string | null>(null);
 
   const [ruleDraft, setRuleDraft] = useState<RuleBuilderDraft>(INITIAL_RULE_DRAFT);
+  const [enabledRuleFields, setEnabledRuleFields] = useState<Record<RuleConditionKey, boolean>>(
+    DEFAULT_ENABLED_RULE_FIELDS,
+  );
   const [activeTemplateId, setActiveTemplateId] = useState<string | null>(null);
+  const [isAlertBuilderOpen, setIsAlertBuilderOpen] = useState<boolean>(false);
 
   const [bgGpsConsent, setBgGpsConsent] = useState<boolean>(() =>
     getBackgroundTrackingConsent(),
@@ -379,41 +450,50 @@ export function SettingsTab({
   const handleApplyTemplateToBuilder = useCallback(
     (tpl: NotificationRuleTemplate) => {
       const c = tpl.suggestedConditions;
+      const fmtVal = (val: number | null | undefined, convertFn?: (n: number) => number | null) => {
+        if (val === undefined || val === null) return '';
+        const converted = convertFn ? convertFn(val) : val;
+        return converted !== null ? String(Number(converted.toFixed(1))) : '';
+      };
+
       setActiveTemplateId(tpl.templateId);
       setRuleDraft({
         name: tpl.name,
         startHHMM: tpl.suggestedTimeWindow.startHHMM,
         endHHMM: tpl.suggestedTimeWindow.endHHMM,
         notifyFromHHMM: tpl.suggestedTimeWindow.notifyFromHHMM ?? '',
-        minTempC: c.minTempC !== undefined && c.minTempC !== null ? String(c.minTempC) : '',
-        maxTempC: c.maxTempC !== undefined && c.maxTempC !== null ? String(c.maxTempC) : '',
-        minPrecipProbPct:
-          c.minPrecipProbPct !== undefined && c.minPrecipProbPct !== null
-            ? String(c.minPrecipProbPct)
-            : '',
-        maxWindKmh:
-          c.maxWindKmh !== undefined && c.maxWindKmh !== null ? String(c.maxWindKmh) : '',
-        maxGustKmh:
-          c.maxGustKmh !== undefined && c.maxGustKmh !== null ? String(c.maxGustKmh) : '',
-        maxCloudCoverPct:
-          c.maxCloudCoverPct !== undefined && c.maxCloudCoverPct !== null
-            ? String(c.maxCloudCoverPct)
-            : '',
-        maxWaveM: c.maxWaveM !== undefined && c.maxWaveM !== null ? String(c.maxWaveM) : '',
-        maxKpIndex:
-          c.maxKpIndex !== undefined && c.maxKpIndex !== null ? String(c.maxKpIndex) : '',
+        minTempC: fmtVal(c.minTempC, (n) => convertTemperature(n, units.temperature)),
+        maxTempC: fmtVal(c.maxTempC, (n) => convertTemperature(n, units.temperature)),
+        minPrecipProbPct: fmtVal(c.minPrecipProbPct),
+        maxWindKmh: fmtVal(c.maxWindKmh, (n) => convertWindSpeed(n, units.wind)),
+        maxGustKmh: fmtVal(c.maxGustKmh, (n) => convertWindSpeed(n, units.wind)),
+        maxCloudCoverPct: fmtVal(c.maxCloudCoverPct),
+        maxWaveM: fmtVal(c.maxWaveM, (n) => convertWaveHeight(n, units.wave)),
+        maxKpIndex: fmtVal(c.maxKpIndex),
         customTitle: tpl.suggestedTitle,
         customMessage: tpl.suggestedMessage,
       });
 
+      setEnabledRuleFields({
+        minTempC: c.minTempC !== undefined && c.minTempC !== null,
+        maxTempC: c.maxTempC !== undefined && c.maxTempC !== null,
+        minPrecipProbPct: c.minPrecipProbPct !== undefined && c.minPrecipProbPct !== null,
+        maxWindKmh: c.maxWindKmh !== undefined && c.maxWindKmh !== null,
+        maxGustKmh: c.maxGustKmh !== undefined && c.maxGustKmh !== null,
+        maxCloudCoverPct: c.maxCloudCoverPct !== undefined && c.maxCloudCoverPct !== null,
+        maxWaveM: c.maxWaveM !== undefined && c.maxWaveM !== null,
+        maxKpIndex: c.maxKpIndex !== undefined && c.maxKpIndex !== null,
+      });
+
+      setIsAlertBuilderOpen(true);
       setStatusFeedback(`Template "${tpl.name}" carregado no construtor para personalização.`);
       onToast?.({
         type: 'info',
         title: 'Template carregado como guia',
-        message: 'Revise os limites e horários abaixo e clique em Salvar Regra de Alerta.',
+        message: 'Revise os parâmetros marcados abaixo e clique em Salvar Regra de Alerta.',
       });
     },
-    [onToast],
+    [onToast, units.temperature, units.wave, units.wind],
   );
 
   const handleSaveCustomRule = useCallback(
@@ -421,15 +501,37 @@ export function SettingsTab({
       event.preventDefault();
       void safeAction(
         async () => {
+          const readNum = (key: RuleConditionKey, raw: string) =>
+            enabledRuleFields[key] ? parseOptionalInputNumber(raw) : null;
+
+          const minTempRaw = readNum('minTempC', ruleDraft.minTempC);
+          const maxTempRaw = readNum('maxTempC', ruleDraft.maxTempC);
+          const maxWindRaw = readNum('maxWindKmh', ruleDraft.maxWindKmh);
+          const maxGustRaw = readNum('maxGustKmh', ruleDraft.maxGustKmh);
+          const maxWaveRaw = readNum('maxWaveM', ruleDraft.maxWaveM);
+
           const conditions: CustomNotificationConditions = {
-            minTempC: parseOptionalInputNumber(ruleDraft.minTempC),
-            maxTempC: parseOptionalInputNumber(ruleDraft.maxTempC),
-            minPrecipProbPct: parseOptionalInputNumber(ruleDraft.minPrecipProbPct),
-            maxWindKmh: parseOptionalInputNumber(ruleDraft.maxWindKmh),
-            maxGustKmh: parseOptionalInputNumber(ruleDraft.maxGustKmh),
-            maxCloudCoverPct: parseOptionalInputNumber(ruleDraft.maxCloudCoverPct),
-            maxWaveM: parseOptionalInputNumber(ruleDraft.maxWaveM),
-            maxKpIndex: parseOptionalInputNumber(ruleDraft.maxKpIndex),
+            minTempC:
+              minTempRaw !== null
+                ? Number(temperatureToC(minTempRaw, units.temperature).toFixed(1))
+                : null,
+            maxTempC:
+              maxTempRaw !== null
+                ? Number(temperatureToC(maxTempRaw, units.temperature).toFixed(1))
+                : null,
+            minPrecipProbPct: readNum('minPrecipProbPct', ruleDraft.minPrecipProbPct),
+            maxWindKmh:
+              maxWindRaw !== null
+                ? Number(windSpeedToKmh(maxWindRaw, units.wind).toFixed(1))
+                : null,
+            maxGustKmh:
+              maxGustRaw !== null
+                ? Number(windSpeedToKmh(maxGustRaw, units.wind).toFixed(1))
+                : null,
+            maxCloudCoverPct: readNum('maxCloudCoverPct', ruleDraft.maxCloudCoverPct),
+            maxWaveM:
+              maxWaveRaw !== null ? Number(waveHeightToM(maxWaveRaw, units.wave).toFixed(2)) : null,
+            maxKpIndex: readNum('maxKpIndex', ruleDraft.maxKpIndex),
           };
 
           const resolvedName =
@@ -459,6 +561,7 @@ export function SettingsTab({
           });
 
           setRuleDraft(INITIAL_RULE_DRAFT);
+          setEnabledRuleFields(DEFAULT_ENABLED_RULE_FIELDS);
           setActiveTemplateId(null);
           setStatusFeedback(`Regra "${newRule.name}" salva com sucesso.`);
 
@@ -476,7 +579,17 @@ export function SettingsTab({
         },
       );
     },
-    [onErrorLog, onToast, persistPrefs, prefs, ruleDraft],
+    [
+      enabledRuleFields,
+      onErrorLog,
+      onToast,
+      persistPrefs,
+      prefs,
+      ruleDraft,
+      units.temperature,
+      units.wave,
+      units.wind,
+    ],
   );
 
   const handleToggleRuleEnabled = useCallback(
@@ -625,22 +738,21 @@ export function SettingsTab({
   return (
     <div
       data-testid="settings-tab"
-      className="mx-auto max-w-6xl space-y-6 pb-10 text-slate-900 dark:text-slate-100"
+      className="mx-auto max-w-6xl space-y-4 pb-10 text-slate-900 dark:text-slate-100"
     >
-      {/* Cabeçalho da Central */}
-      <header className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm dark:border-slate-800 dark:bg-slate-900">
-        <div className="flex flex-wrap items-center justify-between gap-4">
+      {/* Cabeçalho Compacto da Central */}
+      <header className="rounded-2xl border border-slate-200 bg-white p-4 sm:p-5 shadow-sm dark:border-slate-800 dark:bg-slate-900">
+        <div className="flex flex-wrap items-center justify-between gap-3">
           <div className="flex items-start gap-3">
             <div className="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl bg-sky-100 text-sky-700 dark:bg-sky-950/70 dark:text-sky-300">
-              <Settings className="h-6 w-6" aria-hidden="true" />
+              <Settings className="h-5 w-5" aria-hidden="true" />
             </div>
             <div>
               <h1 className="text-lg font-bold tracking-tight text-slate-900 dark:text-white sm:text-xl">
-                Central de Configurações, Alertas &amp; Janelas Horárias
+                Configurações Modulares &amp; Alertas
               </h1>
-              <p className="mt-0.5 text-xs text-slate-600 dark:text-slate-400 sm:text-sm">
-                Controle 100% opt-in sobre notificações Android/Web, janelas horárias permitidas,
-                templates operacionais, GPS em segundo plano e limites de decisão.
+              <p className="mt-0.5 text-xs text-slate-600 dark:text-slate-400">
+                Abra apenas os módulos desejados: escalas globais, permissões, notificações opt-in e limiares opcionais.
               </p>
             </div>
           </div>
@@ -656,29 +768,177 @@ export function SettingsTab({
         {statusFeedback && (
           <div
             role="status"
-            className="mt-3 rounded-xl border border-sky-200 bg-sky-50/80 px-3.5 py-2.5 text-xs font-medium text-sky-900 dark:border-sky-800/60 dark:bg-sky-950/40 dark:text-sky-200"
+            className="mt-3 rounded-xl border border-sky-200 bg-sky-50/80 px-3.5 py-2 text-xs font-medium text-sky-900 dark:border-sky-800/60 dark:bg-sky-950/40 dark:text-sky-200"
           >
             {statusFeedback}
           </div>
         )}
       </header>
 
-      {/* SECTION 1 — Permissão Geral & Eventos Extremos Automáticos */}
-      <section
-        aria-labelledby="section-general-notifications"
-        className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm dark:border-slate-800 dark:bg-slate-900"
-      >
-        <div className="flex items-center gap-2.5 border-b border-slate-100 pb-3 dark:border-slate-800">
-          <BellRing className="h-5 w-5 text-sky-600 dark:text-sky-400" aria-hidden="true" />
-          <h2
-            id="section-general-notifications"
-            className="text-base font-bold text-slate-900 dark:text-white"
+      {/* MÓDULO 0 — Unidades & Escalas de Exibição */}
+      <CollapsibleModule
+        title="Unidades & Escalas de Exibição"
+        subtitle={`Ativo: ${getWindUnitLabel(units.wind)} · ${getTempUnitLabel(units.temperature)} · ${getWaveUnitLabel(units.wave)}`}
+        icon={<Gauge className="h-4 w-4 text-sky-600 dark:text-sky-400" />}
+        defaultOpen={true}
+        keepMounted={true}
+        hideIconStyle="eye"
+        testId="settings-units-module"
+        headerActions={
+          <button
+            type="button"
+            data-testid="reset-units-btn"
+            onClick={resetUnits}
+            className="inline-flex min-h-[44px] items-center gap-1 rounded-xl border border-slate-200 bg-slate-50 px-2.5 py-1 text-[11px] font-semibold text-slate-700 hover:bg-slate-100 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-200"
+            title="Restaurar unidades métricas padrão"
           >
-            1. Permissão Geral &amp; Eventos Extremos Automáticos
-          </h2>
-        </div>
+            <RotateCcw className="h-3.5 w-3.5" aria-hidden="true" />
+            <span className="hidden sm:inline">Padrão</span>
+          </button>
+        }
+      >
+        <div className="grid grid-cols-1 gap-4 md:grid-cols-2 lg:grid-cols-3">
+          {/* Vento / Rajadas */}
+          <div className="space-y-1.5">
+            <span className="text-xs font-bold text-slate-700 dark:text-slate-300">
+              Velocidade do Vento &amp; Correntes
+            </span>
+            <div className="grid grid-cols-4 gap-1.5">
+              {(
+                [
+                  { id: 'kmh', label: 'km/h' },
+                  { id: 'ms', label: 'm/s' },
+                  { id: 'kt', label: 'Nós (kt)' },
+                  { id: 'mph', label: 'mph' },
+                ] as ReadonlyArray<{ id: WindSpeedUnit; label: string }>
+              ).map((opt) => (
+                <button
+                  key={opt.id}
+                  type="button"
+                  data-testid={`unit-wind-${opt.id}`}
+                  aria-pressed={units.wind === opt.id}
+                  onClick={() => setWindUnit(opt.id)}
+                  className={`min-h-[44px] rounded-xl border px-2 py-1.5 text-xs font-bold transition ${
+                    units.wind === opt.id
+                      ? 'border-sky-600 bg-sky-600 text-white shadow-sm'
+                      : 'border-slate-200 bg-slate-50 text-slate-700 hover:bg-sky-50 dark:border-slate-700 dark:bg-slate-950 dark:text-slate-200'
+                  }`}
+                >
+                  {opt.label}
+                </button>
+              ))}
+            </div>
+          </div>
 
-        <div className="mt-4 space-y-4">
+          {/* Temperatura */}
+          <div className="space-y-1.5">
+            <span className="text-xs font-bold text-slate-700 dark:text-slate-300">
+              Temperatura do Ar &amp; Orvalho
+            </span>
+            <div className="grid grid-cols-2 gap-1.5">
+              {(
+                [
+                  { id: 'c', label: 'Celsius (°C)' },
+                  { id: 'f', label: 'Fahrenheit (°F)' },
+                ] as ReadonlyArray<{ id: TemperatureUnit; label: string }>
+              ).map((opt) => (
+                <button
+                  key={opt.id}
+                  type="button"
+                  data-testid={`unit-temp-${opt.id}`}
+                  aria-pressed={units.temperature === opt.id}
+                  onClick={() => setTemperatureUnit(opt.id)}
+                  className={`min-h-[44px] rounded-xl border px-2 py-1.5 text-xs font-bold transition ${
+                    units.temperature === opt.id
+                      ? 'border-sky-600 bg-sky-600 text-white shadow-sm'
+                      : 'border-slate-200 bg-slate-50 text-slate-700 hover:bg-sky-50 dark:border-slate-700 dark:bg-slate-950 dark:text-slate-200'
+                  }`}
+                >
+                  {opt.label}
+                </button>
+              ))}
+            </div>
+          </div>
+
+          {/* Ondas, Pressão e Precipitação */}
+          <div className="space-y-1.5">
+            <span className="text-xs font-bold text-slate-700 dark:text-slate-300">
+              Ondas, Pressão &amp; Chuva
+            </span>
+            <div className="grid grid-cols-3 gap-1.5">
+              <div className="flex rounded-xl border border-slate-200 dark:border-slate-700 overflow-hidden">
+                {(['m', 'ft'] as ReadonlyArray<WaveHeightUnit>).map((u) => (
+                  <button
+                    key={u}
+                    type="button"
+                    data-testid={`unit-wave-${u}`}
+                    aria-pressed={units.wave === u}
+                    onClick={() => setWaveUnit(u)}
+                    className={`min-h-[44px] flex-1 text-xs font-bold ${
+                      units.wave === u
+                        ? 'bg-sky-600 text-white'
+                        : 'bg-slate-50 dark:bg-slate-950 text-slate-700 dark:text-slate-200'
+                    }`}
+                  >
+                    {u}
+                  </button>
+                ))}
+              </div>
+
+              <div className="flex rounded-xl border border-slate-200 dark:border-slate-700 overflow-hidden">
+                {(['hpa', 'inhg'] as ReadonlyArray<PressureUnit>).map((u) => (
+                  <button
+                    key={u}
+                    type="button"
+                    data-testid={`unit-pressure-${u}`}
+                    aria-pressed={units.pressure === u}
+                    onClick={() => setPressureUnit(u)}
+                    className={`min-h-[44px] flex-1 text-[11px] font-bold ${
+                      units.pressure === u
+                        ? 'bg-sky-600 text-white'
+                        : 'bg-slate-50 dark:bg-slate-950 text-slate-700 dark:text-slate-200'
+                    }`}
+                  >
+                    {u === 'hpa' ? 'hPa' : 'inHg'}
+                  </button>
+                ))}
+              </div>
+
+              <div className="flex rounded-xl border border-slate-200 dark:border-slate-700 overflow-hidden">
+                {(['mm', 'in'] as ReadonlyArray<PrecipitationUnit>).map((u) => (
+                  <button
+                    key={u}
+                    type="button"
+                    data-testid={`unit-precip-${u}`}
+                    aria-pressed={units.precipitation === u}
+                    onClick={() => setPrecipitationUnit(u)}
+                    className={`min-h-[44px] flex-1 text-xs font-bold ${
+                      units.precipitation === u
+                        ? 'bg-sky-600 text-white'
+                        : 'bg-slate-50 dark:bg-slate-950 text-slate-700 dark:text-slate-200'
+                    }`}
+                  >
+                    {u}
+                  </button>
+                ))}
+              </div>
+            </div>
+          </div>
+        </div>
+      </CollapsibleModule>
+
+      {/* MÓDULO 1 — Permissões Gerais, Notificações, GPS & Aparência */}
+      <CollapsibleModule
+        title="1. Permissões Gerais, Notificações & Sensores"
+        subtitle="Chave opt-in de alertas, janela de silêncio, eventos extremos, GPS Android 14+ e tema"
+        icon={<BellRing className="h-4 w-4 text-sky-600 dark:text-sky-400" />}
+        defaultOpen={false}
+        keepMounted={true}
+        hideIconStyle="eye"
+        testId="settings-permissions-module"
+        badge={prefs.masterEnabled ? 'Alertas ON' : 'Alertas OFF'}
+      >
+        <div className="space-y-4">
           {/* Master Opt-in Switch */}
           <div className="flex flex-wrap items-center justify-between gap-4 rounded-xl border border-slate-200 bg-slate-50/70 p-4 dark:border-slate-800 dark:bg-slate-950/60">
             <div className="max-w-xl">
@@ -822,32 +1082,96 @@ export function SettingsTab({
               </label>
             </div>
           </div>
-        </div>
-      </section>
 
-      {/* SECTION 2 — Templates Guia (3 Sugestões Prontas) */}
-      <section
-        aria-labelledby="section-guide-templates"
-        className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm dark:border-slate-800 dark:bg-slate-900"
-      >
-        <div className="flex flex-wrap items-center justify-between gap-2 border-b border-slate-100 pb-3 dark:border-slate-800">
-          <div className="flex items-center gap-2.5">
-            <Sparkles className="h-5 w-5 text-indigo-600 dark:text-indigo-400" aria-hidden="true" />
-            <h2
-              id="section-guide-templates"
-              className="text-base font-bold text-slate-900 dark:text-white"
-            >
-              2. Templates Guia (3 Sugestões Prontas — Não Ativas por Padrão)
-            </h2>
+          {/* Permissões GPS Android 14+ & Tema Visual */}
+          <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
+            <div className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-slate-200 bg-slate-50/70 p-4 dark:border-slate-800 dark:bg-slate-950/60">
+              <div className="max-w-md">
+                <div className="flex items-center gap-2">
+                  <Navigation
+                    className="h-4 w-4 text-sky-600 dark:text-sky-400"
+                    aria-hidden="true"
+                  />
+                  <h3 className="text-sm font-semibold text-slate-900 dark:text-slate-100">
+                    GPS em Segundo Plano (Android 14+ Foreground Service)
+                  </h3>
+                </div>
+                <p className="mt-1 text-xs text-slate-600 dark:text-slate-400">
+                  Mantém gravação contínua de rota com filtro estrito de acurácia &le; 20 m.
+                  Altitude topográfica permanece estritamente DEM Open-Meteo.
+                </p>
+              </div>
+
+              <button
+                type="button"
+                role="switch"
+                aria-checked={bgGpsConsent}
+                data-testid="background-gps-consent-toggle"
+                onClick={handleToggleBackgroundGpsConsent}
+                className={`inline-flex min-h-[44px] min-w-[128px] items-center justify-center rounded-xl px-4 py-2 text-xs font-bold transition ${
+                  bgGpsConsent
+                    ? 'bg-sky-600 text-white hover:bg-sky-700'
+                    : 'border border-slate-300 bg-white text-slate-700 hover:bg-slate-100 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-200'
+                }`}
+              >
+                {bgGpsConsent ? 'Permitido' : 'Apenas Tela Ativa'}
+              </button>
+            </div>
+
+            <div className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-slate-200 bg-slate-50/70 p-4 dark:border-slate-800 dark:bg-slate-950/60">
+              <div>
+                <div className="flex items-center gap-2">
+                  {activeTheme === 'dark' ? (
+                    <Moon className="h-4 w-4 text-indigo-400" aria-hidden="true" />
+                  ) : (
+                    <Sun className="h-4 w-4 text-amber-500" aria-hidden="true" />
+                  )}
+                  <h3 className="text-sm font-semibold text-slate-900 dark:text-slate-100">
+                    Tema Visual da Interface
+                  </h3>
+                </div>
+                <p className="mt-1 text-xs text-slate-600 dark:text-slate-400">
+                  Alterne entre alto contraste diurno (Claro) e preservação noturna (Escuro).
+                </p>
+              </div>
+
+              <button
+                type="button"
+                data-testid="settings-theme-toggle"
+                onClick={handleThemeSwitch}
+                className="inline-flex min-h-[44px] items-center justify-center gap-2 rounded-xl border border-slate-300 bg-white px-4 py-2 text-xs font-bold text-slate-800 shadow-sm transition hover:bg-slate-100 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-100 dark:hover:bg-slate-800"
+              >
+                {activeTheme === 'dark' ? (
+                  <>
+                    <Sun className="h-4 w-4 text-amber-400" aria-hidden="true" />
+                    Mudar para Tema Claro
+                  </>
+                ) : (
+                  <>
+                    <Moon className="h-4 w-4 text-indigo-600" aria-hidden="true" />
+                    Mudar para Tema Escuro
+                  </>
+                )}
+              </button>
+            </div>
           </div>
-          <span className="text-xs text-slate-500 dark:text-slate-400">
-            Escolha um modelo para preencher o construtor abaixo e ajustar livremente
-          </span>
         </div>
+      </CollapsibleModule>
 
-        <div className="mt-4 grid grid-cols-1 gap-4 lg:grid-cols-3">
+      {/* MÓDULO 2 — Templates Guia (3 Sugestões Prontas) */}
+      <CollapsibleModule
+        title="2. Templates Guia (3 Sugestões Prontas)"
+        subtitle="Não ativos por padrão — clique para preencher o construtor com os parâmetros sugeridos"
+        icon={<Sparkles className="h-4 w-4 text-indigo-600 dark:text-indigo-400" />}
+        defaultOpen={false}
+        keepMounted={true}
+        hideIconStyle="eye"
+        testId="settings-templates-module"
+        badge={`${NOTIFICATION_RULE_TEMPLATES.length}`}
+      >
+        <div className="grid grid-cols-1 gap-4 lg:grid-cols-3">
           {NOTIFICATION_RULE_TEMPLATES.map((tpl) => {
-            const chips = formatRuleConditionChips(tpl.suggestedConditions);
+            const chips = formatRuleConditionChips(tpl.suggestedConditions, units);
             const isSelected = activeTemplateId === tpl.templateId;
             return (
               <article
@@ -901,27 +1225,23 @@ export function SettingsTab({
             );
           })}
         </div>
-      </section>
+      </CollapsibleModule>
 
-      {/* SECTION 3 — Construtor de Alerta Personalizado + Janela Horária */}
-      <section
-        aria-labelledby="section-custom-alert-builder"
-        className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm dark:border-slate-800 dark:bg-slate-900"
+      {/* MÓDULO 3 — Construtor de Alerta Personalizado (com Checkboxes Opcionais) */}
+      <CollapsibleModule
+        title="3. Construtor de Alerta Personalizado & Janela Horária"
+        subtitle="Marque apenas os parâmetros que deseja monitorar (itens desmarcados são ignorados)"
+        icon={<Plus className="h-4 w-4 text-emerald-600 dark:text-emerald-400" />}
+        isOpen={isAlertBuilderOpen}
+        onOpenChange={setIsAlertBuilderOpen}
+        keepMounted={true}
+        hideIconStyle="eye"
+        testId="settings-alert-builder-module"
       >
-        <div className="flex items-center gap-2.5 border-b border-slate-100 pb-3 dark:border-slate-800">
-          <Plus className="h-5 w-5 text-emerald-600 dark:text-emerald-400" aria-hidden="true" />
-          <h2
-            id="section-custom-alert-builder"
-            className="text-base font-bold text-slate-900 dark:text-white"
-          >
-            3. Construtor de Alerta Personalizado &amp; Janela Horária
-          </h2>
-        </div>
-
         <form
           data-testid="custom-alert-form"
           onSubmit={handleSaveCustomRule}
-          className="mt-4 space-y-4"
+          className="space-y-4"
         >
           {/* Nome + Janela Horária da Regra */}
           <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-4">
@@ -971,128 +1291,135 @@ export function SettingsTab({
             </label>
           </div>
 
-          {/* Limiares Meteorológicos, Oceanográficos e Geomagnéticos */}
+          {/* Limiares Meteorológicos, Oceanográficos e Geomagnéticos (com checkboxes) */}
           <div>
             <p className="mb-2 text-xs font-semibold text-slate-700 dark:text-slate-300">
-              Limiares de Disparo (preencha apenas as variáveis que deseja monitorar)
+              Parâmetros Monitorados (marque a caixinha para ativar cada condição):
             </p>
-            <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
-              <label className="block text-xs font-medium text-slate-700 dark:text-slate-300">
-                Temp Mín (°C)
-                <input
-                  type="number"
-                  step="0.5"
-                  data-testid="rule-min-temp"
-                  placeholder="Ex.: 14"
-                  value={ruleDraft.minTempC}
-                  onChange={(e) => setRuleDraft((d) => ({ ...d, minTempC: e.target.value }))}
-                  className={`mt-1 ${inputBaseClass}`}
-                />
-              </label>
-
-              <label className="block text-xs font-medium text-slate-700 dark:text-slate-300">
-                Temp Máx (°C)
-                <input
-                  type="number"
-                  step="0.5"
-                  data-testid="rule-max-temp"
-                  placeholder="Ex.: 32"
-                  value={ruleDraft.maxTempC}
-                  onChange={(e) => setRuleDraft((d) => ({ ...d, maxTempC: e.target.value }))}
-                  className={`mt-1 ${inputBaseClass}`}
-                />
-              </label>
-
-              <label className="block text-xs font-medium text-slate-700 dark:text-slate-300">
-                Prob. Chuva (%)
-                <input
-                  type="number"
-                  step="1"
-                  min="0"
-                  max="100"
-                  data-testid="rule-min-precip-prob"
-                  placeholder="Ex.: 50"
-                  value={ruleDraft.minPrecipProbPct}
-                  onChange={(e) =>
-                    setRuleDraft((d) => ({ ...d, minPrecipProbPct: e.target.value }))
-                  }
-                  className={`mt-1 ${inputBaseClass}`}
-                />
-              </label>
-
-              <label className="block text-xs font-medium text-slate-700 dark:text-slate-300">
-                Vento Máx (km/h)
-                <input
-                  type="number"
-                  step="1"
-                  min="0"
-                  data-testid="rule-max-wind"
-                  placeholder="Ex.: 28"
-                  value={ruleDraft.maxWindKmh}
-                  onChange={(e) => setRuleDraft((d) => ({ ...d, maxWindKmh: e.target.value }))}
-                  className={`mt-1 ${inputBaseClass}`}
-                />
-              </label>
-
-              <label className="block text-xs font-medium text-slate-700 dark:text-slate-300">
-                Rajada Máx (km/h)
-                <input
-                  type="number"
-                  step="1"
-                  min="0"
-                  data-testid="rule-max-gust"
-                  placeholder="Ex.: 45"
-                  value={ruleDraft.maxGustKmh}
-                  onChange={(e) => setRuleDraft((d) => ({ ...d, maxGustKmh: e.target.value }))}
-                  className={`mt-1 ${inputBaseClass}`}
-                />
-              </label>
-
-              <label className="block text-xs font-medium text-slate-700 dark:text-slate-300">
-                Nebulosidade (%)
-                <input
-                  type="number"
-                  step="1"
-                  min="0"
-                  max="100"
-                  data-testid="rule-max-cloud"
-                  placeholder="Ex.: 85"
-                  value={ruleDraft.maxCloudCoverPct}
-                  onChange={(e) =>
-                    setRuleDraft((d) => ({ ...d, maxCloudCoverPct: e.target.value }))
-                  }
-                  className={`mt-1 ${inputBaseClass}`}
-                />
-              </label>
-
-              <label className="block text-xs font-medium text-slate-700 dark:text-slate-300">
-                Onda Máx (m)
-                <input
-                  type="number"
-                  step="0.1"
-                  min="0"
-                  data-testid="rule-max-wave"
-                  placeholder="Ex.: 1.8"
-                  value={ruleDraft.maxWaveM}
-                  onChange={(e) => setRuleDraft((d) => ({ ...d, maxWaveM: e.target.value }))}
-                  className={`mt-1 ${inputBaseClass}`}
-                />
-              </label>
-
-              <label className="block text-xs font-medium text-slate-700 dark:text-slate-300">
-                Kp Máx (0–9)
-                <input
-                  type="number"
-                  step="0.5"
-                  min="0"
-                  max="9"
-                  data-testid="rule-max-kp"
-                  placeholder="Ex.: 4.5"
-                  value={ruleDraft.maxKpIndex}
-                  onChange={(e) => setRuleDraft((d) => ({ ...d, maxKpIndex: e.target.value }))}
-                  className={`mt-1 ${inputBaseClass}`}
-                />
-              </label>
+            <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-4">
+              {(
+                [
+                  {
+                    key: 'minTempC',
+                    label: `Temp Mín (${getTempUnitLabel(units.temperature)})`,
+                    testId: 'rule-min-temp',
+                    step: '0.5',
+                    placeholder: units.temperature === 'f' ? 'Ex.: 57' : 'Ex.: 14',
+                  },
+                  {
+                    key: 'maxTempC',
+                    label: `Temp Máx (${getTempUnitLabel(units.temperature)})`,
+                    testId: 'rule-max-temp',
+                    step: '0.5',
+                    placeholder: units.temperature === 'f' ? 'Ex.: 90' : 'Ex.: 32',
+                  },
+                  {
+                    key: 'minPrecipProbPct',
+                    label: 'Prob. Chuva (%)',
+                    testId: 'rule-min-precip-prob',
+                    step: '1',
+                    min: '0',
+                    max: '100',
+                    placeholder: 'Ex.: 50',
+                  },
+                  {
+                    key: 'maxWindKmh',
+                    label: `Vento Máx (${getWindUnitLabel(units.wind)})`,
+                    testId: 'rule-max-wind',
+                    step: '1',
+                    min: '0',
+                    placeholder: 'Ex.: 28',
+                  },
+                  {
+                    key: 'maxGustKmh',
+                    label: `Rajada Máx (${getWindUnitLabel(units.wind)})`,
+                    testId: 'rule-max-gust',
+                    step: '1',
+                    min: '0',
+                    placeholder: 'Ex.: 45',
+                  },
+                  {
+                    key: 'maxCloudCoverPct',
+                    label: 'Nebulosidade (%)',
+                    testId: 'rule-max-cloud',
+                    step: '1',
+                    min: '0',
+                    max: '100',
+                    placeholder: 'Ex.: 85',
+                  },
+                  {
+                    key: 'maxWaveM',
+                    label: `Onda Máx (${getWaveUnitLabel(units.wave)})`,
+                    testId: 'rule-max-wave',
+                    step: '0.1',
+                    min: '0',
+                    placeholder: 'Ex.: 1.8',
+                  },
+                  {
+                    key: 'maxKpIndex',
+                    label: 'Kp Máx (0–9)',
+                    testId: 'rule-max-kp',
+                    step: '0.5',
+                    min: '0',
+                    max: '9',
+                    placeholder: 'Ex.: 4.5',
+                  },
+                ] as ReadonlyArray<{
+                  key: RuleConditionKey;
+                  label: string;
+                  testId: string;
+                  step: string;
+                  min?: string;
+                  max?: string;
+                  placeholder: string;
+                }>
+              ).map((field) => {
+                const isChecked = enabledRuleFields[field.key];
+                return (
+                  <div
+                    key={field.key}
+                    className={`rounded-xl border p-2.5 transition ${
+                      isChecked
+                        ? 'border-sky-300 bg-sky-50/40 dark:border-sky-700/70 dark:bg-sky-950/20'
+                        : 'border-slate-200 bg-slate-50/60 dark:border-slate-800 dark:bg-slate-950/40'
+                    }`}
+                  >
+                    <label className="flex items-center justify-between gap-2 text-xs font-medium text-slate-700 dark:text-slate-300 cursor-pointer">
+                      <span>{field.label}</span>
+                      <input
+                        type="checkbox"
+                        data-testid={`enable-${field.testId}`}
+                        checked={isChecked}
+                        onChange={(e) =>
+                          setEnabledRuleFields((prev) => ({
+                            ...prev,
+                            [field.key]: e.target.checked,
+                          }))
+                        }
+                        className="h-4 w-4 accent-sky-600 rounded"
+                      />
+                    </label>
+                    <input
+                      type="number"
+                      step={field.step}
+                      min={field.min}
+                      max={field.max}
+                      data-testid={field.testId}
+                      placeholder={field.placeholder}
+                      value={ruleDraft[field.key]}
+                      onChange={(e) => {
+                        const val = e.target.value;
+                        setRuleDraft((d) => ({ ...d, [field.key]: val }));
+                        setEnabledRuleFields((prev) => ({
+                          ...prev,
+                          [field.key]: val.trim().length > 0,
+                        }));
+                      }}
+                      className={`mt-1.5 ${inputBaseClass} ${!isChecked ? 'opacity-65' : ''}`}
+                    />
+                  </div>
+                );
+              })}
             </div>
           </div>
 
@@ -1126,8 +1453,7 @@ export function SettingsTab({
           <div className="flex flex-wrap items-center justify-between gap-3 pt-1">
             <p className="text-[11px] text-slate-500 dark:text-slate-400">
               Dica: Você pode usar tags dinâmicas como <code>{'{hour}'}</code>,{' '}
-              <code>{'{wind}'}</code>, <code>{'{wave}'}</code> e <code>{'{details}'}</code> no
-              título ou mensagem.
+              <code>{'{wind}'}</code>, <code>{'{wave}'}</code> e <code>{'{details}'}</code>.
             </p>
 
             <button
@@ -1140,190 +1466,114 @@ export function SettingsTab({
             </button>
           </div>
         </form>
+      </CollapsibleModule>
 
-        {/* Lista de Regras Salvas */}
-        <div className="mt-6 border-t border-slate-100 pt-4 dark:border-slate-800">
-          <h3 className="text-sm font-bold text-slate-900 dark:text-slate-100">
-            Regras Personalizadas Salvas ({prefs.rules.length})
-          </h3>
-
-          {prefs.rules.length === 0 ? (
-            <p className="mt-2 rounded-xl border border-dashed border-slate-300 p-4 text-xs text-slate-500 dark:border-slate-700 dark:text-slate-400">
-              Nenhuma regra personalizada cadastrada. Crie do zero acima ou clique em &ldquo;Usar
-              Template como Guia&rdquo; em uma das 3 sugestões.
-            </p>
-          ) : (
-            <ul data-testid="saved-rules-list" className="mt-3 space-y-3">
-              {prefs.rules.map((rule) => {
-                const chips = formatRuleConditionChips(rule.conditions);
-                return (
-                  <li
-                    key={rule.id}
-                    data-testid={`saved-rule-${rule.id}`}
-                    className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-slate-200 bg-slate-50/70 p-3.5 dark:border-slate-800 dark:bg-slate-950/60"
-                  >
-                    <div className="min-w-0 flex-1">
-                      <div className="flex flex-wrap items-center gap-2">
-                        <span className="text-sm font-bold text-slate-900 dark:text-slate-100">
-                          {rule.name}
-                        </span>
-                        <span
-                          className={`rounded-full px-2 py-0.5 text-[11px] font-semibold ${
-                            rule.enabled
-                              ? 'bg-emerald-100 text-emerald-800 dark:bg-emerald-950/70 dark:text-emerald-300'
-                              : 'bg-slate-200 text-slate-600 dark:bg-slate-800 dark:text-slate-400'
-                          }`}
-                        >
-                          {rule.enabled ? 'Ativa' : 'Pausada'}
-                        </span>
-                        <span className="rounded-md border border-slate-300 bg-white px-2 py-0.5 text-[11px] text-slate-700 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-300">
-                          Janela {rule.timeWindow.startHHMM}–{rule.timeWindow.endHHMM}
-                          {rule.timeWindow.notifyFromHHMM
-                            ? ` • Avisar das ${rule.timeWindow.notifyFromHHMM}`
-                            : ''}
-                        </span>
-                      </div>
-
-                      {chips.length > 0 && (
-                        <div className="mt-1.5 flex flex-wrap gap-1.5">
-                          {chips.map((chip) => (
-                            <span
-                              key={chip}
-                              className="rounded bg-sky-100/80 px-2 py-0.5 text-[11px] font-medium text-sky-900 dark:bg-sky-950/60 dark:text-sky-200"
-                            >
-                              {chip}
-                            </span>
-                          ))}
-                        </div>
-                      )}
-
-                      <p className="mt-1.5 truncate text-xs text-slate-600 dark:text-slate-400">
-                        <strong>{rule.customTitle}</strong>
-                        {rule.customMessage ? ` — ${rule.customMessage}` : ''}
-                      </p>
-                    </div>
-
-                    <div className="flex items-center gap-2">
-                      <button
-                        type="button"
-                        data-testid={`toggle-rule-${rule.id}`}
-                        onClick={() => handleToggleRuleEnabled(rule.id)}
-                        className="inline-flex min-h-[44px] items-center justify-center rounded-xl border border-slate-300 bg-white px-3 py-2 text-xs font-semibold text-slate-800 transition hover:bg-slate-100 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-200 dark:hover:bg-slate-800"
-                      >
-                        {rule.enabled ? 'Desativar' : 'Ativar'}
-                      </button>
-
-                      <button
-                        type="button"
-                        aria-label={`Excluir regra ${rule.name}`}
-                        data-testid={`delete-rule-${rule.id}`}
-                        onClick={() => handleDeleteRule(rule.id)}
-                        className="inline-flex min-h-[44px] min-w-[44px] items-center justify-center rounded-xl border border-rose-300 bg-rose-50 px-3 py-2 text-xs font-semibold text-rose-700 transition hover:bg-rose-100 dark:border-rose-800/70 dark:bg-rose-950/40 dark:text-rose-300 dark:hover:bg-rose-950/70"
-                      >
-                        <Trash2 className="h-4 w-4" aria-hidden="true" />
-                      </button>
-                    </div>
-                  </li>
-                );
-              })}
-            </ul>
-          )}
-        </div>
-      </section>
-
-      {/* SECTION 4 — Rastreamento GPS em Segundo Plano (Android 14+) & Scores Operacionais */}
-      <section
-        aria-labelledby="section-gps-and-scores"
-        className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm dark:border-slate-800 dark:bg-slate-900"
+      {/* MÓDULO 4 — Regras Personalizadas Salvas */}
+      <CollapsibleModule
+        title="4. Regras Personalizadas Salvas"
+        subtitle="Ative, pause ou remova alertas configurados para sua operação"
+        icon={<Bell className="h-4 w-4 text-emerald-600 dark:text-emerald-400" />}
+        defaultOpen={true}
+        keepMounted={true}
+        hideIconStyle="eye"
+        testId="settings-saved-rules-module"
+        badge={`${prefs.rules.length}`}
       >
-        <div className="flex items-center gap-2.5 border-b border-slate-100 pb-3 dark:border-slate-800">
-          <Sliders className="h-5 w-5 text-sky-600 dark:text-sky-400" aria-hidden="true" />
-          <h2
-            id="section-gps-and-scores"
-            className="text-base font-bold text-slate-900 dark:text-white"
-          >
-            4. Rastreamento GPS em Segundo Plano (Android 14+), Scores Operacionais &amp; Aparência
-          </h2>
-        </div>
+        {prefs.rules.length === 0 ? (
+          <p className="rounded-xl border border-dashed border-slate-300 p-4 text-xs text-slate-500 dark:border-slate-700 dark:text-slate-400">
+            Nenhuma regra personalizada cadastrada. Crie no Construtor acima ou escolha um dos 3
+            Templates Guia.
+          </p>
+        ) : (
+          <ul data-testid="saved-rules-list" className="space-y-3">
+            {prefs.rules.map((rule) => {
+              const chips = formatRuleConditionChips(rule.conditions, units);
+              return (
+                <li
+                  key={rule.id}
+                  data-testid={`saved-rule-${rule.id}`}
+                  className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-slate-200 bg-slate-50/70 p-3.5 dark:border-slate-800 dark:bg-slate-950/60"
+                >
+                  <div className="min-w-0 flex-1">
+                    <div className="flex flex-wrap items-center gap-2">
+                      <span className="text-sm font-bold text-slate-900 dark:text-slate-100">
+                        {rule.name}
+                      </span>
+                      <span
+                        className={`rounded-full px-2 py-0.5 text-[11px] font-semibold ${
+                          rule.enabled
+                            ? 'bg-emerald-100 text-emerald-800 dark:bg-emerald-950/70 dark:text-emerald-300'
+                            : 'bg-slate-200 text-slate-600 dark:bg-slate-800 dark:text-slate-400'
+                        }`}
+                      >
+                        {rule.enabled ? 'Ativa' : 'Pausada'}
+                      </span>
+                      <span className="rounded-md border border-slate-300 bg-white px-2 py-0.5 text-[11px] text-slate-700 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-300">
+                        Janela {rule.timeWindow.startHHMM}–{rule.timeWindow.endHHMM}
+                        {rule.timeWindow.notifyFromHHMM
+                          ? ` • Avisar das ${rule.timeWindow.notifyFromHHMM}`
+                          : ''}
+                      </span>
+                    </div>
 
-        <div className="mt-4 space-y-5">
-          {/* Sub-bloco 4.1: GPS em Segundo Plano + Tema */}
-          <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
-            <div className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-slate-200 bg-slate-50/70 p-4 dark:border-slate-800 dark:bg-slate-950/60">
-              <div className="max-w-md">
-                <div className="flex items-center gap-2">
-                  <Navigation
-                    className="h-4 w-4 text-sky-600 dark:text-sky-400"
-                    aria-hidden="true"
-                  />
-                  <h3 className="text-sm font-semibold text-slate-900 dark:text-slate-100">
-                    GPS em Segundo Plano (Android 14+ Foreground Service)
-                  </h3>
-                </div>
-                <p className="mt-1 text-xs text-slate-600 dark:text-slate-400">
-                  Mantém gravação contínua de rota com tela bloqueada/no bolso aplicando filtro
-                  estrito de acurácia &le; 20 m. Altitude topográfica permanece estritamente DEM
-                  Open-Meteo.
-                </p>
-              </div>
+                    {chips.length > 0 && (
+                      <div className="mt-1.5 flex flex-wrap gap-1.5">
+                        {chips.map((chip) => (
+                          <span
+                            key={chip}
+                            className="rounded bg-sky-100/80 px-2 py-0.5 text-[11px] font-medium text-sky-900 dark:bg-sky-950/60 dark:text-sky-200"
+                          >
+                            {chip}
+                          </span>
+                        ))}
+                      </div>
+                    )}
 
-              <button
-                type="button"
-                role="switch"
-                aria-checked={bgGpsConsent}
-                data-testid="background-gps-consent-toggle"
-                onClick={handleToggleBackgroundGpsConsent}
-                className={`inline-flex min-h-[44px] min-w-[128px] items-center justify-center rounded-xl px-4 py-2 text-xs font-bold transition ${
-                  bgGpsConsent
-                    ? 'bg-sky-600 text-white hover:bg-sky-700'
-                    : 'border border-slate-300 bg-white text-slate-700 hover:bg-slate-100 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-200'
-                }`}
-              >
-                {bgGpsConsent ? 'Permitido' : 'Apenas Tela Ativa'}
-              </button>
-            </div>
+                    <p className="mt-1.5 truncate text-xs text-slate-600 dark:text-slate-400">
+                      <strong>{rule.customTitle}</strong>
+                      {rule.customMessage ? ` — ${rule.customMessage}` : ''}
+                    </p>
+                  </div>
 
-            {/* Aparência / Tema */}
-            <div className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-slate-200 bg-slate-50/70 p-4 dark:border-slate-800 dark:bg-slate-950/60">
-              <div>
-                <div className="flex items-center gap-2">
-                  {activeTheme === 'dark' ? (
-                    <Moon className="h-4 w-4 text-indigo-400" aria-hidden="true" />
-                  ) : (
-                    <Sun className="h-4 w-4 text-amber-500" aria-hidden="true" />
-                  )}
-                  <h3 className="text-sm font-semibold text-slate-900 dark:text-slate-100">
-                    Tema Visual da Interface
-                  </h3>
-                </div>
-                <p className="mt-1 text-xs text-slate-600 dark:text-slate-400">
-                  Alterne entre alto contraste diurno sob sol forte (Claro) e preservação visual
-                  noturna (Escuro).
-                </p>
-              </div>
+                  <div className="flex items-center gap-2">
+                    <button
+                      type="button"
+                      data-testid={`toggle-rule-${rule.id}`}
+                      onClick={() => handleToggleRuleEnabled(rule.id)}
+                      className="inline-flex min-h-[44px] items-center justify-center rounded-xl border border-slate-300 bg-white px-3 py-2 text-xs font-semibold text-slate-800 transition hover:bg-slate-100 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-200 dark:hover:bg-slate-800"
+                    >
+                      {rule.enabled ? 'Desativar' : 'Ativar'}
+                    </button>
 
-              <button
-                type="button"
-                data-testid="settings-theme-toggle"
-                onClick={handleThemeSwitch}
-                className="inline-flex min-h-[44px] items-center justify-center gap-2 rounded-xl border border-slate-300 bg-white px-4 py-2 text-xs font-bold text-slate-800 shadow-sm transition hover:bg-slate-100 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-100 dark:hover:bg-slate-800"
-              >
-                {activeTheme === 'dark' ? (
-                  <>
-                    <Sun className="h-4 w-4 text-amber-400" aria-hidden="true" />
-                    Mudar para Tema Claro
-                  </>
-                ) : (
-                  <>
-                    <Moon className="h-4 w-4 text-indigo-600" aria-hidden="true" />
-                    Mudar para Tema Escuro
-                  </>
-                )}
-              </button>
-            </div>
-          </div>
+                    <button
+                      type="button"
+                      aria-label={`Excluir regra ${rule.name}`}
+                      data-testid={`delete-rule-${rule.id}`}
+                      onClick={() => handleDeleteRule(rule.id)}
+                      className="inline-flex min-h-[44px] min-w-[44px] items-center justify-center rounded-xl border border-rose-300 bg-rose-50 px-3 py-2 text-xs font-semibold text-rose-700 transition hover:bg-rose-100 dark:border-rose-800/70 dark:bg-rose-950/40 dark:text-rose-300 dark:hover:bg-rose-950/70"
+                    >
+                      <Trash2 className="h-4 w-4" aria-hidden="true" />
+                    </button>
+                  </div>
+                </li>
+              );
+            })}
+          </ul>
+        )}
+      </CollapsibleModule>
 
-          {/* Sub-bloco 4.2: Scores de Qualidade por Atividade */}
+      {/* MÓDULO 5 — Limiares Opcionais dos Scores & Janela Segura (168h) */}
+      <CollapsibleModule
+        title="5. Limiares Opcionais dos Scores & Janela Segura (168h)"
+        subtitle="Desmarque qualquer parâmetro para ignorá-lo nos scores de Campo, Navegação e Semáforo"
+        icon={<Sliders className="h-4 w-4 text-sky-600 dark:text-sky-400" />}
+        defaultOpen={false}
+        keepMounted={true}
+        hideIconStyle="eye"
+        testId="settings-scores-module"
+      >
+        <div className="space-y-5">
+          {/* Sub-bloco 5.1: Scores de Qualidade por Atividade */}
           <div className="rounded-xl border border-slate-200 p-4 dark:border-slate-800">
             <div className="flex flex-wrap items-center justify-between gap-2">
               <div className="flex items-center gap-2">
@@ -1346,209 +1596,236 @@ export function SettingsTab({
               {/* Campo Diário */}
               <div className="space-y-2 rounded-xl bg-slate-50/80 p-3.5 dark:bg-slate-950/60">
                 <p className="text-xs font-bold uppercase tracking-wide text-slate-600 dark:text-slate-400">
-                  Operação Diária &amp; Campo
+                  Operação Diária &amp; Campo (Opcional por item)
                 </p>
                 <div className="grid grid-cols-2 gap-2.5 sm:grid-cols-3">
-                  <label className="text-xs text-slate-700 dark:text-slate-300">
-                    Temp Ideal Mín (°C)
-                    <input
-                      type="number"
-                      value={qualityDraft.dailyField.idealMinTempC}
-                      onChange={(e) =>
-                        setQualityDraft((q) => ({
-                          ...q,
-                          dailyField: {
-                            ...q.dailyField,
-                            idealMinTempC: Number(e.target.value),
-                          },
-                        }))
-                      }
-                      className={`mt-1 ${inputBaseClass}`}
-                    />
-                  </label>
-                  <label className="text-xs text-slate-700 dark:text-slate-300">
-                    Temp Ideal Máx (°C)
-                    <input
-                      type="number"
-                      value={qualityDraft.dailyField.idealMaxTempC}
-                      onChange={(e) =>
-                        setQualityDraft((q) => ({
-                          ...q,
-                          dailyField: {
-                            ...q.dailyField,
-                            idealMaxTempC: Number(e.target.value),
-                          },
-                        }))
-                      }
-                      className={`mt-1 ${inputBaseClass}`}
-                    />
-                  </label>
-                  <label className="text-xs text-slate-700 dark:text-slate-300">
-                    Vento Máx (km/h)
-                    <input
-                      type="number"
-                      value={qualityDraft.dailyField.maxWindKmh}
-                      onChange={(e) =>
-                        setQualityDraft((q) => ({
-                          ...q,
-                          dailyField: {
-                            ...q.dailyField,
-                            maxWindKmh: Number(e.target.value),
-                          },
-                        }))
-                      }
-                      className={`mt-1 ${inputBaseClass}`}
-                    />
-                  </label>
-                  <label className="text-xs text-slate-700 dark:text-slate-300">
-                    Rajada Máx (km/h)
-                    <input
-                      type="number"
-                      value={qualityDraft.dailyField.maxGustKmh}
-                      onChange={(e) =>
-                        setQualityDraft((q) => ({
-                          ...q,
-                          dailyField: {
-                            ...q.dailyField,
-                            maxGustKmh: Number(e.target.value),
-                          },
-                        }))
-                      }
-                      className={`mt-1 ${inputBaseClass}`}
-                    />
-                  </label>
-                  <label className="text-xs text-slate-700 dark:text-slate-300">
-                    Prob. Chuva (%)
-                    <input
-                      type="number"
-                      value={qualityDraft.dailyField.maxPrecipProbPct}
-                      onChange={(e) =>
-                        setQualityDraft((q) => ({
-                          ...q,
-                          dailyField: {
-                            ...q.dailyField,
-                            maxPrecipProbPct: Number(e.target.value),
-                          },
-                        }))
-                      }
-                      className={`mt-1 ${inputBaseClass}`}
-                    />
-                  </label>
-                  <label className="text-xs text-slate-700 dark:text-slate-300">
-                    CAPE Máx (J/kg)
-                    <input
-                      type="number"
-                      step="50"
-                      value={qualityDraft.dailyField.maxCapeJkg}
-                      onChange={(e) =>
-                        setQualityDraft((q) => ({
-                          ...q,
-                          dailyField: {
-                            ...q.dailyField,
-                            maxCapeJkg: Number(e.target.value),
-                          },
-                        }))
-                      }
-                      className={`mt-1 ${inputBaseClass}`}
-                    />
-                  </label>
+                  {(
+                    [
+                      {
+                        key: 'idealMinTempC',
+                        label: `Temp Ideal Mín (${getTempUnitLabel(units.temperature)})`,
+                        display: Number(
+                          (
+                            convertTemperature(qualityDraft.dailyField.idealMinTempC, units.temperature) ??
+                            qualityDraft.dailyField.idealMinTempC
+                          ).toFixed(1),
+                        ),
+                        onChangeVal: (v: number) =>
+                          Number(temperatureToC(v, units.temperature).toFixed(1)),
+                      },
+                      {
+                        key: 'idealMaxTempC',
+                        label: `Temp Ideal Máx (${getTempUnitLabel(units.temperature)})`,
+                        display: Number(
+                          (
+                            convertTemperature(qualityDraft.dailyField.idealMaxTempC, units.temperature) ??
+                            qualityDraft.dailyField.idealMaxTempC
+                          ).toFixed(1),
+                        ),
+                        onChangeVal: (v: number) =>
+                          Number(temperatureToC(v, units.temperature).toFixed(1)),
+                      },
+                      {
+                        key: 'maxWindKmh',
+                        label: `Vento Máx (${getWindUnitLabel(units.wind)})`,
+                        display: Number(
+                          (
+                            convertWindSpeed(qualityDraft.dailyField.maxWindKmh, units.wind) ??
+                            qualityDraft.dailyField.maxWindKmh
+                          ).toFixed(1),
+                        ),
+                        onChangeVal: (v: number) => Number(windSpeedToKmh(v, units.wind).toFixed(1)),
+                      },
+                      {
+                        key: 'maxGustKmh',
+                        label: `Rajada Máx (${getWindUnitLabel(units.wind)})`,
+                        display: Number(
+                          (
+                            convertWindSpeed(qualityDraft.dailyField.maxGustKmh, units.wind) ??
+                            qualityDraft.dailyField.maxGustKmh
+                          ).toFixed(1),
+                        ),
+                        onChangeVal: (v: number) => Number(windSpeedToKmh(v, units.wind).toFixed(1)),
+                      },
+                      {
+                        key: 'maxPrecipProbPct',
+                        label: 'Prob. Chuva (%)',
+                        display: qualityDraft.dailyField.maxPrecipProbPct,
+                        onChangeVal: (v: number) => v,
+                      },
+                      {
+                        key: 'maxCapeJkg',
+                        label: 'CAPE Máx (J/kg)',
+                        step: 50,
+                        display: qualityDraft.dailyField.maxCapeJkg,
+                        onChangeVal: (v: number) => v,
+                      },
+                    ] as ReadonlyArray<{
+                      key: DailyFieldThresholdKey;
+                      label: string;
+                      step?: number;
+                      display: number;
+                      onChangeVal: (v: number) => number;
+                    }>
+                  ).map((item) => {
+                    const checked = qualityDraft.enabledDailyField?.[item.key] ?? true;
+                    return (
+                      <div key={item.key} className="text-xs text-slate-700 dark:text-slate-300">
+                        <label className="flex items-center justify-between gap-1.5 cursor-pointer">
+                          <span className="truncate">{item.label}</span>
+                          <input
+                            type="checkbox"
+                            data-testid={`toggle-daily-${item.key}`}
+                            checked={checked}
+                            onChange={(e) =>
+                              setQualityDraft((q) => ({
+                                ...q,
+                                enabledDailyField: {
+                                  ...(q.enabledDailyField ?? {}),
+                                  [item.key]: e.target.checked,
+                                },
+                              }))
+                            }
+                            className="h-4 w-4 accent-sky-600 rounded shrink-0"
+                          />
+                        </label>
+                        <input
+                          type="number"
+                          step={item.step ?? 1}
+                          disabled={!checked}
+                          value={item.display}
+                          onChange={(e) => {
+                            const num = Number(e.target.value);
+                            if (!Number.isFinite(num)) return;
+                            setQualityDraft((q) => ({
+                              ...q,
+                              dailyField: {
+                                ...q.dailyField,
+                                [item.key]: item.onChangeVal(num),
+                              },
+                            }));
+                          }}
+                          className={`mt-1 ${inputBaseClass} ${!checked ? 'opacity-45' : ''}`}
+                        />
+                      </div>
+                    );
+                  })}
                 </div>
               </div>
 
               {/* Navegação Costeira */}
               <div className="space-y-2 rounded-xl bg-slate-50/80 p-3.5 dark:bg-slate-950/60">
                 <p className="text-xs font-bold uppercase tracking-wide text-slate-600 dark:text-slate-400">
-                  Navegação Costeira
+                  Navegação Costeira (Opcional por item)
                 </p>
                 <div className="grid grid-cols-2 gap-2.5 sm:grid-cols-3">
-                  <label className="text-xs text-slate-700 dark:text-slate-300">
-                    Vento Máx (km/h)
-                    <input
-                      type="number"
-                      value={qualityDraft.coastalNavigation.maxWindKmh}
-                      onChange={(e) =>
-                        setQualityDraft((q) => ({
-                          ...q,
-                          coastalNavigation: {
-                            ...q.coastalNavigation,
-                            maxWindKmh: Number(e.target.value),
-                          },
-                        }))
-                      }
-                      className={`mt-1 ${inputBaseClass}`}
-                    />
-                  </label>
-                  <label className="text-xs text-slate-700 dark:text-slate-300">
-                    Rajada Máx (km/h)
-                    <input
-                      type="number"
-                      value={qualityDraft.coastalNavigation.maxGustKmh}
-                      onChange={(e) =>
-                        setQualityDraft((q) => ({
-                          ...q,
-                          coastalNavigation: {
-                            ...q.coastalNavigation,
-                            maxGustKmh: Number(e.target.value),
-                          },
-                        }))
-                      }
-                      className={`mt-1 ${inputBaseClass}`}
-                    />
-                  </label>
-                  <label className="text-xs text-slate-700 dark:text-slate-300">
-                    Onda Máx (m)
-                    <input
-                      type="number"
-                      step="0.1"
-                      value={qualityDraft.coastalNavigation.maxWaveM}
-                      onChange={(e) =>
-                        setQualityDraft((q) => ({
-                          ...q,
-                          coastalNavigation: {
-                            ...q.coastalNavigation,
-                            maxWaveM: Number(e.target.value),
-                          },
-                        }))
-                      }
-                      className={`mt-1 ${inputBaseClass}`}
-                    />
-                  </label>
-                  <label className="text-xs text-slate-700 dark:text-slate-300">
-                    Corrente Máx (km/h)
-                    <input
-                      type="number"
-                      step="0.1"
-                      value={qualityDraft.coastalNavigation.maxCurrentKmh}
-                      onChange={(e) =>
-                        setQualityDraft((q) => ({
-                          ...q,
-                          coastalNavigation: {
-                            ...q.coastalNavigation,
-                            maxCurrentKmh: Number(e.target.value),
-                          },
-                        }))
-                      }
-                      className={`mt-1 ${inputBaseClass}`}
-                    />
-                  </label>
-                  <label className="text-xs text-slate-700 dark:text-slate-300">
-                    Visib. Mín (km)
-                    <input
-                      type="number"
-                      step="0.5"
-                      value={qualityDraft.coastalNavigation.minVisibilityKm}
-                      onChange={(e) =>
-                        setQualityDraft((q) => ({
-                          ...q,
-                          coastalNavigation: {
-                            ...q.coastalNavigation,
-                            minVisibilityKm: Number(e.target.value),
-                          },
-                        }))
-                      }
-                      className={`mt-1 ${inputBaseClass}`}
-                    />
-                  </label>
+                  {(
+                    [
+                      {
+                        key: 'maxWindKmh',
+                        label: `Vento Máx (${getWindUnitLabel(units.wind)})`,
+                        display: Number(
+                          (
+                            convertWindSpeed(qualityDraft.coastalNavigation.maxWindKmh, units.wind) ??
+                            qualityDraft.coastalNavigation.maxWindKmh
+                          ).toFixed(1),
+                        ),
+                        onChangeVal: (v: number) => Number(windSpeedToKmh(v, units.wind).toFixed(1)),
+                      },
+                      {
+                        key: 'maxGustKmh',
+                        label: `Rajada Máx (${getWindUnitLabel(units.wind)})`,
+                        display: Number(
+                          (
+                            convertWindSpeed(qualityDraft.coastalNavigation.maxGustKmh, units.wind) ??
+                            qualityDraft.coastalNavigation.maxGustKmh
+                          ).toFixed(1),
+                        ),
+                        onChangeVal: (v: number) => Number(windSpeedToKmh(v, units.wind).toFixed(1)),
+                      },
+                      {
+                        key: 'maxWaveM',
+                        label: `Onda Máx (${getWaveUnitLabel(units.wave)})`,
+                        step: 0.1,
+                        display: Number(
+                          (
+                            convertWaveHeight(qualityDraft.coastalNavigation.maxWaveM, units.wave) ??
+                            qualityDraft.coastalNavigation.maxWaveM
+                          ).toFixed(1),
+                        ),
+                        onChangeVal: (v: number) => Number(waveHeightToM(v, units.wave).toFixed(2)),
+                      },
+                      {
+                        key: 'maxCurrentKmh',
+                        label: `Corrente (${getWindUnitLabel(units.wind)})`,
+                        step: 0.1,
+                        display: Number(
+                          (
+                            convertWindSpeed(
+                              qualityDraft.coastalNavigation.maxCurrentKmh,
+                              units.wind,
+                            ) ?? qualityDraft.coastalNavigation.maxCurrentKmh
+                          ).toFixed(1),
+                        ),
+                        onChangeVal: (v: number) => Number(windSpeedToKmh(v, units.wind).toFixed(2)),
+                      },
+                      {
+                        key: 'minVisibilityKm',
+                        label: 'Visib. Mín (km)',
+                        step: 0.5,
+                        display: qualityDraft.coastalNavigation.minVisibilityKm,
+                        onChangeVal: (v: number) => v,
+                      },
+                    ] as ReadonlyArray<{
+                      key: CoastalNavThresholdKey;
+                      label: string;
+                      step?: number;
+                      display: number;
+                      onChangeVal: (v: number) => number;
+                    }>
+                  ).map((item) => {
+                    const checked = qualityDraft.enabledCoastalNavigation?.[item.key] ?? true;
+                    return (
+                      <div key={item.key} className="text-xs text-slate-700 dark:text-slate-300">
+                        <label className="flex items-center justify-between gap-1.5 cursor-pointer">
+                          <span className="truncate">{item.label}</span>
+                          <input
+                            type="checkbox"
+                            data-testid={`toggle-coastal-${item.key}`}
+                            checked={checked}
+                            onChange={(e) =>
+                              setQualityDraft((q) => ({
+                                ...q,
+                                enabledCoastalNavigation: {
+                                  ...(q.enabledCoastalNavigation ?? {}),
+                                  [item.key]: e.target.checked,
+                                },
+                              }))
+                            }
+                            className="h-4 w-4 accent-sky-600 rounded shrink-0"
+                          />
+                        </label>
+                        <input
+                          type="number"
+                          step={item.step ?? 1}
+                          disabled={!checked}
+                          value={item.display}
+                          onChange={(e) => {
+                            const num = Number(e.target.value);
+                            if (!Number.isFinite(num)) return;
+                            setQualityDraft((q) => ({
+                              ...q,
+                              coastalNavigation: {
+                                ...q.coastalNavigation,
+                                [item.key]: item.onChangeVal(num),
+                              },
+                            }));
+                          }}
+                          className={`mt-1 ${inputBaseClass} ${!checked ? 'opacity-45' : ''}`}
+                        />
+                      </div>
+                    );
+                  })}
                 </div>
                 <p className="text-[11px] text-slate-500 dark:text-slate-400">
                   Aviso Náutico: Indicadores de nível do mar MSL (~8 km Open-Meteo Marine){' '}
@@ -1570,60 +1847,101 @@ export function SettingsTab({
             </div>
           </div>
 
-          {/* Sub-bloco 4.3: Limiares da Janela Segura Geral (SafeWindowThresholds) */}
+          {/* Sub-bloco 5.2: Limiares da Janela Segura Geral (SafeWindowThresholds) */}
           <div className="rounded-xl border border-slate-200 p-4 dark:border-slate-800">
             <h3 className="text-sm font-bold text-slate-900 dark:text-slate-100">
-              Limiares da Janela Segura Horária (Semáforo 168h)
+              Limiares da Janela Segura Horária (Semáforo 168h — Opcionais)
             </h3>
             <div className="mt-3 grid grid-cols-2 gap-3 sm:grid-cols-4">
-              <label className="text-xs font-medium text-slate-700 dark:text-slate-300">
-                Vento Máx (km/h)
-                <input
-                  type="number"
-                  value={safeWindowDraft.maxWindKmh}
-                  onChange={(e) =>
-                    setSafeWindowDraft((s) => ({ ...s, maxWindKmh: Number(e.target.value) }))
-                  }
-                  className={`mt-1 ${inputBaseClass}`}
-                />
-              </label>
-              <label className="text-xs font-medium text-slate-700 dark:text-slate-300">
-                Rajada Máx (km/h)
-                <input
-                  type="number"
-                  value={safeWindowDraft.maxGustKmh}
-                  onChange={(e) =>
-                    setSafeWindowDraft((s) => ({ ...s, maxGustKmh: Number(e.target.value) }))
-                  }
-                  className={`mt-1 ${inputBaseClass}`}
-                />
-              </label>
-              <label className="text-xs font-medium text-slate-700 dark:text-slate-300">
-                Onda Máx (m)
-                <input
-                  type="number"
-                  step="0.1"
-                  value={safeWindowDraft.maxWaveM}
-                  onChange={(e) =>
-                    setSafeWindowDraft((s) => ({ ...s, maxWaveM: Number(e.target.value) }))
-                  }
-                  className={`mt-1 ${inputBaseClass}`}
-                />
-              </label>
-              <label className="text-xs font-medium text-slate-700 dark:text-slate-300">
-                Prob. Chuva (%)
-                <input
-                  type="number"
-                  value={safeWindowDraft.maxPrecipProbPct}
-                  onChange={(e) =>
-                    setSafeWindowDraft((s) => ({
-                      ...s,
-                      maxPrecipProbPct: Number(e.target.value),
-                    }))
-                  }
-                  className={`mt-1 ${inputBaseClass}`}
-                />
-              </label>
+              {(
+                [
+                  {
+                    key: 'maxWindKmh',
+                    label: `Vento Máx (${getWindUnitLabel(units.wind)})`,
+                    display: Number(
+                      (
+                        convertWindSpeed(safeWindowDraft.maxWindKmh, units.wind) ??
+                        safeWindowDraft.maxWindKmh
+                      ).toFixed(1),
+                    ),
+                    onChangeVal: (v: number) => Number(windSpeedToKmh(v, units.wind).toFixed(1)),
+                  },
+                  {
+                    key: 'maxGustKmh',
+                    label: `Rajada Máx (${getWindUnitLabel(units.wind)})`,
+                    display: Number(
+                      (
+                        convertWindSpeed(safeWindowDraft.maxGustKmh, units.wind) ??
+                        safeWindowDraft.maxGustKmh
+                      ).toFixed(1),
+                    ),
+                    onChangeVal: (v: number) => Number(windSpeedToKmh(v, units.wind).toFixed(1)),
+                  },
+                  {
+                    key: 'maxWaveM',
+                    label: `Onda Máx (${getWaveUnitLabel(units.wave)})`,
+                    step: 0.1,
+                    display: Number(
+                      (
+                        convertWaveHeight(safeWindowDraft.maxWaveM, units.wave) ??
+                        safeWindowDraft.maxWaveM
+                      ).toFixed(1),
+                    ),
+                    onChangeVal: (v: number) => Number(waveHeightToM(v, units.wave).toFixed(2)),
+                  },
+                  {
+                    key: 'maxPrecipProbPct',
+                    label: 'Prob. Chuva (%)',
+                    display: safeWindowDraft.maxPrecipProbPct,
+                    onChangeVal: (v: number) => v,
+                  },
+                ] as ReadonlyArray<{
+                  key: SafeWindowThresholdKey;
+                  label: string;
+                  step?: number;
+                  display: number;
+                  onChangeVal: (v: number) => number;
+                }>
+              ).map((item) => {
+                const checked = safeWindowDraft.enabled?.[item.key] ?? true;
+                return (
+                  <div key={item.key} className="text-xs font-medium text-slate-700 dark:text-slate-300">
+                    <label className="flex items-center justify-between gap-1.5 cursor-pointer">
+                      <span>{item.label}</span>
+                      <input
+                        type="checkbox"
+                        data-testid={`toggle-safe-window-${item.key}`}
+                        checked={checked}
+                        onChange={(e) =>
+                          setSafeWindowDraft((s) => ({
+                            ...s,
+                            enabled: {
+                              ...(s.enabled ?? {}),
+                              [item.key]: e.target.checked,
+                            },
+                          }))
+                        }
+                        className="h-4 w-4 accent-sky-600 rounded shrink-0"
+                      />
+                    </label>
+                    <input
+                      type="number"
+                      step={item.step ?? 1}
+                      disabled={!checked}
+                      value={item.display}
+                      onChange={(e) => {
+                        const num = Number(e.target.value);
+                        if (!Number.isFinite(num)) return;
+                        setSafeWindowDraft((s) => ({
+                          ...s,
+                          [item.key]: item.onChangeVal(num),
+                        }));
+                      }}
+                      className={`mt-1 ${inputBaseClass} ${!checked ? 'opacity-45' : ''}`}
+                    />
+                  </div>
+                );
+              })}
             </div>
 
             <div className="mt-3 flex justify-end">
@@ -1638,7 +1956,7 @@ export function SettingsTab({
             </div>
           </div>
         </div>
-      </section>
+      </CollapsibleModule>
     </div>
   );
 }

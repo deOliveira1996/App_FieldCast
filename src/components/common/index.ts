@@ -8,3 +8,4 @@ export * from './HealthBadge';
 export * from './HealthCheckModal';
 export * from './FullscreenViewer';
 export * from './ModelModeSwitchPill';
+export * from './CollapsibleModule';

@@ -10,6 +10,8 @@ import React, {
 import {
   Anchor,
   BookOpen,
+  ChevronLeft,
+  ChevronRight,
   CloudSun,
   Database,
   GitCompare,
@@ -17,8 +19,6 @@ import {
   MapPin,
   Menu,
   Moon,
-  PanelLeftClose,
-  PanelLeftOpen,
   Plane,
   RefreshCw,
   Search,
@@ -370,19 +370,19 @@ export const AppShell: React.FC<AppShellProps> = ({
       >
         {/* Clean Ocean-Blue Top Header with Safe-Area Top Padding */}
         <header className="sticky top-0 z-30 w-full max-w-[100vw] shadow-md bg-[#0080cd] dark:bg-[#0a3656] text-white pt-[env(safe-area-inset-top,0px)]">
-          <div className="max-w-[1600px] w-full mx-auto px-3.5 sm:px-6 py-2.5 sm:py-3 flex flex-wrap items-center justify-between gap-2.5 sm:gap-3 min-w-0">
+          <div className="max-w-[1600px] w-full mx-auto px-2.5 sm:px-5 py-2 sm:py-2.5 flex flex-wrap items-center justify-between gap-2 min-w-0">
             {/* Brand Logo */}
-            <div className="flex items-center gap-2.5 shrink-0">
+            <div className="flex items-center gap-2 shrink-0">
               <img
                 src="/icon.svg"
                 alt="FieldCast"
-                className="w-9 h-9 rounded-xl shadow-sm border border-white/25 bg-white/10"
+                className="w-8 h-8 rounded-xl shadow-sm border border-white/25 bg-white/10"
               />
               <div>
-                <span className="text-lg font-extrabold tracking-tight text-white block leading-none">
+                <span className="text-base font-extrabold tracking-tight text-white block leading-none">
                   FieldCast
                 </span>
-                <span className="text-[11px] font-medium text-sky-100">
+                <span className="text-[10px] font-medium text-sky-100">
                   Previsão &amp; Campo
                 </span>
               </div>
@@ -438,19 +438,18 @@ export const AppShell: React.FC<AppShellProps> = ({
                 </button>
               )}
 
-              {/* Glossary Button */}
+              {/* Glossary Button (Icon-only compact) */}
               <button
                 type="button"
                 onClick={() => setIsGlossaryOpen(true)}
                 aria-label="Abrir Guia Rápido e Glossário"
                 title="Guia Rápido & Glossário"
-                className="hidden sm:inline-flex min-h-[44px] min-w-[44px] px-3 py-1.5 rounded-xl bg-white/15 hover:bg-white/25 text-white border border-white/20 text-xs font-semibold items-center justify-center gap-1.5 transition-colors focus:outline-none focus:ring-2 focus:ring-white/60"
+                className="hidden sm:inline-flex min-h-[44px] min-w-[44px] p-2 rounded-xl bg-white/15 hover:bg-white/25 text-white border border-white/20 items-center justify-center transition-colors focus:outline-none focus:ring-2 focus:ring-white/60"
               >
                 <BookOpen className="w-4 h-4" aria-hidden="true" />
-                <span className="hidden xl:inline">Guia Rápido</span>
               </button>
 
-              {/* Theme Toggle */}
+              {/* Theme Toggle (Icon-only compact) */}
               <button
                 type="button"
                 onClick={onToggleTheme}
@@ -464,18 +463,12 @@ export const AppShell: React.FC<AppShellProps> = ({
                     ? 'Tema Claro Clean (Azul e Branco)'
                     : 'Tema Noturno Oceânico'
                 }
-                className="hidden sm:inline-flex min-h-[44px] min-w-[44px] px-3 py-1.5 rounded-xl bg-white/15 hover:bg-white/25 text-white border border-white/20 text-xs font-semibold items-center justify-center gap-1.5 transition-colors focus:outline-none focus:ring-2 focus:ring-white/60"
+                className="hidden sm:inline-flex min-h-[44px] min-w-[44px] p-2 rounded-xl bg-white/15 hover:bg-white/25 text-white border border-white/20 items-center justify-center transition-colors focus:outline-none focus:ring-2 focus:ring-white/60"
               >
                 {theme === 'dark' ? (
-                  <>
-                    <Sun className="w-4 h-4 text-amber-300" aria-hidden="true" />
-                    <span className="hidden lg:inline">Claro</span>
-                  </>
+                  <Sun className="w-4 h-4 text-amber-300" aria-hidden="true" />
                 ) : (
-                  <>
-                    <Moon className="w-4 h-4 text-sky-100" aria-hidden="true" />
-                    <span className="hidden lg:inline">Noturno</span>
-                  </>
+                  <Moon className="w-4 h-4 text-sky-100" aria-hidden="true" />
                 )}
               </button>
 
@@ -518,57 +511,57 @@ export const AppShell: React.FC<AppShellProps> = ({
         </header>
 
         {/* Body Workspace: Desktop Retractable Sidebar + Main Content */}
-        <div className="flex-1 flex w-full max-w-[100vw] min-w-0">
-          {/* Desktop Retractable Left Sidebar */}
+        <div className="relative flex-1 flex w-full max-w-[100vw] min-w-0">
+          {isSidebarCollapsed && (
+            <button
+              type="button"
+              data-testid="sidebar-collapse-toggle"
+              onClick={handleToggleSidebarCollapsed}
+              aria-expanded={false}
+              aria-label="Expandir barra lateral"
+              title="Expandir barra lateral"
+              className="hidden md:inline-flex fixed left-1.5 top-[72px] z-40 min-h-[44px] min-w-[44px] w-9 h-9 rounded-full border border-sky-200 dark:border-sky-700 bg-white/95 dark:bg-[#132a47]/95 hover:bg-sky-50 dark:hover:bg-sky-900/70 text-[#0080cd] dark:text-sky-200 shadow-md items-center justify-center transition-colors focus:outline-none focus:ring-2 focus:ring-sky-500"
+            >
+              <ChevronRight className="w-4 h-4" aria-hidden="true" />
+            </button>
+          )}
+
+          {/* Desktop Retractable Left Sidebar (0px visual footprint when collapsed) */}
           <aside
             data-testid="app-retractable-sidebar"
             aria-label="Barra Lateral de Módulos"
             data-collapsed={isSidebarCollapsed ? 'true' : 'false'}
-            className={`hidden md:block shrink-0 border-r border-sky-200/80 dark:border-sky-800/70 bg-white/95 dark:bg-[#0f243d]/95 transition-[width] duration-200 ${
-              isSidebarCollapsed ? 'w-[72px]' : 'w-60'
+            className={`hidden md:block shrink-0 transition-[width,opacity] duration-200 ${
+              isSidebarCollapsed
+                ? 'w-0 overflow-hidden border-r-0 opacity-0 pointer-events-none'
+                : 'w-56 border-r border-sky-200/80 dark:border-sky-800/70 bg-white/95 dark:bg-[#0f243d]/95 opacity-100'
             }`}
           >
-            <div className="sticky top-[68px] flex flex-col gap-2.5 p-2.5 max-h-[calc(100vh-68px)] overflow-y-auto scrollbar-thin min-w-0">
+            <div className="sticky top-[62px] flex flex-col gap-2 p-2 max-h-[calc(100vh-62px)] overflow-y-auto scrollbar-thin min-w-0">
               {/* Sidebar Header & Collapse Toggle */}
-              <div
-                className={`flex items-center ${
-                  isSidebarCollapsed ? 'justify-center' : 'justify-between px-1'
-                } gap-2 min-w-0`}
-              >
-                {!isSidebarCollapsed && (
-                  <div className="min-w-0">
-                    <span className="block text-[11px] font-extrabold uppercase tracking-wider text-sky-700 dark:text-sky-300 truncate">
-                      Navegação
-                    </span>
-                    <span className="block text-xs font-semibold text-slate-600 dark:text-sky-200/80 truncate">
-                      {activeLocation.name}
-                    </span>
-                  </div>
-                )}
+              <div className="flex items-center justify-between px-1 gap-2 min-w-0">
+                <div className="min-w-0">
+                  <span className="block text-[10px] font-extrabold uppercase tracking-wider text-sky-700 dark:text-sky-300 truncate">
+                    Módulos
+                  </span>
+                  <span className="block text-xs font-semibold text-slate-600 dark:text-sky-200/80 truncate">
+                    {activeLocation.name}
+                  </span>
+                </div>
 
-                <button
-                  type="button"
-                  data-testid="sidebar-collapse-toggle"
-                  onClick={handleToggleSidebarCollapsed}
-                  aria-expanded={!isSidebarCollapsed}
-                  aria-label={
-                    isSidebarCollapsed
-                      ? 'Expandir barra lateral'
-                      : 'Recolher barra lateral'
-                  }
-                  title={
-                    isSidebarCollapsed
-                      ? 'Expandir barra lateral'
-                      : 'Recolher barra lateral'
-                  }
-                  className="min-h-[44px] min-w-[44px] rounded-xl border border-sky-200/80 dark:border-sky-800 bg-sky-50/80 dark:bg-[#132a47] hover:bg-sky-100 dark:hover:bg-sky-900/60 text-slate-700 dark:text-sky-100 inline-flex items-center justify-center shrink-0 transition-colors focus:outline-none focus:ring-2 focus:ring-sky-500"
-                >
-                  {isSidebarCollapsed ? (
-                    <PanelLeftOpen className="w-4 h-4" aria-hidden="true" />
-                  ) : (
-                    <PanelLeftClose className="w-4 h-4" aria-hidden="true" />
-                  )}
-                </button>
+                {!isSidebarCollapsed && (
+                  <button
+                    type="button"
+                    data-testid="sidebar-collapse-toggle"
+                    onClick={handleToggleSidebarCollapsed}
+                    aria-expanded={true}
+                    aria-label="Recolher barra lateral"
+                    title="Recolher barra lateral"
+                    className="min-h-[44px] min-w-[44px] rounded-xl border border-sky-200/80 dark:border-sky-800 bg-sky-50/80 dark:bg-[#132a47] hover:bg-sky-100 dark:hover:bg-sky-900/60 text-slate-700 dark:text-sky-100 inline-flex items-center justify-center shrink-0 transition-colors focus:outline-none focus:ring-2 focus:ring-sky-500"
+                  >
+                    <ChevronLeft className="w-4 h-4" aria-hidden="true" />
+                  </button>
+                )}
               </div>
 
               {/* Desktop Primary Navigation (All 7 Tabs) */}
@@ -624,7 +617,7 @@ export const AppShell: React.FC<AppShellProps> = ({
           </aside>
 
           {/* Main Content Workspace */}
-          <main className="flex-1 min-w-0 max-w-full px-3.5 sm:px-6 pt-4 sm:pt-5 pb-[calc(6.5rem+env(safe-area-inset-bottom,0px))] md:pb-10">
+          <main className="flex-1 min-w-0 max-w-full px-2.5 sm:px-5 pt-3 sm:pt-4 pb-[calc(6rem+env(safe-area-inset-bottom,0px))] md:pb-8">
             <div className="max-w-[1440px] w-full mx-auto min-w-0">
               {children}
             </div>

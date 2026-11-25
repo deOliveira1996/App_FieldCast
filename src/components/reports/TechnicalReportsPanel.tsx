@@ -5,6 +5,7 @@ import {
   Activity,
   AlertTriangle,
   BookOpen,
+  Calendar,
   Compass,
   Droplets,
   ExternalLink,
@@ -16,10 +17,17 @@ import {
   History,
   Printer,
   RefreshCw,
+  Search,
+  Sunrise,
 } from 'lucide-react';
+import { useUnits } from '../../context/UnitsContext';
 import {
   computePhysicalHourlyEt0FallbackMm,
+  type ExtendedForecast16dResult,
+  fetchExtended16DayForecastSeries,
   fetchHistoricalWeatherSeries,
+  fetchHybridPast15DaysSeries,
+  type HybridPast15DaysResult,
 } from '../../services/historicalWeatherService';
 import { triggerBrowserFileDownload } from '../../services/platform/ShareService';
 import type {
@@ -34,6 +42,14 @@ import type { AgroClimaticWaterBalance, ScientificAnalysisSummary } from '../../
 import type { ForecastViewMode, NormalizedForecast } from '../../types/weather';
 import { formatCardinalDirection } from '../../utils/exporters';
 import { formatLocalYMD } from '../../utils/localTimeHour';
+import {
+  computeForecastPeriodSummary,
+  computeHistoricalPeriodSummary,
+  extractSingleDayPointLog,
+  formatCompassSector,
+  type MultiDayPeriodReport,
+  type SingleDayPointLog,
+} from '../../utils/periodReportAnalytics';
 import {
   computeApparentTemperatureFallbackC,
   computeMagnusRelativeHumidityPct,
@@ -50,6 +66,13 @@ import {
   formatTechnicalReportMarkdown,
   generateTechnicalReportDocument,
 } from '../../utils/technicalReportGenerator';
+import {
+  formatPrecip,
+  formatPressure,
+  formatTemp,
+  formatWind,
+} from '../../utils/units';
+import { CollapsibleModule } from '../common/CollapsibleModule';
 import { FullscreenViewer } from '../common/FullscreenViewer';
 import { ModuleErrorBoundary } from '../common/ModuleErrorBoundary';
 
@@ -222,6 +245,7 @@ export const TechnicalReportsPanel: React.FC<TechnicalReportsPanelProps> = ({
   onToast,
   onErrorLog,
 }) => {
+  const { units } = useUnits();
   const [sourceMode, setSourceMode] = useState<ReportDatasetSourceMode>(defaultSource);
   const [selectedModelView, setSelectedModelView] = useState<ForecastViewMode>(viewMode);
   const [selectedLogId, setSelectedLogId] = useState<string>(() =>
@@ -232,6 +256,19 @@ export const TechnicalReportsPanel: React.FC<TechnicalReportsPanelProps> = ({
   const [extractedHistoricalSeries, setExtractedHistoricalSeries] =
     useState<HistoricalSeriesResult | null>(initialHistoricalSeries);
   const [isExtractingHistory, setIsExtractingHistory] = useState<boolean>(false);
+
+  // V4.1: Visão Pretérita Híbrida 15d, Consulta Pontual e Projeção Futura 15-16d
+  const [hybridPast15d, setHybridPast15d] = useState<HybridPast15DaysResult | null>(null);
+  const [isLoadingPast15d, setIsLoadingPast15d] = useState<boolean>(false);
+  const [pointDateIso, setPointDateIso] = useState<string>(() =>
+    formatLocalYMD(new Date(Date.now() - 86_400_000), forecast?.timezone),
+  );
+  const [pointDateLog, setPointDateLog] = useState<SingleDayPointLog | null>(null);
+  const [isQueryingPointDate, setIsQueryingPointDate] = useState<boolean>(false);
+
+  const [extended16dForecast, setExtended16dForecast] =
+    useState<ExtendedForecast16dResult | null>(null);
+  const [isLoadingExtended16d, setIsLoadingExtended16d] = useState<boolean>(false);
 
   const chartRef = useRef<ReactECharts | null>(null);
 
@@ -308,6 +345,223 @@ export const TechnicalReportsPanel: React.FC<TechnicalReportsPanelProps> = ({
     },
     [activeLocation, forecast, onErrorLog, onFetchHistoricalSeries, onToast],
   );
+
+  const handleExtractHybridPast15d = useCallback(() => {
+    void safeAction(
+      async () => {
+        let result: HybridPast15DaysResult;
+        try {
+          if (onFetchHistoricalSeries) {
+            const now = new Date();
+            const startIso = formatLocalYMD(new Date(now.getTime() - 15 * 86_400_000), forecast?.timezone);
+            const endIso = formatLocalYMD(new Date(now.getTime() - 86_400_000), forecast?.timezone);
+            const customSeries = await onFetchHistoricalSeries({
+              locationName: activeLocation.name,
+              latitude: activeLocation.latitude,
+              longitude: activeLocation.longitude,
+              startDateIso: startIso,
+              endDateIso: endIso,
+              models: ['fieldcast'],
+            });
+            const provenanceByDate: Record<string, string> = {};
+            for (const h of customSeries.hours) {
+              const d = formatLocalYMD(new Date(h.timestampUnix * 1000), customSeries.timezone);
+              provenanceByDate[d] = customSeries.sourceLabel || 'ERA5 / NWP Open-Meteo';
+            }
+            result = { series: customSeries, provenanceByDate };
+          } else {
+            result = await fetchHybridPast15DaysSeries({
+              locationName: activeLocation.name,
+              latitude: activeLocation.latitude,
+              longitude: activeLocation.longitude,
+            });
+          }
+        } catch {
+          const now = new Date();
+          const startIso = formatLocalYMD(new Date(now.getTime() - 15 * 86_400_000), forecast?.timezone);
+          const endIso = formatLocalYMD(new Date(now.getTime() - 86_400_000), forecast?.timezone);
+          const fallbackSeries = buildOfflineHistoricalFallback(
+            {
+              locationName: activeLocation.name,
+              latitude: activeLocation.latitude,
+              longitude: activeLocation.longitude,
+              startDateIso: startIso,
+              endDateIso: endIso,
+              models: ['fieldcast'],
+            },
+            forecast,
+          );
+          result = {
+            series: fallbackSeries,
+            provenanceByDate: { [startIso]: 'Cache Local / Síntese Offline' },
+          };
+        }
+
+        setHybridPast15d(result);
+        setExtractedHistoricalSeries(result.series);
+        setSelectedLogId('latest_query');
+        onToast?.({
+          type: 'success',
+          title: 'Visão pretérita 15d atualizada',
+          message: `${result.series.hours.length} registros analisados em 4 faixas horárias diárias.`,
+        });
+      },
+      {
+        actionKey: 'report_extract_past_15d',
+        moduleName: 'TechnicalReportsPanel',
+        errorTitle: 'Falha ao carregar visão pretérita 15d',
+        onLoadingChange: setIsLoadingPast15d,
+        onToast,
+        onErrorLog,
+      },
+    );
+  }, [activeLocation, forecast, onErrorLog, onFetchHistoricalSeries, onToast]);
+
+  const handleQueryPointDate = useCallback(() => {
+    if (!pointDateIso) return;
+    void safeAction(
+      async () => {
+        const candidateSeries = hybridPast15d?.series ?? activeHistoricalSeries;
+        if (candidateSeries) {
+          const direct = extractSingleDayPointLog(
+            candidateSeries.hours,
+            pointDateIso,
+            candidateSeries.timezone,
+            hybridPast15d?.provenanceByDate,
+          );
+          if (direct.found) {
+            setPointDateLog(direct);
+            return;
+          }
+        }
+
+        const req: HistoricalSeriesRequest = {
+          locationName: activeLocation.name,
+          latitude: activeLocation.latitude,
+          longitude: activeLocation.longitude,
+          startDateIso: pointDateIso,
+          endDateIso: pointDateIso,
+          models: ['fieldcast'],
+        };
+
+        let fetched: HistoricalSeriesResult;
+        try {
+          fetched = onFetchHistoricalSeries
+            ? await onFetchHistoricalSeries(req)
+            : await fetchHistoricalWeatherSeries(req);
+        } catch {
+          fetched = buildOfflineHistoricalFallback(req, forecast);
+        }
+
+        const log = extractSingleDayPointLog(fetched.hours, pointDateIso, fetched.timezone, {
+          [pointDateIso]: fetched.sourceLabel,
+        });
+        setPointDateLog(log);
+      },
+      {
+        actionKey: 'report_query_point_date',
+        moduleName: 'TechnicalReportsPanel',
+        errorTitle: 'Erro na consulta pontual por data',
+        onLoadingChange: setIsQueryingPointDate,
+        onToast,
+        onErrorLog,
+      },
+    );
+  }, [
+    activeHistoricalSeries,
+    activeLocation,
+    forecast,
+    hybridPast15d,
+    onErrorLog,
+    onFetchHistoricalSeries,
+    onToast,
+    pointDateIso,
+  ]);
+
+  const handleLoadExtended16d = useCallback(() => {
+    void safeAction(
+      async () => {
+        try {
+          const res = await fetchExtended16DayForecastSeries({
+            locationName: activeLocation.name,
+            latitude: activeLocation.latitude,
+            longitude: activeLocation.longitude,
+          });
+          setExtended16dForecast(res);
+          onToast?.({
+            type: 'success',
+            title: 'Projeção estendida 15–16d carregada',
+            message: `${res.startDateIso} a ${res.endDateIso} (${res.hours.length}h analisadas por turno).`,
+          });
+        } catch {
+          if (!forecast || forecast.hours.length === 0) {
+            throw new Error('Sem conexão para carregar projeção de 16 dias.');
+          }
+          const provenanceByDate: Record<string, string> = {};
+          for (const h of forecast.hours) {
+            const ymd = formatLocalYMD(new Date(h.timestampUnix * 1000), forecast.timezone);
+            provenanceByDate[ymd] = 'Cache Local (Horizonte ativo 7d)';
+          }
+          setExtended16dForecast({
+            locationName: activeLocation.name,
+            latitude: activeLocation.latitude,
+            longitude: activeLocation.longitude,
+            elevationDemM: forecast.elevationDemM,
+            timezone: forecast.timezone,
+            startDateIso: Object.keys(provenanceByDate)[0] ?? '',
+            endDateIso: Object.keys(provenanceByDate).slice(-1)[0] ?? '',
+            fetchedAtIso: forecast.fetchedAtIso,
+            hours: forecast.hours,
+            provenanceByDate,
+          });
+          onToast?.({
+            type: 'info',
+            title: 'Projeção em modo cache local (7d)',
+            message: 'Sem rede para estender até 16d — exibindo faixas horárias dos dados em cache.',
+          });
+        }
+      },
+      {
+        actionKey: 'report_load_extended_16d',
+        moduleName: 'TechnicalReportsPanel',
+        errorTitle: 'Falha ao carregar projeção 15–16d',
+        onLoadingChange: setIsLoadingExtended16d,
+        onToast,
+        onErrorLog,
+      },
+    );
+  }, [activeLocation, forecast, onErrorLog, onToast]);
+
+  const past15dReport: MultiDayPeriodReport | null = useMemo(() => {
+    const targetSeries = hybridPast15d?.series ?? activeHistoricalSeries;
+    if (!targetSeries || targetSeries.hours.length === 0) {
+      return null;
+    }
+    return computeHistoricalPeriodSummary(
+      targetSeries.hours,
+      targetSeries.timezone,
+      hybridPast15d?.provenanceByDate,
+    );
+  }, [activeHistoricalSeries, hybridPast15d]);
+
+  const future16dReport: MultiDayPeriodReport | null = useMemo(() => {
+    if (extended16dForecast && extended16dForecast.hours.length > 0) {
+      return computeForecastPeriodSummary(
+        extended16dForecast.hours,
+        extended16dForecast.timezone,
+        extended16dForecast.provenanceByDate,
+      );
+    }
+    if (forecast && forecast.hours.length > 0) {
+      const prov: Record<string, string> = {};
+      for (const h of forecast.hours) {
+        const ymd = formatLocalYMD(new Date(h.timestampUnix * 1000), forecast.timezone);
+        prov[ymd] = 'Ensemble Multi-Modelo Ativo (Horizonte 7d)';
+      }
+      return computeForecastPeriodSummary(forecast.hours, forecast.timezone, prov);
+    }
+    return null;
+  }, [extended16dForecast, forecast]);
 
   const analysis: ScientificAnalysisSummary | null = useMemo(() => {
     if (sourceMode === 'historical') {
@@ -844,6 +1098,16 @@ export const TechnicalReportsPanel: React.FC<TechnicalReportsPanelProps> = ({
               >
                 <span>ERA5 90d</span>
               </button>
+
+              <button
+                type="button"
+                data-testid="report-quick-extract-15d"
+                disabled={isLoadingPast15d}
+                onClick={handleExtractHybridPast15d}
+                className="min-h-[44px] px-3.5 py-2 rounded-xl text-xs font-bold inline-flex items-center gap-1.5 bg-teal-600 hover:bg-teal-500 disabled:opacity-50 text-white shadow-sm transition-colors"
+              >
+                <span>Híbrido 15d (ERA5+NWP)</span>
+              </button>
             </div>
           </div>
         )}
@@ -856,7 +1120,16 @@ export const TechnicalReportsPanel: React.FC<TechnicalReportsPanelProps> = ({
         </div>
       ) : (
         <>
-          {/* 4 KPI Cards Científicos */}
+          {/* Módulo 1: 4 KPI Cards Científicos */}
+          <CollapsibleModule
+            title="Indicadores-Chave Científicos (KPIs)"
+            subtitle={`Balanço Hídrico FAO-56, GDD, Consistência R e Z-Score (${analysis.periodStartIso.slice(0, 10)})`}
+            icon={<Activity className="w-4 h-4 text-sky-600 dark:text-sky-400" />}
+            defaultOpen={true}
+            keepMounted={true}
+            hideIconStyle="eye"
+            testId="report-kpis-module"
+          >
           <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-4 gap-3">
             <div
               data-testid="kpi-water-balance"
@@ -877,11 +1150,11 @@ export const TechnicalReportsPanel: React.FC<TechnicalReportsPanelProps> = ({
               </div>
               <div className="text-xl font-black font-mono text-slate-900 dark:text-white">
                 {analysis.waterBalance.netWaterBalanceMm >= 0 ? '+' : ''}
-                {analysis.waterBalance.netWaterBalanceMm.toFixed(1)} mm
+                {formatPrecip(analysis.waterBalance.netWaterBalanceMm, units.precipitation, 1)}
               </div>
               <div className="text-xs text-slate-600 dark:text-slate-400 font-mono">
-                P: {analysis.waterBalance.totalPrecipitationMm.toFixed(1)} mm &bull; ET0:{' '}
-                {analysis.waterBalance.totalEt0FaoMm.toFixed(1)} mm
+                P: {formatPrecip(analysis.waterBalance.totalPrecipitationMm, units.precipitation, 1)} &bull; ET0:{' '}
+                {formatPrecip(analysis.waterBalance.totalEt0FaoMm, units.precipitation, 1)}
               </div>
             </div>
 
@@ -899,7 +1172,7 @@ export const TechnicalReportsPanel: React.FC<TechnicalReportsPanelProps> = ({
               <div className="text-xs text-slate-600 dark:text-slate-400 font-mono">
                 HI Máx:{' '}
                 {analysis.waterBalance.maxHeatIndexC !== null
-                  ? `${analysis.waterBalance.maxHeatIndexC.toFixed(1)} °C`
+                  ? formatTemp(analysis.waterBalance.maxHeatIndexC, units.temperature, 1)
                   : 'N/D'}{' '}
                 &bull; UR Média:{' '}
                 {analysis.waterBalance.meanRelativeHumidityPct !== null
@@ -947,10 +1220,294 @@ export const TechnicalReportsPanel: React.FC<TechnicalReportsPanelProps> = ({
               </div>
             </div>
           </div>
+          </CollapsibleModule>
 
-          {/* Gráfico ECharts Interativo com FullscreenViewer (Tela Cheia) */}
+          {/* Módulo 2: Visão Pretérita (Últimos 15 Dias) & Consulta Pontual por Data */}
+          <CollapsibleModule
+            title="Visão Pretérita (Últimos 15 Dias) & Consulta Pontual por Data"
+            subtitle="ERA5 + NWP recente em 4 faixas horárias (Madrugada/Manhã/Tarde/Noite) e histórico diário"
+            icon={<Calendar className="w-4 h-4 text-teal-600 dark:text-teal-400" />}
+            defaultOpen={true}
+            keepMounted={true}
+            hideIconStyle="eye"
+            testId="report-past-15d-module"
+            headerActions={
+              <button
+                type="button"
+                data-testid="report-past-15d-btn"
+                disabled={isLoadingPast15d}
+                onClick={handleExtractHybridPast15d}
+                className="min-h-[44px] px-3 py-1.5 rounded-xl text-xs font-bold inline-flex items-center gap-1.5 bg-teal-600 hover:bg-teal-500 disabled:opacity-50 text-white shadow-sm transition-colors"
+              >
+                <RefreshCw
+                  className={`w-3.5 h-3.5 ${isLoadingPast15d ? 'animate-spin' : ''}`}
+                  aria-hidden="true"
+                />
+                <span>{isLoadingPast15d ? 'Extraindo 15d...' : 'Carregar Últimos 15d'}</span>
+              </button>
+            }
+          >
+            <div className="space-y-4">
+              {past15dReport ? (
+                <>
+                  <p className="text-[11px] text-slate-600 dark:text-slate-300 bg-teal-50/70 dark:bg-teal-950/30 border border-teal-200/70 dark:border-teal-800/50 rounded-xl px-3 py-2">
+                    <strong>Proveniência ({past15dReport.startDateIso} a {past15dReport.endDateIso} • {past15dReport.totalHours}h):</strong>{' '}
+                    {past15dReport.methodologyNote}
+                  </p>
+
+                  {/* 4 Faixas Horárias do Passado */}
+                  <div
+                    data-testid="report-past-periods-grid"
+                    className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-4 gap-2.5"
+                  >
+                    {past15dReport.periods.map((p) => (
+                      <div
+                        key={p.periodId}
+                        className="rounded-xl border border-slate-200 dark:border-sky-800/70 bg-slate-50/80 dark:bg-[#0f243d] p-3 space-y-1.5"
+                      >
+                        <div className="flex items-center justify-between gap-2">
+                          <span className="text-xs font-extrabold text-slate-900 dark:text-white">
+                            {p.label}
+                          </span>
+                          <span className="text-[10px] font-mono px-2 py-0.5 rounded-full bg-slate-200/70 dark:bg-sky-900/60 text-slate-700 dark:text-sky-200">
+                            {p.rangeLabel}
+                          </span>
+                        </div>
+                        <div className="text-xs font-mono font-bold text-slate-800 dark:text-slate-100">
+                          T: {formatTemp(p.meanTempC, units.temperature, 1)} • Chuva:{' '}
+                          {formatPrecip(p.totalPrecipMm, units.precipitation, 1)} ({p.rainyDaysCount}d)
+                        </div>
+                        <div className="text-[11px] font-mono text-slate-600 dark:text-slate-300">
+                          Vento: {formatWind(p.meanWindKmh, units.wind, 1)} (Raj.{' '}
+                          {formatWind(p.maxGustKmh, units.wind, 1)}) •{' '}
+                          {formatCompassSector(p.prevailingWindDeg)}
+                        </div>
+                        <p className="text-[11px] text-slate-500 dark:text-slate-400 leading-snug">
+                          {p.dominantSummary}
+                        </p>
+                      </div>
+                    ))}
+                  </div>
+                </>
+              ) : (
+                <div className="rounded-xl border border-dashed border-slate-300 dark:border-slate-700 p-4 text-xs text-slate-600 dark:text-slate-300">
+                  Clique em <strong>Carregar Últimos 15d</strong> para consolidar ERA5 + NWP por
+                  faixas horárias (Madrugada, Manhã, Tarde, Noite) e histórico diário rastreável.
+                </div>
+              )}
+
+              {/* Consulta Pontual por Data */}
+              <div className="rounded-xl border border-slate-200 dark:border-sky-800/70 bg-slate-50/60 dark:bg-[#0d2038] p-3.5 space-y-3">
+                <div className="flex flex-wrap items-end justify-between gap-3">
+                  <div>
+                    <h4 className="text-xs font-extrabold uppercase tracking-wider text-slate-800 dark:text-sky-200">
+                      Consulta Pontual por Data Específica
+                    </h4>
+                    <p className="text-[11px] text-slate-600 dark:text-slate-400">
+                      Recupere temperatura, vento, chuva, umidade e resumo por turno de qualquer dia passado.
+                    </p>
+                  </div>
+
+                  <div className="flex flex-wrap items-center gap-2">
+                    <input
+                      type="date"
+                      aria-label="Data pontual do histórico"
+                      data-testid="report-point-date-input"
+                      value={pointDateIso}
+                      onChange={(e) => setPointDateIso(e.target.value)}
+                      className="min-h-[44px] px-3 py-1.5 rounded-xl border border-slate-300 dark:border-sky-700 bg-white dark:bg-slate-900 text-xs font-mono font-bold text-slate-900 dark:text-white"
+                    />
+                    <button
+                      type="button"
+                      data-testid="report-point-date-btn"
+                      disabled={isQueryingPointDate || !pointDateIso}
+                      onClick={handleQueryPointDate}
+                      className="min-h-[44px] px-4 py-2 rounded-xl text-xs font-bold inline-flex items-center gap-1.5 bg-sky-600 hover:bg-sky-500 disabled:opacity-50 text-white shadow-sm transition-colors"
+                    >
+                      <Search className="w-3.5 h-3.5" aria-hidden="true" />
+                      <span>{isQueryingPointDate ? 'Buscando...' : 'Consultar Data'}</span>
+                    </button>
+                  </div>
+                </div>
+
+                {pointDateLog && (
+                  <div
+                    data-testid="report-point-date-result"
+                    className="rounded-xl border border-sky-200/80 dark:border-sky-700/60 bg-white dark:bg-[#132a47] p-3.5 space-y-2.5"
+                  >
+                    <div className="flex flex-wrap items-center justify-between gap-2">
+                      <span className="text-xs font-extrabold text-slate-900 dark:text-white">
+                        Registro Pontual: {pointDateLog.dateIso} ({pointDateLog.hoursCount}h)
+                      </span>
+                      <span className="text-[11px] font-mono px-2.5 py-0.5 rounded-full bg-sky-100 dark:bg-sky-900/60 text-sky-800 dark:text-sky-200">
+                        {pointDateLog.provenanceLabel}
+                      </span>
+                    </div>
+
+                    {pointDateLog.found ? (
+                      <>
+                        <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 text-xs font-mono">
+                          <div className="p-2 rounded-lg bg-slate-50 dark:bg-[#0f243d]">
+                            <span className="block text-[10px] text-slate-500">Temp (Mín / Máx)</span>
+                            <strong>
+                              {formatTemp(pointDateLog.minTempC, units.temperature, 1)} /{' '}
+                              {formatTemp(pointDateLog.maxTempC, units.temperature, 1)}
+                            </strong>
+                          </div>
+                          <div className="p-2 rounded-lg bg-slate-50 dark:bg-[#0f243d]">
+                            <span className="block text-[10px] text-slate-500">Vento / Raj. Máx</span>
+                            <strong>
+                              {formatWind(pointDateLog.meanWindKmh, units.wind, 1)} /{' '}
+                              {formatWind(pointDateLog.maxGustKmh, units.wind, 1)}
+                            </strong>
+                          </div>
+                          <div className="p-2 rounded-lg bg-slate-50 dark:bg-[#0f243d]">
+                            <span className="block text-[10px] text-slate-500">Chuva Acumulada</span>
+                            <strong>{formatPrecip(pointDateLog.totalPrecipMm, units.precipitation, 1)}</strong>
+                          </div>
+                          <div className="p-2 rounded-lg bg-slate-50 dark:bg-[#0f243d]">
+                            <span className="block text-[10px] text-slate-500">UR Média / Rumo</span>
+                            <strong>
+                              {pointDateLog.meanHumidityPct !== null
+                                ? `${pointDateLog.meanHumidityPct.toFixed(0)}%`
+                                : 'N/D'}{' '}
+                              · {formatCompassSector(pointDateLog.prevailingWindDeg)}
+                            </strong>
+                          </div>
+                        </div>
+
+                        <div className="overflow-x-auto rounded-lg border border-slate-200 dark:border-sky-800/60 max-h-56 overflow-y-auto">
+                          <table className="w-full text-[11px] font-mono text-left border-collapse">
+                            <thead className="bg-slate-100 dark:bg-[#0b192c] text-slate-700 dark:text-sky-200 sticky top-0">
+                              <tr>
+                                <th className="py-1.5 px-2">Hora (Turno)</th>
+                                <th className="py-1.5 px-2 text-right">Temp</th>
+                                <th className="py-1.5 px-2 text-right">UR</th>
+                                <th className="py-1.5 px-2 text-right">Vento</th>
+                                <th className="py-1.5 px-2 text-right">Chuva</th>
+                                <th className="py-1.5 px-2 text-right">Pressão</th>
+                              </tr>
+                            </thead>
+                            <tbody className="divide-y divide-slate-200 dark:divide-sky-900/50">
+                              {pointDateLog.hourlyRows.map((row) => (
+                                <tr key={row.timestampUnix}>
+                                  <td className="py-1 px-2">
+                                    {row.hhmm} ({row.periodLabel})
+                                  </td>
+                                  <td className="py-1 px-2 text-right">
+                                    {formatTemp(row.temperatureC, units.temperature, 1)}
+                                  </td>
+                                  <td className="py-1 px-2 text-right">
+                                    {row.humidityPct !== null ? `${row.humidityPct.toFixed(0)}%` : '—'}
+                                  </td>
+                                  <td className="py-1 px-2 text-right">
+                                    {formatWind(row.windSpeedKmh, units.wind, 1)}
+                                  </td>
+                                  <td className="py-1 px-2 text-right">
+                                    {formatPrecip(row.precipMm, units.precipitation, 1)}
+                                  </td>
+                                  <td className="py-1 px-2 text-right">
+                                    {formatPressure(row.pressureHpa, units.pressure)}
+                                  </td>
+                                </tr>
+                              ))}
+                            </tbody>
+                          </table>
+                        </div>
+                      </>
+                    ) : (
+                      <p className="text-xs text-amber-700 dark:text-amber-300">
+                        Não foram encontrados registros horários para {pointDateLog.dateIso}.
+                      </p>
+                    )}
+                  </div>
+                )}
+              </div>
+            </div>
+          </CollapsibleModule>
+
+          {/* Módulo 3: Projeção Futura Estendida (15–16 Dias por Faixas Horárias) */}
+          <CollapsibleModule
+            title="Projeção Futura Estendida (15–16 Dias por Faixas Horárias)"
+            subtitle="Consolidado de tendência por turno (+1..+7d Multi-Modelo e +8..+16d NOAA GFS)"
+            icon={<Sunrise className="w-4 h-4 text-amber-600 dark:text-amber-400" />}
+            defaultOpen={false}
+            keepMounted={true}
+            hideIconStyle="eye"
+            testId="report-future-16d-module"
+            badge={extended16dForecast ? `${future16dReport?.totalDays ?? 16}d` : `${future16dReport?.totalDays ?? 7}d`}
+            headerActions={
+              <button
+                type="button"
+                data-testid="report-load-extended-16d-btn"
+                disabled={isLoadingExtended16d}
+                onClick={handleLoadExtended16d}
+                className="min-h-[44px] px-3 py-1.5 rounded-xl text-xs font-bold inline-flex items-center gap-1.5 bg-indigo-600 hover:bg-indigo-500 disabled:opacity-50 text-white shadow-sm transition-colors"
+              >
+                <RefreshCw
+                  className={`w-3.5 h-3.5 ${isLoadingExtended16d ? 'animate-spin' : ''}`}
+                  aria-hidden="true"
+                />
+                <span>{isLoadingExtended16d ? 'Estendendo...' : 'Estender 15–16d'}</span>
+              </button>
+            }
+          >
+            {future16dReport ? (
+              <div className="space-y-3">
+                <p className="text-[11px] text-amber-900 dark:text-amber-200 bg-amber-50/70 dark:bg-amber-950/30 border border-amber-300/60 dark:border-amber-800/50 rounded-xl px-3 py-2">
+                  <strong>Aviso Científico de Horizonte ({future16dReport.startDateIso} a {future16dReport.endDateIso}):</strong>{' '}
+                  {future16dReport.methodologyNote}
+                </p>
+
+                <div
+                  data-testid="report-future-periods-grid"
+                  className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-4 gap-2.5"
+                >
+                  {future16dReport.periods.map((p) => (
+                    <div
+                      key={p.periodId}
+                      className="rounded-xl border border-slate-200 dark:border-sky-800/70 bg-slate-50/80 dark:bg-[#0f243d] p-3 space-y-1.5"
+                    >
+                      <div className="flex items-center justify-between gap-2">
+                        <span className="text-xs font-extrabold text-slate-900 dark:text-white">
+                          {p.label}
+                        </span>
+                        <span className="text-[10px] font-mono px-2 py-0.5 rounded-full bg-indigo-100/80 dark:bg-indigo-900/60 text-indigo-800 dark:text-indigo-200">
+                          {p.rangeLabel}
+                        </span>
+                      </div>
+                      <div className="text-xs font-mono font-bold text-slate-800 dark:text-slate-100">
+                        T: {formatTemp(p.meanTempC, units.temperature, 1)} • Chuva:{' '}
+                        {formatPrecip(p.totalPrecipMm, units.precipitation, 1)} ({p.rainyDaysCount}d)
+                      </div>
+                      <div className="text-[11px] font-mono text-slate-600 dark:text-slate-300">
+                        Vento: {formatWind(p.meanWindKmh, units.wind, 1)} (Raj.{' '}
+                        {formatWind(p.maxGustKmh, units.wind, 1)}) •{' '}
+                        {formatCompassSector(p.prevailingWindDeg)}
+                      </div>
+                      <p className="text-[11px] text-slate-500 dark:text-slate-400 leading-snug">
+                        {p.dominantSummary}
+                      </p>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            ) : (
+              <p className="text-xs text-slate-500">Carregue uma previsão para visualizar as faixas horárias.</p>
+            )}
+          </CollapsibleModule>
+
+          {/* Módulo 4: Gráfico ECharts Interativo com FullscreenViewer (Tela Cheia) */}
           {chartOption && (
-            <div className="rounded-xl border border-slate-200 dark:border-sky-800/70 bg-slate-50/60 dark:bg-[#0f243d]/80 p-3.5">
+            <CollapsibleModule
+              title="Série Científica Integrada (Gráfico Interativo)"
+              subtitle="Temperatura, Precipitação vs ET0 FAO-56 e Vento 10m"
+              icon={<Activity className="w-4 h-4 text-emerald-600 dark:text-emerald-400" />}
+              defaultOpen={true}
+              keepMounted={true}
+              hideIconStyle="eye"
+              testId="report-chart-module"
+            >
               <FullscreenViewer
                 title="Série Científica Integrada — Temperatura, Precipitação vs ET0 e Vento 10m"
                 subtitle={`${analysis.locationName} • DEM ${Math.round(analysis.elevationDemM)}m • ${analysis.activeModelLabel}`}
@@ -977,14 +1534,19 @@ export const TechnicalReportsPanel: React.FC<TechnicalReportsPanelProps> = ({
                   </ModuleErrorBoundary>
                 )}
               </FullscreenViewer>
-            </div>
+            </CollapsibleModule>
           )}
 
-          {/* Tabela Completa de Percentis Estatísticos e Tendência OLS */}
-          <div className="space-y-2">
-            <h3 className="text-sm font-extrabold text-slate-900 dark:text-white">
-              Tabela de Percentis Estatísticos, Dispersão (IQR) e Tendência Linear (OLS)
-            </h3>
+          {/* Módulo 5: Tabela Completa de Percentis Estatísticos e Tendência OLS */}
+          <CollapsibleModule
+            title="Tabela de Percentis Estatísticos, Dispersão (IQR) e Tendência Linear (OLS)"
+            subtitle="Média, Mediana, P10, P90, IQR, Regressão Linear e Máximo |Z|"
+            icon={<FileSpreadsheet className="w-4 h-4 text-indigo-600 dark:text-indigo-400" />}
+            defaultOpen={false}
+            keepMounted={true}
+            hideIconStyle="eye"
+            testId="report-percentiles-module"
+          >
             <div className="overflow-x-auto rounded-xl border border-slate-200 dark:border-sky-800/70">
               <table
                 data-testid="scientific-stats-table"
@@ -1058,12 +1620,21 @@ export const TechnicalReportsPanel: React.FC<TechnicalReportsPanelProps> = ({
                 </tbody>
               </table>
             </div>
-          </div>
+          </CollapsibleModule>
 
-          {/* Pré-Visualização Estruturada do Relatório Técnico-Científico */}
+          {/* Módulo 6: Pré-Visualização Estruturada do Relatório Técnico-Científico */}
+          <CollapsibleModule
+            title={`Pré-Visualização Completa do Laudo (${reportDoc.reportId})`}
+            subtitle="Resumo executivo, metodologia DEM, resultados, limitações e citações primárias"
+            icon={<FileText className="w-4 h-4 text-sky-600 dark:text-sky-400" />}
+            defaultOpen={false}
+            keepMounted={true}
+            hideIconStyle="eye"
+            testId="report-preview-module"
+          >
           <article
             data-testid="technical-report-preview"
-            className="rounded-xl border border-slate-200 dark:border-sky-800/70 bg-slate-50/70 dark:bg-[#0f243d] p-4 sm:p-5 space-y-4"
+            className="space-y-4"
           >
             <header className="border-b border-slate-200 dark:border-sky-800/70 pb-3">
               <div className="text-[11px] font-mono uppercase tracking-wider text-indigo-600 dark:text-indigo-300 font-bold">
@@ -1156,6 +1727,7 @@ export const TechnicalReportsPanel: React.FC<TechnicalReportsPanelProps> = ({
               </ol>
             </div>
           </article>
+          </CollapsibleModule>
         </>
       )}
     </section>

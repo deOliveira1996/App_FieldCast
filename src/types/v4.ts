@@ -75,6 +75,21 @@ export interface GlobalExtremeEventAlert {
 
 export type ActivityDomainId = 'daily_field' | 'coastal_navigation' | 'aeronautics_drone';
 
+export type DailyFieldThresholdKey =
+  | 'idealMinTempC'
+  | 'idealMaxTempC'
+  | 'maxWindKmh'
+  | 'maxGustKmh'
+  | 'maxPrecipProbPct'
+  | 'maxCapeJkg';
+
+export type CoastalNavThresholdKey =
+  | 'maxWindKmh'
+  | 'maxGustKmh'
+  | 'maxWaveM'
+  | 'maxCurrentKmh'
+  | 'minVisibilityKm';
+
 export interface ActivityQualityThresholds {
   dailyField: {
     idealMinTempC: number;
@@ -91,6 +106,8 @@ export interface ActivityQualityThresholds {
     maxCurrentKmh: number;
     minVisibilityKm: number;
   };
+  enabledDailyField?: Partial<Record<DailyFieldThresholdKey, boolean>>;
+  enabledCoastalNavigation?: Partial<Record<CoastalNavThresholdKey, boolean>>;
 }
 
 export interface ActivityQualityAssessment {

@@ -256,6 +256,14 @@ export const SafeWindowThresholdsSchema = z.object({
   maxGustKmh: z.number().min(5).max(200),
   maxWaveM: z.number().min(0.1).max(20),
   maxPrecipProbPct: z.number().min(0).max(100),
+  enabled: z
+    .object({
+      maxWindKmh: z.boolean().optional(),
+      maxGustKmh: z.boolean().optional(),
+      maxWaveM: z.boolean().optional(),
+      maxPrecipProbPct: z.boolean().optional(),
+    })
+    .optional(),
 });
 
 /**

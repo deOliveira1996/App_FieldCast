@@ -20,7 +20,7 @@ import {
   type OpenMeteoForecastResponse,
   type OpenMeteoMarineResponse,
 } from '../types/schemas';
-import { WEATHER_MODELS, type WeatherModelId } from '../types/weather';
+import { WEATHER_MODELS, type EnsembleHour, type WeatherModelId } from '../types/weather';
 import { computeCircularStat, computeScalarStat } from '../utils/ensembleMath';
 import {
   exportToGeoJson,
@@ -900,5 +900,287 @@ export async function evaluateDueRecurrenceRules(
   return {
     dueCount: dueRules.length,
     generatedLogs,
+  };
+}
+
+export interface HybridPast15DaysResult {
+  series: HistoricalSeriesResult;
+  provenanceByDate: Record<string, string>;
+}
+
+/**
+ * Busca janela pretérita híbrida dos últimos 15 dias:
+ * - Dias -15 a -6: Reanálise ERA5 oficial (`/v1/archive`, sem viés operacional recente)
+ * - Dias -5 a -1 (e horas de hoje): Previsão/Reanálise NWP recente (`/v1/forecast?past_days=7`)
+ * Realiza fallback automático se uma das APIs estiver indisponível.
+ */
+export async function fetchHybridPast15DaysSeries(
+  params: {
+    locationName: string;
+    latitude: number;
+    longitude: number;
+    models?: HistoricalModelSelection[];
+  },
+  options?: FetchHistoricalOptions,
+): Promise<HybridPast15DaysResult> {
+  const now = options?.now ?? new Date();
+  const fetchImpl = options?.fetchImpl ?? globalThis.fetch;
+  if (!fetchImpl) {
+    throw new Error('Cliente HTTP (fetch) indisponível neste ambiente.');
+  }
+
+  const startAnchor = new Date(now.getTime() - 15 * 86_400_000);
+  const era5EndAnchor = new Date(now.getTime() - 6 * 86_400_000);
+  const recentStartAnchor = new Date(now.getTime() - 5 * 86_400_000);
+  const startDateIso = formatLocalYMD(startAnchor);
+  const era5EndDateIso = formatLocalYMD(era5EndAnchor);
+  const recentStartDateIso = formatLocalYMD(recentStartAnchor);
+  const todayDateIso = formatLocalYMD(now);
+  const yesterdayDateIso = formatLocalYMD(new Date(now.getTime() - 86_400_000));
+  const selectedModels: HistoricalModelSelection[] =
+    params.models && params.models.length > 0 ? params.models : ['fieldcast'];
+
+  const provenanceByDate: Record<string, string> = {};
+  const mergedByUnix = new Map<number, HistoricalHourRecord>();
+
+  let era5Result: HistoricalSeriesResult | null = null;
+  let recentResult: HistoricalSeriesResult | null = null;
+
+  try {
+    const archiveUrl = buildHistoricalArchiveUrl({
+      latitude: params.latitude,
+      longitude: params.longitude,
+      startDateIso,
+      endDateIso: era5EndDateIso,
+    });
+    const rawArchive = await fetchJsonWithTimeout(archiveUrl, fetchImpl, options?.timeoutMs);
+    const parsedArchive = OpenMeteoArchiveResponseSchema.parse(rawArchive);
+    era5Result = normalizeArchiveSeries(
+      {
+        locationName: params.locationName,
+        latitude: params.latitude,
+        longitude: params.longitude,
+        startDateIso,
+        endDateIso: era5EndDateIso,
+        models: selectedModels,
+      },
+      parsedArchive,
+    );
+  } catch {
+    era5Result = null;
+  }
+
+  try {
+    recentResult = await fetchHistoricalTimeSeries(
+      {
+        locationName: params.locationName,
+        latitude: params.latitude,
+        longitude: params.longitude,
+        startDateIso: era5Result ? recentStartDateIso : startDateIso,
+        endDateIso: yesterdayDateIso,
+        models: selectedModels,
+      },
+      options,
+    );
+  } catch {
+    recentResult = null;
+  }
+
+  if (!era5Result && !recentResult) {
+    throw new Error(
+      'Não foi possível obter nem a reanálise ERA5 nem as séries NWP recentes para os últimos 15 dias.',
+    );
+  }
+
+  const tz = recentResult?.timezone ?? era5Result?.timezone ?? 'America/Sao_Paulo';
+
+  if (era5Result) {
+    for (const h of era5Result.hours) {
+      const ymd = formatLocalYMD(new Date(h.timestampUnix * 1000), tz);
+      provenanceByDate[ymd] = 'Reanálise ERA5 (~0.25° Open-Meteo Archive)';
+      mergedByUnix.set(h.timestampUnix, {
+        ...h,
+        source: 'Open-Meteo ERA5 Reanálise',
+      });
+    }
+  }
+
+  if (recentResult) {
+    for (const h of recentResult.hours) {
+      const ymd = formatLocalYMD(new Date(h.timestampUnix * 1000), tz);
+      if (era5Result && ymd <= era5EndDateIso) {
+        continue;
+      }
+      if (ymd > todayDateIso) {
+        continue;
+      }
+      provenanceByDate[ymd] =
+        ymd >= recentStartDateIso
+          ? 'NWP Multi-Modelo Recente (Latência ERA5 <5d)'
+          : 'Open-Meteo NWP Fallback (<15d)';
+      mergedByUnix.set(h.timestampUnix, h);
+    }
+  }
+
+  const mergedHours = Array.from(mergedByUnix.values()).sort(
+    (a, b) => a.timestampUnix - b.timestampUnix,
+  );
+
+  const series: HistoricalSeriesResult = {
+    locationName: params.locationName,
+    latitude: recentResult?.latitude ?? era5Result?.latitude ?? params.latitude,
+    longitude: recentResult?.longitude ?? era5Result?.longitude ?? params.longitude,
+    elevationDemM: recentResult?.elevationDemM ?? era5Result?.elevationDemM ?? 0,
+    timezone: tz,
+    startDateIso,
+    endDateIso: yesterdayDateIso,
+    modelsIncluded: selectedModels,
+    sourceLabel:
+      era5Result && recentResult
+        ? 'Híbrido: ERA5 (-15d..-6d) + NWP Multi-Modelo (-5d..-1d)'
+        : (recentResult?.sourceLabel ?? era5Result?.sourceLabel ?? 'Open-Meteo 15d'),
+    fetchedAtIso: now.toISOString(),
+    hours: mergedHours,
+  };
+
+  return { series, provenanceByDate };
+}
+
+export type ExtendedForecastHourSample = Pick<
+  EnsembleHour,
+  | 'timestampUnix'
+  | 'temperature2mC'
+  | 'relativeHumidity2mPct'
+  | 'precipitationMm'
+  | 'windSpeed10m'
+  | 'windGusts10m'
+  | 'windDirection10m'
+  | 'surfacePressureHpa'
+>;
+
+export interface ExtendedForecast16dResult {
+  locationName: string;
+  latitude: number;
+  longitude: number;
+  elevationDemM: number;
+  timezone: string;
+  startDateIso: string;
+  endDateIso: string;
+  fetchedAtIso: string;
+  hours: ExtendedForecastHourSample[];
+  provenanceByDate: Record<string, string>;
+}
+
+/**
+ * Busca projeção estendida de 15–16 dias na Open-Meteo (`/v1/forecast?forecast_days=16`).
+ * Dias +1 a +7 combinam o ensemble multi-modelo completo (ECMWF/GFS/ICON/GEM);
+ * Dias +8 a +16 utilizam continuidade NOAA GFS Seamless com sinalização de incerteza.
+ */
+export async function fetchExtended16DayForecastSeries(
+  params: {
+    locationName: string;
+    latitude: number;
+    longitude: number;
+  },
+  options?: FetchHistoricalOptions,
+): Promise<ExtendedForecast16dResult> {
+  const now = options?.now ?? new Date();
+  const fetchImpl = options?.fetchImpl ?? globalThis.fetch;
+  if (!fetchImpl) {
+    throw new Error('Cliente HTTP (fetch) indisponível neste ambiente.');
+  }
+
+  const search = new URLSearchParams({
+    latitude: params.latitude.toFixed(4),
+    longitude: params.longitude.toFixed(4),
+    hourly: HISTORICAL_HOURLY_VARIABLES.join(','),
+    models: WEATHER_MODELS.join(','),
+    forecast_days: '16',
+    timeformat: 'unixtime',
+    timezone: 'auto',
+  });
+  const url = `${OPEN_METEO_HISTORICAL_FORECAST_URL}?${search.toString()}`;
+
+  const rawPayload = await fetchJsonWithTimeout(url, fetchImpl, options?.timeoutMs);
+  const parsed = OpenMeteoForecastResponseSchema.parse(rawPayload);
+  const timezone = parsed.timezone || 'America/Sao_Paulo';
+  const hourlyRecord = parsed.hourly as unknown as Record<string, readonly (number | null)[] | undefined>;
+  const times = parsed.hourly.time;
+  const provenanceByDate: Record<string, string> = {};
+  const dayIndexByYmd = new Map<string, number>();
+
+  const pickModelVal = (baseVar: string, model: WeatherModelId, idx: number): number | null => {
+    const modelArr = hourlyRecord[`${baseVar}_${model}`] ?? (model === 'ecmwf_ifs025' ? hourlyRecord[baseVar] : undefined);
+    return pickFiniteNumber(modelArr, idx);
+  };
+
+  const hours: ExtendedForecastHourSample[] = times.map((ts, idx) => {
+    const ymd = formatLocalYMD(new Date(ts * 1000), timezone);
+    if (!dayIndexByYmd.has(ymd)) {
+      dayIndexByYmd.set(ymd, dayIndexByYmd.size + 1);
+    }
+    const dayOrdinal = dayIndexByYmd.get(ymd) ?? 1;
+
+    const temps: number[] = [];
+    const rhs: number[] = [];
+    const precips: number[] = [];
+    const winds: number[] = [];
+    const gusts: number[] = [];
+    const dirs: number[] = [];
+    const pressures: number[] = [];
+    const contributingModels: WeatherModelId[] = [];
+
+    for (const model of WEATHER_MODELS) {
+      const t = pickModelVal('temperature_2m', model, idx);
+      const rh = pickModelVal('relative_humidity_2m', model, idx);
+      const pr = pickModelVal('precipitation', model, idx);
+      const ws = pickModelVal('wind_speed_10m', model, idx);
+      const wg = pickModelVal('wind_gusts_10m', model, idx);
+      const wd = pickModelVal('wind_direction_10m', model, idx);
+      const sp = pickModelVal('surface_pressure', model, idx);
+
+      if (t !== null || ws !== null || pr !== null) {
+        contributingModels.push(model);
+      }
+      if (t !== null) temps.push(t);
+      if (rh !== null) rhs.push(rh);
+      if (pr !== null) precips.push(pr);
+      if (ws !== null) winds.push(ws);
+      if (wg !== null) gusts.push(wg);
+      if (wd !== null) dirs.push(wd);
+      if (sp !== null) pressures.push(sp);
+    }
+
+    if (!provenanceByDate[ymd]) {
+      provenanceByDate[ymd] =
+        dayOrdinal <= 7
+          ? `Multi-Modelo (${contributingModels.length || 1} fontes • +${dayOrdinal}d)`
+          : `Extensão NOAA GFS Seamless (+${dayOrdinal}d • Incerteza crescente)`;
+    }
+
+    return {
+      timestampUnix: ts,
+      temperature2mC: computeScalarStat(temps),
+      relativeHumidity2mPct: computeScalarStat(rhs),
+      precipitationMm: computeScalarStat(precips),
+      windSpeed10m: computeScalarStat(winds),
+      windGusts10m: computeScalarStat(gusts),
+      windDirection10m: computeCircularStat(dirs, winds),
+      surfacePressureHpa: computeScalarStat(pressures),
+    };
+  });
+
+  const dates = Array.from(dayIndexByYmd.keys());
+  return {
+    locationName: params.locationName,
+    latitude: parsed.latitude,
+    longitude: parsed.longitude,
+    elevationDemM: parsed.elevation,
+    timezone,
+    startDateIso: dates[0] ?? formatLocalYMD(now, timezone),
+    endDateIso: dates[dates.length - 1] ?? formatLocalYMD(now, timezone),
+    fetchedAtIso: now.toISOString(),
+    hours,
+    provenanceByDate,
   };
 }

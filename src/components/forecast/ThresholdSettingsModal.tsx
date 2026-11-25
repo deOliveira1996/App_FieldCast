@@ -1,12 +1,22 @@
 import React, { useEffect, useState } from 'react';
 import { CloudRain, RotateCcw, Save, Sliders, Waves, Wind, X } from 'lucide-react';
+import { useUnits } from '../../context/UnitsContext';
 import type { ToastMessage } from '../../types/health';
 import { SafeWindowThresholdsSchema } from '../../types/schemas';
 import {
   DEFAULT_SAFE_WINDOW_THRESHOLDS,
+  type SafeWindowThresholdKey,
   type SafeWindowThresholds,
 } from '../../types/weather';
 import { safeAction } from '../../utils/safeAction';
+import {
+  convertWaveHeight,
+  convertWindSpeed,
+  getWaveUnitLabel,
+  getWindUnitLabel,
+  waveHeightToM,
+  windSpeedToKmh,
+} from '../../utils/units';
 import { HelpPopover } from '../common/HelpPopover';
 
 export interface ThresholdSettingsModalProps {
@@ -24,10 +34,17 @@ export const ThresholdSettingsModal: React.FC<ThresholdSettingsModalProps> = ({
   onSaveThresholds,
   onToast,
 }) => {
+  const { units } = useUnits();
   const [maxWindKmh, setMaxWindKmh] = useState<number>(thresholds.maxWindKmh);
   const [maxGustKmh, setMaxGustKmh] = useState<number>(thresholds.maxGustKmh);
   const [maxWaveM, setMaxWaveM] = useState<number>(thresholds.maxWaveM);
   const [maxPrecipProbPct, setMaxPrecipProbPct] = useState<number>(thresholds.maxPrecipProbPct);
+  const [enabledMap, setEnabledMap] = useState<Record<SafeWindowThresholdKey, boolean>>({
+    maxWindKmh: thresholds.enabled?.maxWindKmh ?? true,
+    maxGustKmh: thresholds.enabled?.maxGustKmh ?? true,
+    maxWaveM: thresholds.enabled?.maxWaveM ?? true,
+    maxPrecipProbPct: thresholds.enabled?.maxPrecipProbPct ?? true,
+  });
   const [validationError, setValidationError] = useState<string | null>(null);
   const [isSaving, setIsSaving] = useState(false);
 
@@ -37,6 +54,12 @@ export const ThresholdSettingsModal: React.FC<ThresholdSettingsModalProps> = ({
       setMaxGustKmh(thresholds.maxGustKmh);
       setMaxWaveM(thresholds.maxWaveM);
       setMaxPrecipProbPct(thresholds.maxPrecipProbPct);
+      setEnabledMap({
+        maxWindKmh: thresholds.enabled?.maxWindKmh ?? true,
+        maxGustKmh: thresholds.enabled?.maxGustKmh ?? true,
+        maxWaveM: thresholds.enabled?.maxWaveM ?? true,
+        maxPrecipProbPct: thresholds.enabled?.maxPrecipProbPct ?? true,
+      });
       setValidationError(null);
     }
   }, [isOpen, thresholds]);
@@ -63,6 +86,12 @@ export const ThresholdSettingsModal: React.FC<ThresholdSettingsModalProps> = ({
     setMaxGustKmh(DEFAULT_SAFE_WINDOW_THRESHOLDS.maxGustKmh);
     setMaxWaveM(DEFAULT_SAFE_WINDOW_THRESHOLDS.maxWaveM);
     setMaxPrecipProbPct(DEFAULT_SAFE_WINDOW_THRESHOLDS.maxPrecipProbPct);
+    setEnabledMap({
+      maxWindKmh: true,
+      maxGustKmh: true,
+      maxWaveM: true,
+      maxPrecipProbPct: true,
+    });
     setValidationError(null);
   };
 
@@ -75,6 +104,7 @@ export const ThresholdSettingsModal: React.FC<ThresholdSettingsModalProps> = ({
       maxGustKmh: Number(maxGustKmh),
       maxWaveM: Number(maxWaveM),
       maxPrecipProbPct: Number(maxPrecipProbPct),
+      enabled: { ...enabledMap },
     };
 
     const parsed = SafeWindowThresholdsSchema.safeParse(candidate);
@@ -157,101 +187,184 @@ export const ThresholdSettingsModal: React.FC<ThresholdSettingsModalProps> = ({
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
             {/* Max Wind 10m */}
             <div className="space-y-1.5">
-              <label
-                htmlFor="threshold-wind"
-                className="flex items-center gap-1.5 text-xs font-bold text-slate-700 dark:text-sky-200"
-              >
-                <Wind className="w-4 h-4 text-[#0080cd]" aria-hidden="true" />
-                <span>Vento Máximo 10m (km/h)</span>
-              </label>
+              <div className="flex items-center justify-between gap-2">
+                <label
+                  htmlFor="threshold-wind"
+                  className="flex items-center gap-1.5 text-xs font-bold text-slate-700 dark:text-sky-200"
+                >
+                  <Wind className="w-4 h-4 text-[#0080cd]" aria-hidden="true" />
+                  <span>Vento Máx 10m ({getWindUnitLabel(units.wind)})</span>
+                </label>
+                <label className="inline-flex items-center gap-1 text-[11px] font-semibold text-slate-600 dark:text-sky-300 cursor-pointer">
+                  <input
+                    type="checkbox"
+                    data-testid="threshold-enable-wind"
+                    checked={enabledMap.maxWindKmh}
+                    onChange={(e) =>
+                      setEnabledMap((prev) => ({ ...prev, maxWindKmh: e.target.checked }))
+                    }
+                    className="h-4 w-4 accent-sky-600 rounded"
+                  />
+                  <span>Monitorar</span>
+                </label>
+              </div>
               <input
                 id="threshold-wind"
                 type="number"
-                min={5}
-                max={150}
-                step={1}
-                required
-                value={maxWindKmh}
-                onChange={(e) => setMaxWindKmh(Number(e.target.value))}
-                className="w-full min-h-[44px] px-3.5 py-2 rounded-xl border border-sky-200 dark:border-sky-700 bg-[#f4f8fb] dark:bg-[#0d1f36] text-sm font-bold focus:outline-none focus:ring-2 focus:ring-sky-500"
+                min={1}
+                max={250}
+                step={0.5}
+                required={enabledMap.maxWindKmh}
+                disabled={!enabledMap.maxWindKmh}
+                value={Number((convertWindSpeed(maxWindKmh, units.wind) ?? maxWindKmh).toFixed(1))}
+                onChange={(e) => {
+                  const val = Number(e.target.value);
+                  if (Number.isFinite(val)) {
+                    setMaxWindKmh(Number(windSpeedToKmh(val, units.wind).toFixed(2)));
+                  }
+                }}
+                className="w-full min-h-[44px] px-3.5 py-2 rounded-xl border border-sky-200 dark:border-sky-700 bg-[#f4f8fb] dark:bg-[#0d1f36] text-sm font-bold disabled:opacity-45 focus:outline-none focus:ring-2 focus:ring-sky-500"
               />
               <p className="text-[11px] text-slate-500 dark:text-sky-200/75">
-                Padrão: {DEFAULT_SAFE_WINDOW_THRESHOLDS.maxWindKmh} km/h
+                {enabledMap.maxWindKmh
+                  ? `Padrão: ${(convertWindSpeed(DEFAULT_SAFE_WINDOW_THRESHOLDS.maxWindKmh, units.wind) ?? DEFAULT_SAFE_WINDOW_THRESHOLDS.maxWindKmh).toFixed(1)} ${getWindUnitLabel(units.wind)}`
+                  : 'Opcional — desativado no semáforo'}
               </p>
             </div>
 
             {/* Max Gust 10m */}
             <div className="space-y-1.5">
-              <label
-                htmlFor="threshold-gust"
-                className="flex items-center gap-1.5 text-xs font-bold text-slate-700 dark:text-sky-200"
-              >
-                <Wind className="w-4 h-4 text-orange-500" aria-hidden="true" />
-                <span>Rajada Máxima 10m (km/h)</span>
-              </label>
+              <div className="flex items-center justify-between gap-2">
+                <label
+                  htmlFor="threshold-gust"
+                  className="flex items-center gap-1.5 text-xs font-bold text-slate-700 dark:text-sky-200"
+                >
+                  <Wind className="w-4 h-4 text-orange-500" aria-hidden="true" />
+                  <span>Rajada Máx 10m ({getWindUnitLabel(units.wind)})</span>
+                </label>
+                <label className="inline-flex items-center gap-1 text-[11px] font-semibold text-slate-600 dark:text-sky-300 cursor-pointer">
+                  <input
+                    type="checkbox"
+                    data-testid="threshold-enable-gust"
+                    checked={enabledMap.maxGustKmh}
+                    onChange={(e) =>
+                      setEnabledMap((prev) => ({ ...prev, maxGustKmh: e.target.checked }))
+                    }
+                    className="h-4 w-4 accent-sky-600 rounded"
+                  />
+                  <span>Monitorar</span>
+                </label>
+              </div>
               <input
                 id="threshold-gust"
                 type="number"
-                min={5}
-                max={200}
-                step={1}
-                required
-                value={maxGustKmh}
-                onChange={(e) => setMaxGustKmh(Number(e.target.value))}
-                className="w-full min-h-[44px] px-3.5 py-2 rounded-xl border border-sky-200 dark:border-sky-700 bg-[#f4f8fb] dark:bg-[#0d1f36] text-sm font-bold focus:outline-none focus:ring-2 focus:ring-sky-500"
+                min={1}
+                max={300}
+                step={0.5}
+                required={enabledMap.maxGustKmh}
+                disabled={!enabledMap.maxGustKmh}
+                value={Number((convertWindSpeed(maxGustKmh, units.wind) ?? maxGustKmh).toFixed(1))}
+                onChange={(e) => {
+                  const val = Number(e.target.value);
+                  if (Number.isFinite(val)) {
+                    setMaxGustKmh(Number(windSpeedToKmh(val, units.wind).toFixed(2)));
+                  }
+                }}
+                className="w-full min-h-[44px] px-3.5 py-2 rounded-xl border border-sky-200 dark:border-sky-700 bg-[#f4f8fb] dark:bg-[#0d1f36] text-sm font-bold disabled:opacity-45 focus:outline-none focus:ring-2 focus:ring-sky-500"
               />
               <p className="text-[11px] text-slate-500 dark:text-sky-200/75">
-                Padrão: {DEFAULT_SAFE_WINDOW_THRESHOLDS.maxGustKmh} km/h
+                {enabledMap.maxGustKmh
+                  ? `Padrão: ${(convertWindSpeed(DEFAULT_SAFE_WINDOW_THRESHOLDS.maxGustKmh, units.wind) ?? DEFAULT_SAFE_WINDOW_THRESHOLDS.maxGustKmh).toFixed(1)} ${getWindUnitLabel(units.wind)}`
+                  : 'Opcional — desativado no semáforo'}
               </p>
             </div>
 
             {/* Max Wave Height */}
             <div className="space-y-1.5">
-              <label
-                htmlFor="threshold-wave"
-                className="flex items-center gap-1.5 text-xs font-bold text-slate-700 dark:text-sky-200"
-              >
-                <Waves className="w-4 h-4 text-[#0080cd]" aria-hidden="true" />
-                <span>Altura Máx. de Onda (m)</span>
-              </label>
+              <div className="flex items-center justify-between gap-2">
+                <label
+                  htmlFor="threshold-wave"
+                  className="flex items-center gap-1.5 text-xs font-bold text-slate-700 dark:text-sky-200"
+                >
+                  <Waves className="w-4 h-4 text-[#0080cd]" aria-hidden="true" />
+                  <span>Altura Máx. Onda ({getWaveUnitLabel(units.wave)})</span>
+                </label>
+                <label className="inline-flex items-center gap-1 text-[11px] font-semibold text-slate-600 dark:text-sky-300 cursor-pointer">
+                  <input
+                    type="checkbox"
+                    data-testid="threshold-enable-wave"
+                    checked={enabledMap.maxWaveM}
+                    onChange={(e) =>
+                      setEnabledMap((prev) => ({ ...prev, maxWaveM: e.target.checked }))
+                    }
+                    className="h-4 w-4 accent-sky-600 rounded"
+                  />
+                  <span>Monitorar</span>
+                </label>
+              </div>
               <input
                 id="threshold-wave"
                 type="number"
                 min={0.1}
-                max={20}
+                max={65}
                 step={0.1}
-                required
-                value={maxWaveM}
-                onChange={(e) => setMaxWaveM(Number(e.target.value))}
-                className="w-full min-h-[44px] px-3.5 py-2 rounded-xl border border-sky-200 dark:border-sky-700 bg-[#f4f8fb] dark:bg-[#0d1f36] text-sm font-bold focus:outline-none focus:ring-2 focus:ring-sky-500"
+                required={enabledMap.maxWaveM}
+                disabled={!enabledMap.maxWaveM}
+                value={Number((convertWaveHeight(maxWaveM, units.wave) ?? maxWaveM).toFixed(1))}
+                onChange={(e) => {
+                  const val = Number(e.target.value);
+                  if (Number.isFinite(val)) {
+                    setMaxWaveM(Number(waveHeightToM(val, units.wave).toFixed(2)));
+                  }
+                }}
+                className="w-full min-h-[44px] px-3.5 py-2 rounded-xl border border-sky-200 dark:border-sky-700 bg-[#f4f8fb] dark:bg-[#0d1f36] text-sm font-bold disabled:opacity-45 focus:outline-none focus:ring-2 focus:ring-sky-500"
               />
               <p className="text-[11px] text-slate-500 dark:text-sky-200/75">
-                Padrão: {DEFAULT_SAFE_WINDOW_THRESHOLDS.maxWaveM.toFixed(1)} m
+                {enabledMap.maxWaveM
+                  ? `Padrão: ${(convertWaveHeight(DEFAULT_SAFE_WINDOW_THRESHOLDS.maxWaveM, units.wave) ?? DEFAULT_SAFE_WINDOW_THRESHOLDS.maxWaveM).toFixed(1)} ${getWaveUnitLabel(units.wave)}`
+                  : 'Opcional — desativado no semáforo'}
               </p>
             </div>
 
             {/* Max Precip Probability */}
             <div className="space-y-1.5">
-              <label
-                htmlFor="threshold-precip"
-                className="flex items-center gap-1.5 text-xs font-bold text-slate-700 dark:text-sky-200"
-              >
-                <CloudRain className="w-4 h-4 text-[#0080cd]" aria-hidden="true" />
-                <span>Chance Máx. de Chuva (%)</span>
-              </label>
+              <div className="flex items-center justify-between gap-2">
+                <label
+                  htmlFor="threshold-precip"
+                  className="flex items-center gap-1.5 text-xs font-bold text-slate-700 dark:text-sky-200"
+                >
+                  <CloudRain className="w-4 h-4 text-[#0080cd]" aria-hidden="true" />
+                  <span>Chance Máx. Chuva (%)</span>
+                </label>
+                <label className="inline-flex items-center gap-1 text-[11px] font-semibold text-slate-600 dark:text-sky-300 cursor-pointer">
+                  <input
+                    type="checkbox"
+                    data-testid="threshold-enable-precip"
+                    checked={enabledMap.maxPrecipProbPct}
+                    onChange={(e) =>
+                      setEnabledMap((prev) => ({ ...prev, maxPrecipProbPct: e.target.checked }))
+                    }
+                    className="h-4 w-4 accent-sky-600 rounded"
+                  />
+                  <span>Monitorar</span>
+                </label>
+              </div>
               <input
                 id="threshold-precip"
                 type="number"
                 min={0}
                 max={100}
                 step={5}
-                required
+                required={enabledMap.maxPrecipProbPct}
+                disabled={!enabledMap.maxPrecipProbPct}
                 value={maxPrecipProbPct}
                 onChange={(e) => setMaxPrecipProbPct(Number(e.target.value))}
-                className="w-full min-h-[44px] px-3.5 py-2 rounded-xl border border-sky-200 dark:border-sky-700 bg-[#f4f8fb] dark:bg-[#0d1f36] text-sm font-bold focus:outline-none focus:ring-2 focus:ring-sky-500"
+                className="w-full min-h-[44px] px-3.5 py-2 rounded-xl border border-sky-200 dark:border-sky-700 bg-[#f4f8fb] dark:bg-[#0d1f36] text-sm font-bold disabled:opacity-45 focus:outline-none focus:ring-2 focus:ring-sky-500"
               />
               <p className="text-[11px] text-slate-500 dark:text-sky-200/75">
-                Padrão: {DEFAULT_SAFE_WINDOW_THRESHOLDS.maxPrecipProbPct}%
+                {enabledMap.maxPrecipProbPct
+                  ? `Padrão: ${DEFAULT_SAFE_WINDOW_THRESHOLDS.maxPrecipProbPct}%`
+                  : 'Opcional — desativado no semáforo'}
               </p>
             </div>
           </div>

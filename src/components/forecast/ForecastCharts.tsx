@@ -29,6 +29,7 @@ import {
   MODEL_DISPLAY_LABELS,
   MODEL_SHORT_LABELS,
 } from '../../utils/modelComparison';
+import { useUnits } from '../../context/UnitsContext';
 import { HelpPopover } from '../common/HelpPopover';
 import { degreesToCardinalShort } from './CurrentSummaryCard';
 import type { ForecastHorizonHours } from './ModelSelectorBar';
@@ -146,6 +147,8 @@ export const ForecastCharts: React.FC<ForecastChartsProps> = ({
   isDark = false,
   visibleParams = COMPLETE_VISIBLE_PARAMS,
 }) => {
+  const { formatWindValue, formatTempValue, formatPrecipValue, formatPressureValue, formatWaveValue } =
+    useUnits();
   const [focusTab, setFocusTab] = useState<ChartFocusTab>('all');
   const [fullscreenChartId, setFullscreenChartId] = useState<FullscreenChartId | null>(null);
   const chartRefs = useRef<Record<string, ReactECharts | null>>({});
@@ -1531,9 +1534,7 @@ export const ForecastCharts: React.FC<ForecastChartsProps> = ({
                 Vento Médio 10m
               </span>
               <span className="font-extrabold text-slate-900 dark:text-white">
-                {activeSummaryMetrics.windSpeed !== null
-                  ? `${Math.round(activeSummaryMetrics.windSpeed)} km/h`
-                  : '—'}{' '}
+                {formatWindValue(activeSummaryMetrics.windSpeed, 0)}{' '}
                 <span className="font-semibold text-[#0070b8] dark:text-sky-300">
                   {activeSummaryMetrics.windCardinal}
                   {activeSummaryMetrics.windDir !== null
@@ -1548,9 +1549,7 @@ export const ForecastCharts: React.FC<ForecastChartsProps> = ({
                 Rajadas 10m
               </span>
               <span className="font-extrabold text-orange-600 dark:text-orange-300">
-                {activeSummaryMetrics.gusts !== null
-                  ? `${Math.round(activeSummaryMetrics.gusts)} km/h`
-                  : '—'}
+                {formatWindValue(activeSummaryMetrics.gusts, 0)}
               </span>
             </div>
 
@@ -1559,14 +1558,9 @@ export const ForecastCharts: React.FC<ForecastChartsProps> = ({
                 Temp / Orvalho
               </span>
               <span className="font-extrabold text-slate-900 dark:text-white">
-                {activeSummaryMetrics.temp !== null
-                  ? `${activeSummaryMetrics.temp.toFixed(1)}°C`
-                  : '—'}{' '}
+                {formatTempValue(activeSummaryMetrics.temp, 1)}{' '}
                 <span className="font-semibold text-slate-500 dark:text-sky-300">
-                  /{' '}
-                  {activeSummaryMetrics.dewPoint !== null
-                    ? `${activeSummaryMetrics.dewPoint.toFixed(0)}°C`
-                    : '—'}
+                  / {formatTempValue(activeSummaryMetrics.dewPoint, 0)}
                 </span>
               </span>
             </div>
@@ -1577,8 +1571,8 @@ export const ForecastCharts: React.FC<ForecastChartsProps> = ({
               </span>
               <span className="font-extrabold text-slate-900 dark:text-white">
                 {activeSummaryMetrics.precipMm !== null
-                  ? `${activeSummaryMetrics.precipMm.toFixed(1)} mm`
-                  : '0.0 mm'}{' '}
+                  ? formatPrecipValue(activeSummaryMetrics.precipMm, 1)
+                  : formatPrecipValue(0, 1)}{' '}
                 <span className="font-semibold text-[#0070b8] dark:text-sky-300">
                   •{' '}
                   {activeSummaryMetrics.precipProb !== null
@@ -1593,9 +1587,7 @@ export const ForecastCharts: React.FC<ForecastChartsProps> = ({
                 Pressão
               </span>
               <span className="font-extrabold text-slate-900 dark:text-white">
-                {activeSummaryMetrics.pressureHpa !== null
-                  ? `${Math.round(activeSummaryMetrics.pressureHpa)} hPa`
-                  : '—'}
+                {formatPressureValue(activeSummaryMetrics.pressureHpa)}
               </span>
             </div>
 
@@ -1606,9 +1598,7 @@ export const ForecastCharts: React.FC<ForecastChartsProps> = ({
                   {activeSummaryMetrics.seaLevelHeightMsl !== null ? ' • MSL' : ''}
                 </span>
                 <span className="font-extrabold text-slate-900 dark:text-white">
-                  {activeSummaryMetrics.waveHeight !== null
-                    ? `${activeSummaryMetrics.waveHeight.toFixed(1)}m`
-                    : '—'}{' '}
+                  {formatWaveValue(activeSummaryMetrics.waveHeight, 1)}{' '}
                   <span className="font-semibold text-[#0070b8] dark:text-sky-300">
                     {activeSummaryMetrics.wavePeriod !== null
                       ? `${Math.round(activeSummaryMetrics.wavePeriod)}s`

@@ -39,6 +39,10 @@ function structuredCloneFallback(
   return {
     dailyField: { ...source.dailyField },
     coastalNavigation: { ...source.coastalNavigation },
+    ...(source.enabledDailyField ? { enabledDailyField: { ...source.enabledDailyField } } : {}),
+    ...(source.enabledCoastalNavigation
+      ? { enabledCoastalNavigation: { ...source.enabledCoastalNavigation } }
+      : {}),
   };
 }
 
@@ -135,6 +139,10 @@ function sanitizeActivityQualityThresholds(
         30,
       ),
     },
+    ...(raw?.enabledDailyField ? { enabledDailyField: { ...raw.enabledDailyField } } : {}),
+    ...(raw?.enabledCoastalNavigation
+      ? { enabledCoastalNavigation: { ...raw.enabledCoastalNavigation } }
+      : {}),
   };
 }
 
@@ -352,17 +360,19 @@ export function computeDailyFieldQuality(
     };
   }
 
-  const cfg = sanitizeActivityQualityThresholds(thresholds).dailyField;
+  const sanitizedThresholds = sanitizeActivityQualityThresholds(thresholds);
+  const cfg = sanitizedThresholds.dailyField;
+  const enabledDf = sanitizedThresholds.enabledDailyField;
   let penalty = 0;
   const factors: string[] = [];
 
   const tempC = hour.temperature2mC.mean;
   if (tempC !== null && Number.isFinite(tempC)) {
-    if (tempC < cfg.idealMinTempC) {
+    if (enabledDf?.idealMinTempC !== false && tempC < cfg.idealMinTempC) {
       const diff = cfg.idealMinTempC - tempC;
       penalty += Math.min(22, 6 + diff * 1.8);
       factors.push(`Temperatura abaixo da faixa ideal (${tempC.toFixed(1)} °C)`);
-    } else if (tempC > cfg.idealMaxTempC) {
+    } else if (enabledDf?.idealMaxTempC !== false && tempC > cfg.idealMaxTempC) {
       const diff = tempC - cfg.idealMaxTempC;
       penalty += Math.min(24, 7 + diff * 2.2);
       factors.push(`Calor acima da faixa ideal (${tempC.toFixed(1)} °C)`);
@@ -370,7 +380,7 @@ export function computeDailyFieldQuality(
   }
 
   const windKmh = hour.windSpeed10m.mean;
-  if (windKmh !== null && Number.isFinite(windKmh)) {
+  if (enabledDf?.maxWindKmh !== false && windKmh !== null && Number.isFinite(windKmh)) {
     if (windKmh >= cfg.maxWindKmh) {
       penalty += Math.min(32, 18 + (windKmh - cfg.maxWindKmh) * 0.9);
       factors.push(`Vento 10m acima do limite (${windKmh.toFixed(1)} km/h)`);
@@ -381,7 +391,7 @@ export function computeDailyFieldQuality(
   }
 
   const gustKmh = hour.windGusts10m.mean;
-  if (gustKmh !== null && Number.isFinite(gustKmh)) {
+  if (enabledDf?.maxGustKmh !== false && gustKmh !== null && Number.isFinite(gustKmh)) {
     if (gustKmh >= cfg.maxGustKmh) {
       penalty += Math.min(28, 15 + (gustKmh - cfg.maxGustKmh) * 0.65);
       factors.push(`Rajadas fortes a 10m (${gustKmh.toFixed(1)} km/h)`);
@@ -404,24 +414,29 @@ export function computeDailyFieldQuality(
     factors.push(`Precipitação leve (${precipMm.toFixed(1)} mm/h)`);
   }
 
-  if (precipProb >= cfg.maxPrecipProbPct) {
-    penalty += 14;
-    factors.push(`Probabilidade de chuva elevada (${Math.round(precipProb)}%)`);
-  } else if (precipProb >= cfg.maxPrecipProbPct * 0.75) {
-    penalty += 6;
-    factors.push(`Chances moderadas de chuva (${Math.round(precipProb)}%)`);
+  if (enabledDf?.maxPrecipProbPct !== false) {
+    if (precipProb >= cfg.maxPrecipProbPct) {
+      penalty += 14;
+      factors.push(`Probabilidade de chuva elevada (${Math.round(precipProb)}%)`);
+    } else if (precipProb >= cfg.maxPrecipProbPct * 0.75) {
+      penalty += 6;
+      factors.push(`Chances moderadas de chuva (${Math.round(precipProb)}%)`);
+    }
   }
 
   const cape = hour.capeJkg?.mean ?? null;
   if (
     hour.thunderstormRisk === 'high' ||
-    (cape !== null && Number.isFinite(cape) && cape >= Math.max(1500, cfg.maxCapeJkg * 1.3))
+    (enabledDf?.maxCapeJkg !== false &&
+      cape !== null &&
+      Number.isFinite(cape) &&
+      cape >= Math.max(1500, cfg.maxCapeJkg * 1.3))
   ) {
     penalty += 32;
     factors.push('Risco elevado de tempestade convectiva e raios');
   } else if (
     hour.thunderstormRisk === 'moderate' ||
-    (cape !== null && Number.isFinite(cape) && cape >= cfg.maxCapeJkg)
+    (enabledDf?.maxCapeJkg !== false && cape !== null && Number.isFinite(cape) && cape >= cfg.maxCapeJkg)
   ) {
     penalty += 15;
     factors.push(
@@ -496,14 +511,16 @@ export function computeCoastalNavigationQuality(
     };
   }
 
-  const cfg = sanitizeActivityQualityThresholds(thresholds).coastalNavigation;
+  const sanitizedCn = sanitizeActivityQualityThresholds(thresholds);
+  const cfg = sanitizedCn.coastalNavigation;
+  const enabledCn = sanitizedCn.enabledCoastalNavigation;
   let penalty = 0;
   const factors: string[] = [];
 
   const hasMarineHour = marineAvailable && hour.marine !== null;
   if (hasMarineHour && hour.marine) {
     const waveM = hour.marine.waveHeight;
-    if (waveM !== null && Number.isFinite(waveM)) {
+    if (enabledCn?.maxWaveM !== false && waveM !== null && Number.isFinite(waveM)) {
       if (waveM >= cfg.maxWaveM) {
         penalty += Math.min(38, 22 + (waveM - cfg.maxWaveM) * 12);
         factors.push(`Ondas significativas acima do limite (${waveM.toFixed(2)} m)`);
@@ -514,13 +531,13 @@ export function computeCoastalNavigationQuality(
     }
 
     const swellM = hour.marine.swellWaveHeight;
-    if (swellM !== null && Number.isFinite(swellM) && swellM >= cfg.maxWaveM * 0.9) {
+    if (enabledCn?.maxWaveM !== false && swellM !== null && Number.isFinite(swellM) && swellM >= cfg.maxWaveM * 0.9) {
       penalty += 10;
       factors.push(`Swell energético de fundo (${swellM.toFixed(2)} m)`);
     }
 
     const currentKmh = hour.marine.oceanCurrentVelocity;
-    if (currentKmh !== null && Number.isFinite(currentKmh)) {
+    if (enabledCn?.maxCurrentKmh !== false && currentKmh !== null && Number.isFinite(currentKmh)) {
       if (currentKmh >= cfg.maxCurrentKmh) {
         penalty += Math.min(20, 12 + (currentKmh - cfg.maxCurrentKmh) * 4);
         factors.push(`Corrente costeira intensa (${currentKmh.toFixed(1)} km/h)`);
@@ -546,7 +563,7 @@ export function computeCoastalNavigationQuality(
   }
 
   const windKmh = hour.windSpeed10m.mean;
-  if (windKmh !== null && Number.isFinite(windKmh)) {
+  if (enabledCn?.maxWindKmh !== false && windKmh !== null && Number.isFinite(windKmh)) {
     if (windKmh >= cfg.maxWindKmh) {
       penalty += Math.min(30, 18 + (windKmh - cfg.maxWindKmh) * 0.85);
       factors.push(`Vento de superfície acima do limite (${windKmh.toFixed(1)} km/h)`);
@@ -557,7 +574,7 @@ export function computeCoastalNavigationQuality(
   }
 
   const gustKmh = hour.windGusts10m.mean;
-  if (gustKmh !== null && Number.isFinite(gustKmh)) {
+  if (enabledCn?.maxGustKmh !== false && gustKmh !== null && Number.isFinite(gustKmh)) {
     if (gustKmh >= cfg.maxGustKmh) {
       penalty += Math.min(26, 15 + (gustKmh - cfg.maxGustKmh) * 0.6);
       factors.push(`Rajadas acima do limite náutico (${gustKmh.toFixed(1)} km/h)`);
@@ -568,7 +585,7 @@ export function computeCoastalNavigationQuality(
   }
 
   const visibilityM = hour.visibilityM.mean;
-  if (visibilityM !== null && Number.isFinite(visibilityM)) {
+  if (enabledCn?.minVisibilityKm !== false && visibilityM !== null && Number.isFinite(visibilityM)) {
     const visibilityKm = visibilityM / 1000;
     if (visibilityKm < cfg.minVisibilityKm) {
       penalty += visibilityKm < 1 ? 24 : 14;
@@ -592,7 +609,9 @@ export function computeCoastalNavigationQuality(
   let score = Math.max(0, Math.min(100, Math.round(100 - penalty)));
   if (
     (hour.thunderstormRisk === 'high' ||
-      (hasMarineHour && (hour.marine?.waveHeight ?? 0) >= cfg.maxWaveM * 1.4)) &&
+      (enabledCn?.maxWaveM !== false &&
+        hasMarineHour &&
+        (hour.marine?.waveHeight ?? 0) >= cfg.maxWaveM * 1.4)) &&
     score > 45
   ) {
     score = 45;

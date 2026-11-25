@@ -28,6 +28,8 @@ import {
   Compass,
   Crosshair,
   Download,
+  Eye,
+  EyeOff,
   HardDrive,
   Layers,
   Lock,
@@ -56,6 +58,17 @@ import {
   XCircle,
 } from 'lucide-react';
 import { ModuleErrorBoundary } from '../common';
+import { useUnits } from '../../context/UnitsContext';
+import {
+  convertPrecipitation,
+  convertTemperature,
+  convertWaveHeight,
+  convertWindSpeed,
+  getPrecipUnitLabel,
+  getTempUnitLabel,
+  getWaveUnitLabel,
+  getWindUnitLabel,
+} from '../../utils/units';
 import { WeatherModelOverlayLayer } from './WeatherModelOverlayLayer';
 import {
   createWindyFlagPinIcon,
@@ -504,10 +517,13 @@ function MapRadarTabContent({
   const [radarTileErrorCount, setRadarTileErrorCount] = useState<number>(0);
 
   // Modo Pin estilo Windy, Trava Reativa de Marcador (Pin-Lock), Tela Cheia e Gaveta Windy
+  const { units, formatWindValue, formatTempValue, formatPrecipValue } = useUnits();
   const [instantWindyPin, setInstantWindyPin] = useState<boolean>(true);
   const [isPinLocked, setIsPinLocked] = useState<boolean>(false);
   const [isFullscreen, setIsFullscreen] = useState<boolean>(false);
-  const [isSidebarOpen, setIsSidebarOpen] = useState<boolean>(true);
+  const [isSidebarOpen, setIsSidebarOpen] = useState<boolean>(false);
+  const [isHudHidden, setIsHudHidden] = useState<boolean>(false);
+  const [showWindStreamlines, setShowWindStreamlines] = useState<boolean>(true);
   const [forecastAreaRadiusKm, setForecastAreaRadiusKm] = useState<number>(5);
   const [customPinName, setCustomPinName] = useState<string>('');
 
@@ -1325,62 +1341,62 @@ function MapRadarTabContent({
             : 'rounded-2xl border border-sky-200/80 dark:border-sky-900/60 bg-white dark:bg-slate-900/90 overflow-hidden shadow-sm min-w-0'
         }
       >
-        {/* Barra Tática Superior (Normal: topo do card | Tela Cheia: flutuante sobre o mapa) */}
+        {/* Barra Tática Superior (Normal e Tela Cheia sempre em fluxo flex não-sobreposto) */}
         <div
           className={
             isFullscreen
-              ? 'absolute top-2.5 left-14 right-2.5 sm:right-auto sm:max-w-[calc(100vw-22rem)] z-[520] rounded-2xl border border-slate-700/90 bg-slate-900/95 backdrop-blur-md p-2.5 sm:p-3 shadow-2xl space-y-2 min-w-0'
-              : 'border-b border-sky-100 dark:border-slate-800 bg-white dark:bg-slate-900/95 p-3.5 sm:p-4 space-y-2.5 min-w-0'
+              ? 'shrink-0 border-b border-slate-800 bg-slate-900/95 backdrop-blur-md px-3 py-2 space-y-1.5 min-w-0'
+              : 'border-b border-sky-100 dark:border-slate-800 bg-white dark:bg-slate-900/95 p-3 sm:p-3.5 space-y-2 min-w-0'
           }
         >
-          <div className="flex flex-col xl:flex-row xl:items-center justify-between gap-2.5 min-w-0">
-            <div className="space-y-1 min-w-0">
+          <div className="flex flex-wrap items-center justify-between gap-2 min-w-0">
+            <div className="space-y-0.5 min-w-0">
               <div className="flex flex-wrap items-center gap-1.5 min-w-0">
-                <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-bold bg-sky-600 text-white shadow-sm">
-                  <MapPin className="w-3.5 h-3.5 shrink-0" aria-hidden="true" />
+                <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[11px] font-bold bg-sky-600 text-white shadow-sm">
+                  <MapPin className="w-3 h-3 shrink-0" aria-hidden="true" />
                   <span>Mapa &amp; Radar</span>
                 </span>
                 {!isFullscreen && (
                   <>
-                    <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-semibold bg-sky-50 dark:bg-sky-950/60 text-sky-700 dark:text-sky-300 border border-sky-200 dark:border-sky-800">
-                      100% Gratuito • {activeBaseStyleLabel}
+                    <span className="hidden sm:inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[11px] font-semibold bg-sky-50 dark:bg-sky-950/60 text-sky-700 dark:text-sky-300 border border-sky-200 dark:border-sky-800">
+                      {activeBaseStyleLabel}
                     </span>
-                    <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-semibold bg-emerald-50 dark:bg-emerald-950/60 text-emerald-700 dark:text-emerald-300 border border-emerald-200 dark:border-emerald-800">
-                      <HardDrive className="w-3.5 h-3.5 shrink-0" aria-hidden="true" />
-                      <span>Cache Offline: {cacheStats.totalTiles} tiles</span>
+                    <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[11px] font-semibold bg-emerald-50 dark:bg-emerald-950/60 text-emerald-700 dark:text-emerald-300 border border-emerald-200 dark:border-emerald-800">
+                      <HardDrive className="w-3 h-3 shrink-0" aria-hidden="true" />
+                      <span>{cacheStats.totalTiles} tiles</span>
                     </span>
                   </>
                 )}
               </div>
               <p
-                className={`text-xs truncate ${
+                className={`text-[11px] truncate ${
                   isFullscreen
                     ? 'text-slate-200'
                     : 'text-slate-600 dark:text-slate-300'
                 }`}
               >
-                Pin ativo:{' '}
                 <strong className={isFullscreen ? 'text-white' : 'text-sky-900 dark:text-white'}>
                   {activeLocation.name}
                 </strong>{' '}
-                ({activeLocation.latitude.toFixed(4)}°, {activeLocation.longitude.toFixed(4)}°)
-                {forecast ? ` • DEM: ${Math.round(forecast.elevationDemM)}m` : ''}
+                ({activeLocation.latitude.toFixed(3)}°, {activeLocation.longitude.toFixed(3)}°)
+                {forecast ? ` • DEM ${Math.round(forecast.elevationDemM)}m` : ''}
               </p>
             </div>
 
-            {/* Botões Principais: Pin-Lock Reativo, Gaveta Windy, Centralizar e Tela Cheia */}
-            <div className="flex flex-wrap items-center gap-2 min-w-0">
+            {/* Botões Compactos Icon-Only: Pin-Lock, Vento Streamlines, HUD Hide/Show, Gaveta, Centralizar e Tela Cheia */}
+            <div className="flex flex-wrap items-center gap-1.5 min-w-0">
               <button
                 type="button"
                 data-testid="map-pin-lock-btn"
                 onClick={() => setIsPinLocked((prev) => !prev)}
                 aria-pressed={isPinLocked}
+                aria-label={isPinLocked ? 'Pin Fixado (clique para liberar)' : 'Pin Livre (clique para fixar)'}
                 title={
                   isPinLocked
                     ? 'Pin Fixado: navegue por oceanos/continentes e inspecione a grade 3x3 sem alterar a previsão ativa'
                     : 'Pin Livre: clicar ou arrastar no mapa atualiza o marcador de previsão'
                 }
-                className={`min-h-[44px] min-w-[44px] px-3.5 py-2 rounded-xl text-xs font-bold inline-flex items-center gap-1.5 border transition-colors ${
+                className={`min-h-[44px] min-w-[44px] p-2 rounded-xl text-xs font-bold inline-flex items-center justify-center gap-1 border transition-colors ${
                   isPinLocked
                     ? 'bg-amber-500 text-slate-950 border-amber-500 shadow-sm'
                     : isFullscreen
@@ -1389,15 +1405,52 @@ function MapRadarTabContent({
                 }`}
               >
                 {isPinLocked ? (
-                  <>
-                    <Lock className="w-4 h-4 shrink-0" aria-hidden="true" />
-                    <span>Pin Fixado</span>
-                  </>
+                  <Lock className="w-4 h-4 shrink-0" aria-hidden="true" />
                 ) : (
-                  <>
-                    <Unlock className="w-4 h-4 shrink-0" aria-hidden="true" />
-                    <span>Pin Livre</span>
-                  </>
+                  <Unlock className="w-4 h-4 shrink-0" aria-hidden="true" />
+                )}
+                <span className="hidden md:inline text-[11px]">
+                  {isPinLocked ? 'Fixo' : 'Livre'}
+                </span>
+              </button>
+
+              <button
+                type="button"
+                data-testid="map-wind-flow-toggle"
+                onClick={() => setShowWindStreamlines((prev) => !prev)}
+                aria-pressed={showWindStreamlines}
+                aria-label={showWindStreamlines ? 'Ocultar linhas de vento animadas' : 'Mostrar linhas de vento animadas'}
+                title={showWindStreamlines ? 'Fluxo de vento animado ativo' : 'Ativar fluxo de vento animado'}
+                className={`min-h-[44px] min-w-[44px] p-2 rounded-xl text-xs font-bold inline-flex items-center justify-center border transition-colors ${
+                  showWindStreamlines
+                    ? 'bg-sky-600 text-white border-sky-600 shadow-sm'
+                    : isFullscreen
+                      ? 'bg-slate-800 text-sky-200 border-slate-700 hover:bg-slate-700'
+                      : 'bg-sky-50 dark:bg-slate-800 text-sky-900 dark:text-sky-200 border-sky-200 dark:border-slate-700 hover:bg-sky-100'
+                }`}
+              >
+                <Wind className="w-4 h-4 shrink-0" aria-hidden="true" />
+              </button>
+
+              <button
+                type="button"
+                data-testid="map-hud-toggle-btn"
+                onClick={() => setIsHudHidden((prev) => !prev)}
+                aria-pressed={isHudHidden}
+                aria-label={isHudHidden ? 'Mostrar HUD flutuante do mapa' : 'Ocultar HUD flutuante do mapa'}
+                title={isHudHidden ? 'Mostrar HUD' : 'Ocultar HUD'}
+                className={`min-h-[44px] min-w-[44px] p-2 rounded-xl text-xs font-bold inline-flex items-center justify-center border transition-colors ${
+                  isHudHidden
+                    ? 'bg-amber-500 text-slate-950 border-amber-500 shadow-sm'
+                    : isFullscreen
+                      ? 'bg-slate-800 text-sky-200 border-slate-700 hover:bg-slate-700'
+                      : 'bg-sky-50 dark:bg-slate-800 text-sky-900 dark:text-sky-200 border-sky-200 dark:border-slate-700 hover:bg-sky-100'
+                }`}
+              >
+                {isHudHidden ? (
+                  <Eye className="w-4 h-4 shrink-0" aria-hidden="true" />
+                ) : (
+                  <EyeOff className="w-4 h-4 shrink-0" aria-hidden="true" />
                 )}
               </button>
 
@@ -1407,7 +1460,9 @@ function MapRadarTabContent({
                 onClick={() => setIsSidebarOpen((prev) => !prev)}
                 aria-expanded={isSidebarOpen}
                 aria-controls="map-windy-controls-drawer"
-                className={`min-h-[44px] min-w-[44px] px-3.5 py-2 rounded-xl text-xs font-bold inline-flex items-center gap-1.5 border transition-colors ${
+                aria-label={isSidebarOpen ? 'Ocultar gaveta de camadas e offline' : 'Abrir gaveta de camadas e offline'}
+                title={isSidebarOpen ? 'Ocultar Gaveta' : 'Camadas & Offline'}
+                className={`min-h-[44px] min-w-[44px] p-2 rounded-xl text-xs font-bold inline-flex items-center justify-center border transition-colors ${
                   isSidebarOpen
                     ? 'bg-sky-600 text-white border-sky-600 shadow-sm'
                     : isFullscreen
@@ -1416,26 +1471,20 @@ function MapRadarTabContent({
                 }`}
               >
                 {isSidebarOpen ? (
-                  <>
-                    <PanelRightClose className="w-4 h-4 shrink-0" aria-hidden="true" />
-                    <span>Ocultar Gaveta</span>
-                  </>
+                  <PanelRightClose className="w-4 h-4 shrink-0" aria-hidden="true" />
                 ) : (
-                  <>
-                    <PanelRightOpen className="w-4 h-4 shrink-0" aria-hidden="true" />
-                    <span>Camadas &amp; Offline</span>
-                  </>
+                  <PanelRightOpen className="w-4 h-4 shrink-0" aria-hidden="true" />
                 )}
               </button>
 
               <button
                 type="button"
                 onClick={() => setRecenterTrigger((prev) => prev + 1)}
-                className="min-h-[44px] min-w-[44px] px-3 py-2 rounded-xl text-xs font-semibold inline-flex items-center gap-1.5 bg-sky-600 hover:bg-sky-500 text-white shadow-sm transition-colors"
+                className="min-h-[44px] min-w-[44px] p-2 rounded-xl text-xs font-semibold inline-flex items-center justify-center bg-sky-600 hover:bg-sky-500 text-white shadow-sm transition-colors"
+                aria-label="Centralizar mapa no Pin ativo"
                 title="Centralizar mapa no Pin ativo"
               >
                 <Crosshair className="w-4 h-4 shrink-0" aria-hidden="true" />
-                <span className="hidden sm:inline">Centralizar Pin</span>
               </button>
 
               <button
@@ -1443,22 +1492,18 @@ function MapRadarTabContent({
                 data-testid="map-fullscreen-btn"
                 onClick={() => setIsFullscreen((prev) => !prev)}
                 aria-pressed={isFullscreen}
-                className={`min-h-[44px] min-w-[44px] px-3.5 py-2 rounded-xl text-xs font-bold inline-flex items-center gap-1.5 border transition-colors ${
+                aria-label={isFullscreen ? 'Reduzir mapa da tela cheia' : 'Expandir mapa em tela cheia'}
+                title={isFullscreen ? 'Reduzir Mapa' : 'Tela Cheia'}
+                className={`min-h-[44px] min-w-[44px] p-2 rounded-xl text-xs font-bold inline-flex items-center justify-center border transition-colors ${
                   isFullscreen
                     ? 'bg-rose-600 hover:bg-rose-500 text-white border-rose-500 shadow-sm'
                     : 'bg-sky-50 dark:bg-slate-800 text-sky-900 dark:text-sky-200 border-sky-200 dark:border-slate-700 hover:bg-sky-100'
                 }`}
               >
                 {isFullscreen ? (
-                  <>
-                    <Minimize2 className="w-4 h-4 shrink-0" aria-hidden="true" />
-                    <span>Reduzir Mapa</span>
-                  </>
+                  <Minimize2 className="w-4 h-4 shrink-0" aria-hidden="true" />
                 ) : (
-                  <>
-                    <Maximize2 className="w-4 h-4 shrink-0" aria-hidden="true" />
-                    <span>Tela Cheia</span>
-                  </>
+                  <Maximize2 className="w-4 h-4 shrink-0" aria-hidden="true" />
                 )}
               </button>
             </div>
@@ -1538,6 +1583,7 @@ function MapRadarTabContent({
               }
               opacity={radarOpacity}
               animateFlow={true}
+              showWindStreamlines={showWindStreamlines && activeWeatherLayer !== 'none'}
               onLayerError={() => {
                 setActiveWeatherLayer('none');
                 onToast?.({
@@ -1960,9 +2006,7 @@ function MapRadarTabContent({
                   <span>
                     Vento:{' '}
                     <strong>
-                      {lockedGridSample.windSpeedKmh !== null
-                        ? `${Math.round(lockedGridSample.windSpeedKmh)} km/h`
-                        : '—'}
+                      {formatWindValue(lockedGridSample.windSpeedKmh, 0)}
                       {lockedGridSample.windDirectionDeg !== null
                         ? ` (${degreesToCardinal(lockedGridSample.windDirectionDeg)})`
                         : ''}
@@ -1971,17 +2015,13 @@ function MapRadarTabContent({
                   <span>
                     Chuva:{' '}
                     <strong>
-                      {lockedGridSample.precipMm !== null
-                        ? `${lockedGridSample.precipMm.toFixed(1)} mm`
-                        : '—'}
+                      {formatPrecipValue(lockedGridSample.precipMm, 1)}
                     </strong>
                   </span>
                   <span>
                     Temp:{' '}
                     <strong>
-                      {lockedGridSample.tempC !== null
-                        ? `${lockedGridSample.tempC.toFixed(1)}°C`
-                        : '—'}
+                      {formatTempValue(lockedGridSample.tempC, 1)}
                     </strong>
                   </span>
                 </div>
@@ -1992,10 +2032,8 @@ function MapRadarTabContent({
           {/* HUD Flutuante no Mapa: Informa Modelo Meteorológico, Radar RainViewer & Escala de Cores */}
           <div
             data-testid="map-weather-hud"
-            className={`absolute z-[500] max-w-[270px] sm:max-w-[310px] rounded-2xl border border-sky-200/90 dark:border-sky-800 bg-white/95 dark:bg-slate-900/95 backdrop-blur-md p-2.5 sm:p-3 shadow-md space-y-1.5 pointer-events-auto ${
-              isFullscreen
-                ? 'bottom-3 right-3 sm:bottom-auto sm:top-3 sm:right-3'
-                : 'top-3 right-3'
+            className={`absolute z-[500] max-w-[260px] sm:max-w-[300px] rounded-2xl border border-sky-200/90 dark:border-sky-800 bg-white/95 dark:bg-slate-900/95 backdrop-blur-md p-2 sm:p-2.5 shadow-md space-y-1.5 pointer-events-auto top-2 right-2 ${
+              isHudHidden ? 'hidden' : isSidebarOpen ? 'hidden sm:block' : 'block'
             }`}
           >
             <div className="flex items-center justify-between gap-2">
@@ -2022,19 +2060,19 @@ function MapRadarTabContent({
               <span>
                 Vento:{' '}
                 <strong className="text-slate-900 dark:text-white">
-                  {activeWindSpeed !== null ? `${Math.round(activeWindSpeed)} km/h` : '—'}
+                  {formatWindValue(activeWindSpeed, 0)}
                 </strong>
               </span>
               <span>
                 Chuva:{' '}
                 <strong className="text-slate-900 dark:text-white">
-                  {activePrecipMm !== null ? `${activePrecipMm.toFixed(1)} mm` : '—'}
+                  {formatPrecipValue(activePrecipMm, 1)}
                 </strong>
               </span>
               <span>
                 Temp:{' '}
                 <strong className="text-slate-900 dark:text-white">
-                  {activeTempC !== null ? `${Math.round(activeTempC)}°C` : '—'}
+                  {formatTempValue(activeTempC, 0)}
                 </strong>
               </span>
             </div>
@@ -2054,7 +2092,7 @@ function MapRadarTabContent({
                 {!radarEnabled
                   ? 'Radar RainViewer pausado pelo usuário'
                   : radarState?.available && activeFrame
-                    ? `RainViewer: ${frames.length} quadros • ${formatFrameTimestamp(activeFrame.timeUnix)}${
+                    ? `RainViewer: ${frames.length} quadros • ${formatFrameTimestamp(activeFrame.timeUnix)} (só chuva ativa)${
                         radarTileErrorCount > 0 ? ' (alguns tiles falharam)' : ''
                       }`
                     : isLoadingRadar
@@ -2067,7 +2105,17 @@ function MapRadarTabContent({
               <div className="pt-1 border-t border-sky-100 dark:border-slate-800">
                 <div className="flex items-center justify-between text-[10px] font-semibold text-slate-600 dark:text-slate-300 mb-1">
                   <span>{activeLegendSpec.title}</span>
-                  <span>{activeLegendSpec.unit}</span>
+                  <span>
+                    {activeWeatherLayer === 'wind'
+                      ? getWindUnitLabel(units.wind)
+                      : activeWeatherLayer === 'temperature'
+                        ? getTempUnitLabel(units.temperature)
+                        : activeWeatherLayer === 'waves'
+                          ? getWaveUnitLabel(units.wave)
+                          : activeWeatherLayer === 'rain'
+                            ? `${getPrecipUnitLabel(units.precipitation)}/h`
+                            : activeLegendSpec.unit}
+                  </span>
                 </div>
                 <div className="flex items-center rounded-full overflow-hidden h-2 border border-slate-200/80 dark:border-slate-700">
                   {activeLegendSpec.stops.map((stop) => (
@@ -2080,9 +2128,38 @@ function MapRadarTabContent({
                   ))}
                 </div>
                 <div className="flex items-center justify-between text-[9px] font-mono text-slate-500 dark:text-slate-400 mt-0.5">
-                  {activeLegendSpec.stops.map((stop) => (
-                    <span key={stop.valueLabel}>{stop.valueLabel}</span>
-                  ))}
+                  {activeLegendSpec.stops.map((stop) => {
+                    const num = Number(stop.valueLabel);
+                    let displayLabel = stop.valueLabel;
+                    if (Number.isFinite(num)) {
+                      if (activeWeatherLayer === 'wind') {
+                        const converted = convertWindSpeed(num, units.wind);
+                        displayLabel =
+                          converted !== null
+                            ? units.wind === 'ms'
+                              ? converted.toFixed(0)
+                              : String(Math.round(converted))
+                            : stop.valueLabel;
+                      } else if (activeWeatherLayer === 'temperature') {
+                        const converted = convertTemperature(num, units.temperature);
+                        displayLabel =
+                          converted !== null ? String(Math.round(converted)) : stop.valueLabel;
+                      } else if (activeWeatherLayer === 'waves') {
+                        const converted = convertWaveHeight(num, units.wave);
+                        displayLabel =
+                          converted !== null ? converted.toFixed(1) : stop.valueLabel;
+                      } else if (activeWeatherLayer === 'rain') {
+                        const converted = convertPrecipitation(num, units.precipitation);
+                        displayLabel =
+                          converted !== null
+                            ? units.precipitation === 'in'
+                              ? converted.toFixed(2)
+                              : stop.valueLabel
+                            : stop.valueLabel;
+                      }
+                    }
+                    return <span key={stop.valueLabel}>{displayLabel}</span>;
+                  })}
                 </div>
               </div>
             )}
@@ -2336,17 +2413,19 @@ function MapRadarTabContent({
         </div>
       </section>
 
-      {/* Gaveta Recolhível Estilo Windy: Camadas do Modelo, Radar, Mapa Base, Pin & Área de Missão Offline */}
-      {isSidebarOpen && (
-        <div
-          id="map-windy-controls-drawer"
-          data-testid="map-windy-drawer"
-          className={
-            isFullscreen
-              ? 'fixed bottom-24 right-3 z-[85] max-h-[55vh] w-[calc(100vw-1.5rem)] sm:w-[440px] overflow-y-auto rounded-2xl border border-slate-700 bg-slate-900/95 backdrop-blur-md p-4 shadow-2xl space-y-4 min-w-0'
-              : 'space-y-4 min-w-0'
-          }
-        >
+      {/* Gaveta Recolhível Estilo Windy (sempre montada com CSS hidden quando fechada para preservação DOM + zero poluição visual) */}
+      <div
+        id="map-windy-controls-drawer"
+        data-testid="map-windy-drawer"
+        aria-hidden={!isSidebarOpen}
+        className={
+          !isSidebarOpen
+            ? 'hidden'
+            : isFullscreen
+              ? 'fixed bottom-20 right-3 z-[85] max-h-[46vh] w-[calc(100vw-1.5rem)] sm:w-[420px] overflow-y-auto rounded-2xl border border-slate-700 bg-slate-900/95 backdrop-blur-md p-3.5 shadow-2xl space-y-3 min-w-0'
+              : 'space-y-3 min-w-0'
+        }
+      >
           {/* Card de Camadas, Mapa Base e Controles do Pin Estilo Windy */}
           <section className="rounded-2xl border border-sky-200/80 dark:border-sky-900/60 bg-white dark:bg-slate-900/90 p-4 sm:p-5 shadow-sm space-y-3.5 min-w-0">
             <div className="flex flex-wrap items-center justify-between gap-2 border-b border-sky-100 dark:border-slate-800 pb-2.5">
@@ -2395,7 +2474,12 @@ function MapRadarTabContent({
                   <button
                     key={id}
                     type="button"
-                    onClick={() => setActiveWeatherLayer(id)}
+                    onClick={() => {
+                      setActiveWeatherLayer(id);
+                      if (id !== 'none') {
+                        setTimelineMode('model');
+                      }
+                    }}
                     aria-pressed={active}
                     className={`min-h-[40px] px-3 py-1.5 rounded-full text-xs font-semibold inline-flex items-center gap-1.5 border transition-all ${
                       active
@@ -2992,7 +3076,6 @@ function MapRadarTabContent({
         </div>
         </section>
       </div>
-      )}
     </div>
   );
 }

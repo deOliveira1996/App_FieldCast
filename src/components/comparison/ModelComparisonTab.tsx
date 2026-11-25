@@ -32,6 +32,19 @@ import {
   useCurrentLocalHourIndex,
 } from '../../utils/localTimeHour';
 import { MODEL_COLORS, MODEL_DISPLAY_LABELS } from '../../utils/modelComparison';
+import {
+  convertPrecipitation,
+  convertPressure,
+  convertTemperature,
+  convertWindSpeed,
+  getPrecipUnitLabel,
+  getPressureUnitLabel,
+  getTempUnitLabel,
+  getWindUnitLabel,
+  type UnitPreferences,
+} from '../../utils/units';
+import { useUnits } from '../../context/UnitsContext';
+import { CollapsibleModule } from '../common/CollapsibleModule';
 import { HelpPopover } from '../common/HelpPopover';
 import { ModuleErrorBoundary } from '../common/ModuleErrorBoundary';
 import { ForecastSkeleton } from '../common/SkeletonLoaders';
@@ -112,6 +125,7 @@ function formatSpreadRange(
   stdDev: number | null | undefined,
   unit: string,
   decimals = 0,
+  converter: (v: number) => number = (v) => v,
 ): string {
   if (
     minVal !== null &&
@@ -121,11 +135,14 @@ function formatSpreadRange(
     Number.isFinite(minVal) &&
     Number.isFinite(maxVal)
   ) {
-    const spread = Math.max(0, maxVal - minVal);
-    const stdPart =
+    const cMin = converter(minVal);
+    const cMax = converter(maxVal);
+    const spread = Math.max(0, cMax - cMin);
+    const cStd =
       stdDev !== null && stdDev !== undefined && Number.isFinite(stdDev)
-        ? ` (±${stdDev.toFixed(decimals)})`
-        : '';
+        ? Math.abs(converter(minVal + stdDev) - converter(minVal))
+        : null;
+    const stdPart = cStd !== null ? ` (±${cStd.toFixed(decimals)})` : '';
     return `Δ ${spread.toFixed(decimals)} ${unit}${stdPart}`;
   }
   return '—';
@@ -134,17 +151,20 @@ function formatSpreadRange(
 function formatAltitudeWindCell(
   speed80m: number | null | undefined,
   speed100m: number | null | undefined,
+  windUnit: UnitPreferences['wind'] = 'kmh',
 ): string {
-  const has80 = typeof speed80m === 'number' && Number.isFinite(speed80m);
-  const has100 = typeof speed100m === 'number' && Number.isFinite(speed100m);
-  if (has80 && has100) {
-    return `${Math.round(speed80m)} / ${Math.round(speed100m)} km/h`;
+  const s80 = convertWindSpeed(speed80m, windUnit);
+  const s100 = convertWindSpeed(speed100m, windUnit);
+  const lbl = getWindUnitLabel(windUnit);
+  const fmt = (v: number) => (windUnit === 'ms' ? v.toFixed(1) : String(Math.round(v)));
+  if (s80 !== null && s100 !== null) {
+    return `${fmt(s80)} / ${fmt(s100)} ${lbl}`;
   }
-  if (has100) {
-    return `${Math.round(speed100m)} km/h (100m)`;
+  if (s100 !== null) {
+    return `${fmt(s100)} ${lbl} (100m)`;
   }
-  if (has80) {
-    return `${Math.round(speed80m)} km/h (80m)`;
+  if (s80 !== null) {
+    return `${fmt(s80)} ${lbl} (80m)`;
   }
   return '—';
 }
@@ -162,6 +182,8 @@ export const ModelComparisonTab: React.FC<ModelComparisonTabProps> = ({
   onToast,
   onErrorLog,
 }) => {
+  const { units, formatTempValue, formatWindValue, formatPrecipValue, formatPressureValue } =
+    useUnits();
   const [internalViewMode, setInternalViewMode] = useState<ForecastViewMode>('fieldcast');
   const viewMode = propViewMode ?? internalViewMode;
   const setViewMode = useCallback(
@@ -356,6 +378,11 @@ export const ModelComparisonTab: React.FC<ModelComparisonTabProps> = ({
   const currentLocalHHMM = forecast.hours[currentLocalHourIndex]
     ? formatLocalHourBadge(forecast.hours[currentLocalHourIndex]!.timestampUnix, forecast.timezone)
     : '00:00';
+  const activeStepHHMM = activeHour
+    ? formatLocalHourBadge(activeHour.timestampUnix, forecast.timezone)
+    : currentLocalHHMM;
+  const isMatrixAtCurrentHour =
+    manualHourIndex === null || safeHourIndex === currentLocalHourIndex;
 
   const renderWindguruTableInstance = () => (
     <WindguruTable
@@ -475,24 +502,18 @@ export const ModelComparisonTab: React.FC<ModelComparisonTabProps> = ({
           </div>
         </section>
 
-        {/* 2. Model Comparison Matrix Card */}
-        <section
-          data-testid="model-comparison-matrix"
-          aria-label="Matriz de Comparação Lado a Lado entre Modelos"
-          className="rounded-2xl border border-slate-200/90 dark:border-sky-800/75 bg-white dark:bg-[#132a47] p-4 sm:p-5 shadow-sm space-y-4"
+        {/* 2. Model Comparison Matrix Card (Collapsible) */}
+        <CollapsibleModule
+          testId="model-comparison-matrix"
+          title={`Matriz Comparativa — ${activeLocation.name}`}
+          subtitle={activeTimestampText}
+          icon={<GitCompare className="w-4 h-4 text-[#0080cd] dark:text-sky-400" aria-hidden="true" />}
+          defaultOpen={true}
+          keepMounted={true}
         >
-          <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-3 border-b border-slate-100 dark:border-sky-800/70 pb-3">
-            <div className="space-y-1">
-              <div className="flex flex-wrap items-center gap-2">
-                <GitCompare className="w-5 h-5 text-[#0080cd] dark:text-sky-400" aria-hidden="true" />
-                <h2 className="text-sm sm:text-base font-extrabold text-slate-900 dark:text-white">
-                  Matriz Comparativa Multi-Modelo — {activeLocation.name}
-                </h2>
-                <span className="px-2.5 py-0.5 rounded-full text-xs font-bold bg-sky-50 dark:bg-[#0d1f36] text-[#0070b8] dark:text-sky-200 border border-sky-200 dark:border-sky-700 capitalize">
-                  {activeTimestampText}
-                </span>
-              </div>
-              <p className="text-xs text-slate-500 dark:text-sky-200/80">
+          <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-2.5 border-b border-slate-100 dark:border-sky-800/70 pb-2.5">
+            <div className="space-y-0.5">
+              <p className="text-[11px] text-slate-500 dark:text-sky-200/80">
                 Comparação instantânea do Consenso FieldCast contra ECMWF IFS, NOAA GFS, DWD ICON e CMC GEM
               </p>
             </div>
@@ -526,10 +547,22 @@ export const ModelComparisonTab: React.FC<ModelComparisonTabProps> = ({
                 </button>
                 <button
                   type="button"
+                  data-testid="matrix-stepper-active-time"
                   onClick={() => setManualHourIndex(null)}
-                  className="min-h-[44px] px-3 rounded-lg text-xs font-bold text-[#0070b8] dark:text-sky-200 hover:bg-white dark:hover:bg-sky-900/50 transition-colors"
+                  title={
+                    isMatrixAtCurrentHour
+                      ? `Horário local atual (${currentLocalHHMM})`
+                      : `Hora selecionada: ${activeStepHHMM} — clique para voltar para Agora (${currentLocalHHMM})`
+                  }
+                  className={`min-h-[44px] px-3 rounded-lg text-xs font-bold transition-colors ${
+                    isMatrixAtCurrentHour
+                      ? 'text-[#0070b8] dark:text-sky-200 hover:bg-white dark:hover:bg-sky-900/50'
+                      : 'bg-amber-100/90 dark:bg-amber-950/60 text-amber-900 dark:text-amber-200 hover:bg-amber-200/80'
+                  }`}
                 >
-                  Agora ({currentLocalHHMM})
+                  {isMatrixAtCurrentHour
+                    ? `Agora (${currentLocalHHMM})`
+                    : `${activeStepHHMM} ↺ Agora`}
                 </button>
                 <button
                   type="button"
@@ -574,40 +607,39 @@ export const ModelComparisonTab: React.FC<ModelComparisonTabProps> = ({
                 <tbody className="divide-y divide-slate-100 dark:divide-sky-800/50 text-slate-800 dark:text-sky-100">
                   {/* Temp 2m */}
                   <tr>
-                    <th className="py-2.5 px-3 font-bold">Temperatura (2m)</th>
-                    <td className="py-2.5 px-3 font-extrabold bg-sky-50/45 dark:bg-sky-950/35">
-                      {activeHour.temperature2mC.mean !== null
-                        ? `${activeHour.temperature2mC.mean.toFixed(1)} °C`
-                        : '—'}
+                    <th className="py-2 px-3 font-bold">Temperatura (2m)</th>
+                    <td className="py-2 px-3 font-extrabold bg-sky-50/45 dark:bg-sky-950/35">
+                      {formatTempValue(activeHour.temperature2mC.mean, 1)}
                     </td>
                     {WEATHER_MODELS.map((modelId) => {
                       const val = nativeHourByModel[modelId]?.temperature2m;
                       return (
-                        <td key={modelId} className="py-2.5 px-3 font-semibold">
-                          {typeof val === 'number' && Number.isFinite(val)
-                            ? `${val.toFixed(1)} °C`
-                            : '—'}
+                        <td key={modelId} className="py-2 px-3 font-semibold">
+                          {formatTempValue(val, 1)}
                         </td>
                       );
                     })}
-                    <td className="py-2.5 px-3 font-mono text-[11px] text-slate-600 dark:text-sky-300">
+                    <td className="py-2 px-3 font-mono text-[11px] text-slate-600 dark:text-sky-300">
                       {formatSpreadRange(
                         activeHour.temperature2mC.min,
                         activeHour.temperature2mC.max,
                         activeHour.temperature2mC.stdDev,
-                        '°C',
+                        getTempUnitLabel(units.temperature),
                         1,
+                        (v) => convertTemperature(v, units.temperature) ?? v,
                       )}
                     </td>
                   </tr>
 
-                  {/* Rain mm/h & % */}
+                  {/* Rain & % */}
                   <tr>
-                    <th className="py-2.5 px-3 font-bold">Chuva (mm/h • %)</th>
-                    <td className="py-2.5 px-3 font-extrabold bg-sky-50/45 dark:bg-sky-950/35">
+                    <th className="py-2 px-3 font-bold">
+                      Chuva ({getPrecipUnitLabel(units.precipitation)}/h • %)
+                    </th>
+                    <td className="py-2 px-3 font-extrabold bg-sky-50/45 dark:bg-sky-950/35">
                       {activeHour.precipitationMm.mean !== null
-                        ? `${activeHour.precipitationMm.mean.toFixed(1)} mm`
-                        : '0.0 mm'}{' '}
+                        ? formatPrecipValue(activeHour.precipitationMm.mean, 1)
+                        : formatPrecipValue(0, 1)}{' '}
                       <span className="text-[11px] font-bold text-[#0070b8] dark:text-sky-300">
                         ({activeHour.precipitationProbabilityPct.mean !== null
                           ? `${Math.round(activeHour.precipitationProbabilityPct.mean)}%`
@@ -619,9 +651,9 @@ export const ModelComparisonTab: React.FC<ModelComparisonTabProps> = ({
                       const mm = m?.precipitation;
                       const prob = m?.precipitationProbability;
                       return (
-                        <td key={modelId} className="py-2.5 px-3 font-semibold">
+                        <td key={modelId} className="py-2 px-3 font-semibold">
                           {typeof mm === 'number' && Number.isFinite(mm)
-                            ? `${mm.toFixed(1)} mm`
+                            ? formatPrecipValue(mm, 1)
                             : '—'}
                           {typeof prob === 'number' && Number.isFinite(prob)
                             ? ` (${Math.round(prob)}%)`
@@ -629,137 +661,140 @@ export const ModelComparisonTab: React.FC<ModelComparisonTabProps> = ({
                         </td>
                       );
                     })}
-                    <td className="py-2.5 px-3 font-mono text-[11px] text-slate-600 dark:text-sky-300">
+                    <td className="py-2 px-3 font-mono text-[11px] text-slate-600 dark:text-sky-300">
                       {formatSpreadRange(
                         activeHour.precipitationMm.min,
                         activeHour.precipitationMm.max,
                         activeHour.precipitationMm.stdDev,
-                        'mm',
+                        getPrecipUnitLabel(units.precipitation),
                         1,
+                        (v) => convertPrecipitation(v, units.precipitation) ?? v,
                       )}
                     </td>
                   </tr>
 
                   {/* Wind 10m */}
                   <tr>
-                    <th className="py-2.5 px-3 font-bold">Vento 10m</th>
-                    <td className="py-2.5 px-3 font-extrabold bg-sky-50/45 dark:bg-sky-950/35">
+                    <th className="py-2 px-3 font-bold">Vento 10m</th>
+                    <td className="py-2 px-3 font-extrabold bg-sky-50/45 dark:bg-sky-950/35">
                       {activeHour.windSpeed10m.mean !== null
-                        ? `${Math.round(activeHour.windSpeed10m.mean)} km/h ${degreesToCardinalShort(activeHour.windDirection10m.degree)}`
+                        ? `${formatWindValue(activeHour.windSpeed10m.mean, 0)} ${degreesToCardinalShort(activeHour.windDirection10m.degree)}`
                         : '—'}
                     </td>
                     {WEATHER_MODELS.map((modelId) => {
                       const m = nativeHourByModel[modelId];
                       const spd = m?.windSpeed10m;
                       return (
-                        <td key={modelId} className="py-2.5 px-3 font-semibold">
+                        <td key={modelId} className="py-2 px-3 font-semibold">
                           {typeof spd === 'number' && Number.isFinite(spd)
-                            ? `${Math.round(spd)} km/h ${degreesToCardinalShort(m?.windDirection10m)}`
+                            ? `${formatWindValue(spd, 0)} ${degreesToCardinalShort(m?.windDirection10m)}`
                             : '—'}
                         </td>
                       );
                     })}
-                    <td className="py-2.5 px-3 font-mono text-[11px] text-slate-600 dark:text-sky-300">
+                    <td className="py-2 px-3 font-mono text-[11px] text-slate-600 dark:text-sky-300">
                       {formatSpreadRange(
                         activeHour.windSpeed10m.min,
                         activeHour.windSpeed10m.max,
                         activeHour.windSpeed10m.stdDev,
-                        'km/h',
-                        0,
+                        getWindUnitLabel(units.wind),
+                        units.wind === 'ms' ? 1 : 0,
+                        (v) => convertWindSpeed(v, units.wind) ?? v,
                       )}
                     </td>
                   </tr>
 
                   {/* Wind 80m / 100m */}
                   <tr>
-                    <th className="py-2.5 px-3 font-bold">Vento 80m / 100m</th>
-                    <td className="py-2.5 px-3 font-extrabold bg-sky-50/45 dark:bg-sky-950/35">
+                    <th className="py-2 px-3 font-bold">Vento 80m / 100m</th>
+                    <td className="py-2 px-3 font-extrabold bg-sky-50/45 dark:bg-sky-950/35">
                       {formatAltitudeWindCell(
                         activeHour.windSpeed80m.mean,
                         activeHour.windSpeed100m.mean,
+                        units.wind,
                       )}
                     </td>
                     {WEATHER_MODELS.map((modelId) => {
                       const m = nativeHourByModel[modelId];
                       return (
-                        <td key={modelId} className="py-2.5 px-3 font-semibold">
-                          {formatAltitudeWindCell(m?.windSpeed80m, m?.windSpeed100m)}
+                        <td key={modelId} className="py-2 px-3 font-semibold">
+                          {formatAltitudeWindCell(m?.windSpeed80m, m?.windSpeed100m, units.wind)}
                         </td>
                       );
                     })}
-                    <td className="py-2.5 px-3 font-mono text-[11px] text-slate-600 dark:text-sky-300">
+                    <td className="py-2 px-3 font-mono text-[11px] text-slate-600 dark:text-sky-300">
                       {activeHour.windSpeed80m.min !== null && activeHour.windSpeed80m.max !== null
                         ? formatSpreadRange(
                             activeHour.windSpeed80m.min,
                             activeHour.windSpeed80m.max,
                             activeHour.windSpeed80m.stdDev,
-                            'km/h',
-                            0,
+                            getWindUnitLabel(units.wind),
+                            units.wind === 'ms' ? 1 : 0,
+                            (v) => convertWindSpeed(v, units.wind) ?? v,
                           )
                         : formatSpreadRange(
                             activeHour.windSpeed100m.min,
                             activeHour.windSpeed100m.max,
                             activeHour.windSpeed100m.stdDev,
-                            'km/h',
-                            0,
+                            getWindUnitLabel(units.wind),
+                            units.wind === 'ms' ? 1 : 0,
+                            (v) => convertWindSpeed(v, units.wind) ?? v,
                           )}
                     </td>
                   </tr>
 
                   {/* Gusts 10m */}
                   <tr>
-                    <th className="py-2.5 px-3 font-bold">Rajadas 10m</th>
-                    <td className="py-2.5 px-3 font-extrabold text-orange-600 dark:text-orange-300 bg-sky-50/45 dark:bg-sky-950/35">
-                      {activeHour.windGusts10m.mean !== null
-                        ? `${Math.round(activeHour.windGusts10m.mean)} km/h`
-                        : '—'}
+                    <th className="py-2 px-3 font-bold">Rajadas 10m</th>
+                    <td className="py-2 px-3 font-extrabold text-orange-600 dark:text-orange-300 bg-sky-50/45 dark:bg-sky-950/35">
+                      {formatWindValue(activeHour.windGusts10m.mean, 0)}
                     </td>
                     {WEATHER_MODELS.map((modelId) => {
                       const gust = nativeHourByModel[modelId]?.windGusts10m;
                       return (
-                        <td key={modelId} className="py-2.5 px-3 font-semibold">
+                        <td key={modelId} className="py-2 px-3 font-semibold">
                           {typeof gust === 'number' && Number.isFinite(gust)
-                            ? `${Math.round(gust)} km/h`
+                            ? formatWindValue(gust, 0)
                             : '—'}
                         </td>
                       );
                     })}
-                    <td className="py-2.5 px-3 font-mono text-[11px] text-slate-600 dark:text-sky-300">
+                    <td className="py-2 px-3 font-mono text-[11px] text-slate-600 dark:text-sky-300">
                       {formatSpreadRange(
                         activeHour.windGusts10m.min,
                         activeHour.windGusts10m.max,
                         activeHour.windGusts10m.stdDev,
-                        'km/h',
-                        0,
+                        getWindUnitLabel(units.wind),
+                        units.wind === 'ms' ? 1 : 0,
+                        (v) => convertWindSpeed(v, units.wind) ?? v,
                       )}
                     </td>
                   </tr>
 
                   {/* Surface Pressure */}
                   <tr>
-                    <th className="py-2.5 px-3 font-bold">Pressão Superfície</th>
-                    <td className="py-2.5 px-3 font-extrabold bg-sky-50/45 dark:bg-sky-950/35">
-                      {activeHour.surfacePressureHpa.mean !== null
-                        ? `${Math.round(activeHour.surfacePressureHpa.mean)} hPa`
-                        : '—'}
+                    <th className="py-2 px-3 font-bold">Pressão Superfície</th>
+                    <td className="py-2 px-3 font-extrabold bg-sky-50/45 dark:bg-sky-950/35">
+                      {formatPressureValue(activeHour.surfacePressureHpa.mean)}
                     </td>
                     {WEATHER_MODELS.map((modelId) => {
                       const p = nativeHourByModel[modelId]?.surfacePressure;
                       return (
-                        <td key={modelId} className="py-2.5 px-3 font-semibold">
+                        <td key={modelId} className="py-2 px-3 font-semibold">
                           {typeof p === 'number' && Number.isFinite(p)
-                            ? `${Math.round(p)} hPa`
+                            ? formatPressureValue(p)
                             : '—'}
                         </td>
                       );
                     })}
-                    <td className="py-2.5 px-3 font-mono text-[11px] text-slate-600 dark:text-sky-300">
+                    <td className="py-2 px-3 font-mono text-[11px] text-slate-600 dark:text-sky-300">
                       {formatSpreadRange(
                         activeHour.surfacePressureHpa.min,
                         activeHour.surfacePressureHpa.max,
                         activeHour.surfacePressureHpa.stdDev,
-                        'hPa',
-                        1,
+                        getPressureUnitLabel(units.pressure),
+                        units.pressure === 'inhg' ? 2 : 1,
+                        (v) => convertPressure(v, units.pressure) ?? v,
                       )}
                     </td>
                   </tr>
@@ -806,7 +841,7 @@ export const ModelComparisonTab: React.FC<ModelComparisonTabProps> = ({
               </span>
             </div>
           </div>
-        </section>
+        </CollapsibleModule>
 
         {/* 3. On-Demand Plot Toggle Controls */}
         <section
@@ -931,10 +966,10 @@ export const ModelComparisonTab: React.FC<ModelComparisonTabProps> = ({
               data-testid="table-fullscreen-btn"
               onClick={() => setIsTableFullscreen(true)}
               aria-label="Abrir tabela multi-modelo em Tela Cheia"
-              className="min-h-[44px] min-w-[44px] px-4 py-2 rounded-xl text-xs font-extrabold inline-flex items-center justify-center gap-2 bg-white dark:bg-[#132a47] hover:bg-sky-50 dark:hover:bg-sky-900/50 text-[#0070b8] dark:text-sky-200 border border-sky-200 dark:border-sky-700 shadow-xs transition-colors focus:outline-none focus:ring-2 focus:ring-sky-500"
+              title="Tela Cheia da Tabela"
+              className="min-h-[44px] min-w-[44px] p-2 sm:px-3 rounded-xl text-xs font-extrabold inline-flex items-center justify-center gap-1.5 bg-white dark:bg-[#132a47] hover:bg-sky-50 dark:hover:bg-sky-900/50 text-[#0070b8] dark:text-sky-200 border border-sky-200 dark:border-sky-700 shadow-xs transition-colors focus:outline-none focus:ring-2 focus:ring-sky-500"
             >
               <Maximize2 className="w-4 h-4 text-[#0080cd] dark:text-sky-300" aria-hidden="true" />
-              <span>Tela Cheia da Tabela</span>
             </button>
           </div>
 

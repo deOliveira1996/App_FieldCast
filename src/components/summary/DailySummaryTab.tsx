@@ -47,10 +47,12 @@ import {
 } from '../../utils/localTimeHour';
 import { MODEL_DISPLAY_LABELS } from '../../utils/modelComparison';
 import { safeAction } from '../../utils/safeAction';
+import { convertTemperature, convertWindSpeed, getTempUnitLabel } from '../../utils/units';
+import { useUnits } from '../../context/UnitsContext';
+import { CollapsibleModule } from '../common/CollapsibleModule';
 import { ModuleErrorBoundary } from '../common/ModuleErrorBoundary';
 import { ForecastSkeleton } from '../common/SkeletonLoaders';
 import { degreesToCardinalShort } from '../forecast/CurrentSummaryCard';
-import { ForecastPinMiniMap } from '../forecast/ForecastPinMiniMap';
 import type { ForecastTabProps } from '../forecast/ForecastTab';
 import { ThresholdSettingsModal } from '../forecast/ThresholdSettingsModal';
 import { useAppLocationContext } from '../layout/AppShell';
@@ -684,15 +686,11 @@ const WeatherConditionIcon: React.FC<{
 export const DailySummaryTab: React.FC<DailySummaryTabProps> = ({
   forecast,
   activeLocation,
-  savedLocations: propSavedLocations,
   isLoading = false,
   viewMode: propViewMode,
   onViewModeChange: propOnViewModeChange,
   thresholds,
   onSaveThresholds,
-  onSelectLocation: propOnSelectLocation,
-  onSaveLocation: propOnSaveLocation,
-  onRequestGps: propOnRequestGps,
   onOpenLocationsModal,
   onReloadForecast,
   onToast,
@@ -702,10 +700,15 @@ export const DailySummaryTab: React.FC<DailySummaryTabProps> = ({
   onNavigateTab,
 }) => {
   const locationCtx = useAppLocationContext();
-  const resolvedOnSelectLocation = propOnSelectLocation ?? locationCtx?.onSelectLocation;
-  const resolvedOnSaveLocation = propOnSaveLocation ?? locationCtx?.onSaveLocation;
-  const resolvedOnRequestGps = propOnRequestGps ?? locationCtx?.onRequestGps;
-  const resolvedSavedLocations = propSavedLocations ?? locationCtx?.savedLocations ?? [];
+  const {
+    units,
+    windLabel,
+    formatTempValue,
+    formatWindValue,
+    formatWaveValue,
+    formatPressureValue,
+    formatPrecipValue,
+  } = useUnits();
   const resolvedOpenLocationsModal = onOpenLocationsModal ?? locationCtx?.openLocationsModal;
 
   const [internalViewMode, setInternalViewMode] = useState<ForecastViewMode>('fieldcast');
@@ -1213,9 +1216,7 @@ export const DailySummaryTab: React.FC<DailySummaryTabProps> = ({
                     Tendência Barométrica (ΔP / 3h)
                   </span>
                   <p className="font-extrabold text-slate-900 dark:text-white">
-                    {activeMetrics?.pressureHpa !== null && activeMetrics?.pressureHpa !== undefined
-                      ? `${Math.round(activeMetrics.pressureHpa)} hPa`
-                      : '—'}{' '}
+                    {formatPressureValue(activeMetrics?.pressureHpa)}{' '}
                     •{' '}
                     <span>
                       Δ3h:{' '}
@@ -1432,22 +1433,22 @@ export const DailySummaryTab: React.FC<DailySummaryTabProps> = ({
           {/* Center Hero Temperature + Everyday Metrics Grid */}
           <div className="grid grid-cols-1 lg:grid-cols-12 gap-4 items-stretch">
             {/* Large Current Temperature + Min/Max + Apparent */}
-            <div className="lg:col-span-5 rounded-2xl border border-sky-100 dark:border-sky-800/80 bg-white dark:bg-[#0d1f36]/90 p-4 sm:p-5 flex items-center justify-between gap-4">
-              <div className="space-y-1.5">
-                <div className="flex items-center gap-2.5">
+            <div className="lg:col-span-5 rounded-2xl border border-sky-100 dark:border-sky-800/80 bg-white dark:bg-[#0d1f36]/90 p-3.5 sm:p-4 flex items-center justify-between gap-3">
+              <div className="space-y-1">
+                <div className="flex items-center gap-2">
                   <WeatherConditionIcon
                     thunderstormRisk={activeMetrics?.thunderstormRisk ?? 'none'}
                     precipMm={activeMetrics?.precipMm ?? null}
                     precipProbPct={activeMetrics?.precipProbPct ?? null}
                     cloudPct={activeMetrics?.cloudCoverPct ?? null}
-                    className="w-9 h-9"
+                    className="w-7 h-7"
                   />
                   <span
                     data-testid="hero-current-temp"
-                    className="text-4xl sm:text-5xl font-extrabold tracking-tight text-slate-900 dark:text-white"
+                    className="text-3xl sm:text-4xl font-extrabold tracking-tight text-slate-900 dark:text-white"
                   >
                     {activeMetrics?.tempC !== null && activeMetrics?.tempC !== undefined
-                      ? `${Math.round(activeMetrics.tempC)}°C`
+                      ? `${Math.round(convertTemperature(activeMetrics.tempC, units.temperature) ?? activeMetrics.tempC)}${getTempUnitLabel(units.temperature)}`
                       : '—'}
                   </span>
                 </div>
@@ -1455,26 +1456,27 @@ export const DailySummaryTab: React.FC<DailySummaryTabProps> = ({
                 <p className="text-xs font-semibold text-slate-600 dark:text-sky-200">
                   Sensação térmica:{' '}
                   <strong className="text-slate-900 dark:text-white">
-                    {activeMetrics?.apparentTempC !== null &&
-                    activeMetrics?.apparentTempC !== undefined
-                      ? `${activeMetrics.apparentTempC.toFixed(1)}°C`
-                      : '—'}
+                    {formatTempValue(activeMetrics?.apparentTempC, 1)}
                   </strong>
                 </p>
               </div>
 
-              <div className="text-right space-y-1.5 shrink-0">
+              <div className="text-right space-y-1 shrink-0">
                 <span className="text-[11px] font-semibold text-slate-500 dark:text-sky-300/80 block">
                   Hoje (Mín / Máx)
                 </span>
-                <div className="flex items-center justify-end gap-2.5 text-base sm:text-lg font-extrabold">
+                <div className="flex items-center justify-end gap-2 text-sm sm:text-base font-extrabold">
                   <span className="inline-flex items-center gap-0.5 text-[#0080cd] dark:text-sky-400">
-                    <ArrowDown className="w-4 h-4" aria-hidden="true" />
-                    {activeDayMinMax.min !== null ? `${activeDayMinMax.min}°` : '—'}
+                    <ArrowDown className="w-3.5 h-3.5" aria-hidden="true" />
+                    {activeDayMinMax.min !== null
+                      ? `${Math.round(convertTemperature(activeDayMinMax.min, units.temperature) ?? activeDayMinMax.min)}°`
+                      : '—'}
                   </span>
                   <span className="inline-flex items-center gap-0.5 text-orange-500 dark:text-orange-400">
-                    <ArrowUp className="w-4 h-4" aria-hidden="true" />
-                    {activeDayMinMax.max !== null ? `${activeDayMinMax.max}°` : '—'}
+                    <ArrowUp className="w-3.5 h-3.5" aria-hidden="true" />
+                    {activeDayMinMax.max !== null
+                      ? `${Math.round(convertTemperature(activeDayMinMax.max, units.temperature) ?? activeDayMinMax.max)}°`
+                      : '—'}
                   </span>
                 </div>
                 <span className="text-[11px] text-slate-500 dark:text-sky-300/75 block">
@@ -1506,10 +1508,7 @@ export const DailySummaryTab: React.FC<DailySummaryTabProps> = ({
                       : '—'}
                   </span>
                   <span className="text-[11px] text-slate-500 dark:text-sky-300/75 block">
-                    Orvalho{' '}
-                    {activeMetrics?.dewPointC !== null && activeMetrics?.dewPointC !== undefined
-                      ? `${activeMetrics.dewPointC.toFixed(0)}°C`
-                      : '—'}
+                    Orvalho {formatTempValue(activeMetrics?.dewPointC, 0)}
                   </span>
                 </div>
               </div>
@@ -1556,11 +1555,7 @@ export const DailySummaryTab: React.FC<DailySummaryTabProps> = ({
                     {currentStormMeta.label}
                   </span>
                   <span className="text-[11px] text-slate-500 dark:text-sky-300/75 block">
-                    Pressão{' '}
-                    {activeMetrics?.pressureHpa !== null &&
-                    activeMetrics?.pressureHpa !== undefined
-                      ? `${Math.round(activeMetrics.pressureHpa)} hPa`
-                      : '—'}
+                    Pressão {formatPressureValue(activeMetrics?.pressureHpa)}
                   </span>
                 </div>
               </div>
@@ -1568,28 +1563,21 @@ export const DailySummaryTab: React.FC<DailySummaryTabProps> = ({
               {/* Wind 10m + Gusts */}
               <div
                 data-testid="hero-wind-card"
-                className="rounded-2xl border border-slate-200/85 dark:border-sky-800/75 bg-white dark:bg-[#0d1f36]/90 p-3.5 flex flex-col justify-between gap-2"
+                className="rounded-2xl border border-slate-200/85 dark:border-sky-800/75 bg-white dark:bg-[#0d1f36]/90 p-3 flex flex-col justify-between gap-1.5"
               >
                 <span className="text-xs font-bold text-slate-600 dark:text-sky-200 inline-flex items-center gap-1.5">
-                  <Wind className="w-4 h-4 text-[#0080cd] dark:text-sky-400 shrink-0" aria-hidden="true" />
+                  <Wind className="w-3.5 h-3.5 text-[#0080cd] dark:text-sky-400 shrink-0" aria-hidden="true" />
                   <span>Vento 10m</span>
                 </span>
                 <div>
-                  <span className="text-base sm:text-lg font-extrabold text-slate-900 dark:text-white block">
-                    {activeMetrics?.windSpeed10mKmh !== null &&
-                    activeMetrics?.windSpeed10mKmh !== undefined
-                      ? `${Math.round(activeMetrics.windSpeed10mKmh)} km/h`
-                      : '—'}{' '}
+                  <span className="text-sm sm:text-base font-extrabold text-slate-900 dark:text-white block">
+                    {formatWindValue(activeMetrics?.windSpeed10mKmh, 0)}{' '}
                     <span className="text-xs font-bold text-[#0070b8] dark:text-sky-300">
                       {degreesToCardinalShort(activeMetrics?.windDir10mDeg)}
                     </span>
                   </span>
                   <span className="text-[11px] font-semibold text-orange-600 dark:text-orange-300 block">
-                    Rajadas:{' '}
-                    {activeMetrics?.windGusts10mKmh !== null &&
-                    activeMetrics?.windGusts10mKmh !== undefined
-                      ? `${Math.round(activeMetrics.windGusts10mKmh)} km/h`
-                      : '—'}
+                    Rajadas: {formatWindValue(activeMetrics?.windGusts10mKmh, 0)}
                   </span>
                 </div>
               </div>
@@ -1597,14 +1585,12 @@ export const DailySummaryTab: React.FC<DailySummaryTabProps> = ({
           </div>
 
           {forecast.marineAvailable && selectedEnsembleHour?.marine && (
-            <div className="rounded-2xl border border-sky-100 dark:border-sky-800/75 bg-sky-50/70 dark:bg-[#0d1f36]/75 px-4 py-2.5 flex flex-wrap items-center justify-between gap-2 text-xs">
+            <div className="rounded-2xl border border-sky-100 dark:border-sky-800/75 bg-sky-50/70 dark:bg-[#0d1f36]/75 px-3.5 py-2 flex flex-wrap items-center justify-between gap-2 text-xs">
               <div className="flex flex-wrap items-center gap-2">
                 <Waves className="w-4 h-4 text-[#0080cd] dark:text-sky-400 shrink-0" aria-hidden="true" />
                 <span className="font-bold text-slate-800 dark:text-white">
                   Condição Costeira: Ondas{' '}
-                  {selectedEnsembleHour.marine.waveHeight !== null
-                    ? `${selectedEnsembleHour.marine.waveHeight.toFixed(1)} m`
-                    : '—'}{' '}
+                  {formatWaveValue(selectedEnsembleHour.marine.waveHeight, 1)}{' '}
                   ({selectedEnsembleHour.marine.wavePeriod !== null
                     ? `${Math.round(selectedEnsembleHour.marine.wavePeriod)}s`
                     : '—'}{' '}
@@ -1628,28 +1614,21 @@ export const DailySummaryTab: React.FC<DailySummaryTabProps> = ({
           )}
         </section>
 
-        {/* 4. 24-Hour Horizontal Forecast Strip */}
-        <section
-          data-testid="hourly-24h-strip"
-          aria-label="Previsão das Próximas 24 Horas"
-          className="rounded-2xl border border-slate-200/90 dark:border-sky-800/75 bg-white dark:bg-[#132a47] p-4 sm:p-5 shadow-sm space-y-3"
+        {/* 4. 24-Hour Horizontal Forecast Strip (Collapsible) */}
+        <CollapsibleModule
+          testId="hourly-24h-strip"
+          title="Próximas 24 Horas"
+          subtitle="Toque em qualquer horário para atualizar o cartão principal"
+          icon={<Clock className="w-4 h-4 text-[#0080cd] dark:text-sky-400" aria-hidden="true" />}
+          defaultOpen={true}
+          keepMounted={true}
         >
-          <div className="flex flex-wrap items-center justify-between gap-2">
-            <div className="flex items-center gap-2">
-              <Clock className="w-4 h-4 text-[#0080cd] dark:text-sky-400" aria-hidden="true" />
-              <h2 className="text-sm sm:text-base font-extrabold text-slate-900 dark:text-white">
-                Próximas 24 Horas
-              </h2>
-            </div>
-            <span className="text-xs text-slate-500 dark:text-sky-200/75">
-              Toque em qualquer horário para atualizar o cartão principal
-            </span>
-          </div>
-
           <div className="min-w-0 overflow-x-auto scrollbar-thin pb-1">
-            <div className="flex items-stretch gap-2.5 min-w-max">
+            <div className="flex items-stretch gap-2 min-w-max">
               {next24Hours.map((item) => {
                 const m = item.metrics;
+                const convertedTemp = convertTemperature(m?.tempC, units.temperature);
+                const convertedWind = convertWindSpeed(m?.windSpeed10mKmh, units.wind);
                 return (
                   <button
                     key={item.timestampUnix}
@@ -1658,7 +1637,7 @@ export const DailySummaryTab: React.FC<DailySummaryTabProps> = ({
                       setManualHourIndex(item.isCurrentHour ? null : item.absoluteIndex)
                     }
                     aria-pressed={item.isSelectedHour}
-                    className={`min-h-[44px] min-w-[84px] p-3 rounded-2xl border text-center flex flex-col items-center justify-between gap-1.5 transition-all focus:outline-none focus:ring-2 focus:ring-sky-500 ${
+                    className={`min-h-[44px] min-w-[76px] p-2.5 rounded-2xl border text-center flex flex-col items-center justify-between gap-1 transition-all focus:outline-none focus:ring-2 focus:ring-sky-500 ${
                       item.isSelectedHour
                         ? 'bg-[#0080cd] text-white border-[#0080cd] shadow-md'
                         : item.isCurrentHour
@@ -1675,13 +1654,11 @@ export const DailySummaryTab: React.FC<DailySummaryTabProps> = ({
                       precipMm={m?.precipMm ?? null}
                       precipProbPct={m?.precipProbPct ?? null}
                       cloudPct={m?.cloudCoverPct ?? null}
-                      className={`w-5 h-5 ${item.isSelectedHour ? '!text-white' : ''}`}
+                      className={`w-4 h-4 ${item.isSelectedHour ? '!text-white' : ''}`}
                     />
 
                     <span className="text-sm font-extrabold">
-                      {m?.tempC !== null && m?.tempC !== undefined
-                        ? `${Math.round(m.tempC)}°`
-                        : '—'}
+                      {convertedTemp !== null ? `${Math.round(convertedTemp)}°` : '—'}
                     </span>
 
                     <span
@@ -1696,8 +1673,8 @@ export const DailySummaryTab: React.FC<DailySummaryTabProps> = ({
                         : '0%'}{' '}
                       •{' '}
                       {m?.precipMm !== null && m?.precipMm !== undefined && m.precipMm >= 0.1
-                        ? `${m.precipMm.toFixed(1)}mm`
-                        : '0mm'}
+                        ? formatPrecipValue(m.precipMm, 1)
+                        : formatPrecipValue(0, 0)}
                     </span>
 
                     <span
@@ -1707,8 +1684,8 @@ export const DailySummaryTab: React.FC<DailySummaryTabProps> = ({
                           : 'text-slate-600 dark:text-sky-200/80'
                       }`}
                     >
-                      {m?.windSpeed10mKmh !== null && m?.windSpeed10mKmh !== undefined
-                        ? `${Math.round(m.windSpeed10mKmh)}km/h ${degreesToCardinalShort(m.windDir10mDeg)}`
+                      {convertedWind !== null
+                        ? `${Math.round(convertedWind)}${windLabel} ${degreesToCardinalShort(m?.windDir10mDeg)}`
                         : '—'}
                     </span>
                   </button>
@@ -1716,25 +1693,17 @@ export const DailySummaryTab: React.FC<DailySummaryTabProps> = ({
               })}
             </div>
           </div>
-        </section>
+        </CollapsibleModule>
 
-        {/* 5. 7-Day Daily Forecast List (Local Timezone Grouped) */}
-        <section
-          data-testid="daily-7d-list"
-          aria-label="Previsão Diária de 7 Dias"
-          className="rounded-2xl border border-slate-200/90 dark:border-sky-800/75 bg-white dark:bg-[#132a47] p-4 sm:p-5 shadow-sm space-y-3"
+        {/* 5. 7-Day Daily Forecast List (Collapsible) */}
+        <CollapsibleModule
+          testId="daily-7d-list"
+          title={`Próximos 7 Dias (${activeModelDisplayLabel})`}
+          subtitle={`Agrupamento no fuso horário local (${forecast.timezone})`}
+          icon={<Calendar className="w-4 h-4 text-[#0080cd] dark:text-sky-400" aria-hidden="true" />}
+          defaultOpen={true}
+          keepMounted={true}
         >
-          <div className="flex flex-wrap items-center justify-between gap-2">
-            <div className="flex items-center gap-2">
-              <Calendar className="w-4 h-4 text-[#0080cd] dark:text-sky-400" aria-hidden="true" />
-              <h2 className="text-sm sm:text-base font-extrabold text-slate-900 dark:text-white">
-                Próximos 7 Dias ({activeModelDisplayLabel})
-              </h2>
-            </div>
-            <span className="text-xs text-slate-500 dark:text-sky-200/75">
-              Agrupamento no fuso horário local ({forecast.timezone})
-            </span>
-          </div>
 
           <div className="divide-y divide-slate-100 dark:divide-sky-800/60">
             {dailySummaries.map((day) => {
@@ -1794,20 +1763,22 @@ export const DailySummaryTab: React.FC<DailySummaryTabProps> = ({
                       {day.maxRainProbPct}%
                     </span>
                     <span className="text-[11px] text-slate-500 dark:text-sky-300/75">
-                      ({day.rainMmTotal.toFixed(1)} mm)
+                      ({formatPrecipValue(day.rainMmTotal, 1)})
                     </span>
                   </div>
 
-                  {/* Max Wind km/h */}
+                  {/* Max Wind */}
                   <div className="hidden sm:flex sm:col-span-2 items-center gap-1 text-slate-600 dark:text-sky-200">
                     <Wind className="w-3.5 h-3.5 text-slate-400 shrink-0" aria-hidden="true" />
-                    <span className="font-semibold">{day.maxWindKmh} km/h</span>
+                    <span className="font-semibold">{formatWindValue(day.maxWindKmh, 0)}</span>
                   </div>
 
                   {/* Min / Max Temp Range Bar */}
                   <div className="col-span-5 sm:col-span-4 flex items-center gap-2">
                     <span className="w-7 text-right font-bold text-[#0080cd] dark:text-sky-300 shrink-0">
-                      {day.minTempC !== null ? `${day.minTempC}°` : '—'}
+                      {day.minTempC !== null
+                        ? `${Math.round(convertTemperature(day.minTempC, units.temperature) ?? day.minTempC)}°`
+                        : '—'}
                     </span>
                     <div className="relative flex-1 h-2 rounded-full bg-slate-200/90 dark:bg-[#0d1f36] overflow-hidden">
                       <div
@@ -1816,56 +1787,55 @@ export const DailySummaryTab: React.FC<DailySummaryTabProps> = ({
                       />
                     </div>
                     <span className="w-7 text-left font-extrabold text-orange-600 dark:text-orange-300 shrink-0">
-                      {day.maxTempC !== null ? `${day.maxTempC}°` : '—'}
+                      {day.maxTempC !== null
+                        ? `${Math.round(convertTemperature(day.maxTempC, units.temperature) ?? day.maxTempC)}°`
+                        : '—'}
                     </span>
                   </div>
                 </div>
               );
             })}
           </div>
-        </section>
+        </CollapsibleModule>
 
-        {/* 6. Interactive Location Mini-Map + Quick CTA to Model Comparison & Charts */}
+        {/* 6. Quick CTA to Model Comparison, Charts & Interactive Map Tab */}
         <section className="space-y-3">
-          <ForecastPinMiniMap
-            activeLocation={activeLocation}
-            savedLocations={resolvedSavedLocations}
-            forecast={forecast}
-            viewMode={activeSummaryModel}
-            selectedHourIndex={safeHourIndex}
-            currentWindSpeedKmh={activeMetrics?.windSpeed10mKmh ?? null}
-            currentWindDirectionDeg={activeMetrics?.windDir10mDeg ?? null}
-            onSelectLocation={resolvedOnSelectLocation}
-            onSaveLocation={resolvedOnSaveLocation}
-            onRequestGps={resolvedOnRequestGps}
-            onToast={onToast}
-          />
-
-          <div className="rounded-2xl border border-sky-200/90 dark:border-sky-800/80 bg-gradient-to-r from-sky-50 via-white to-sky-50 dark:from-[#0d1f36] dark:via-[#132a47] dark:to-[#0d1f36] p-4 flex flex-col sm:flex-row sm:items-center justify-between gap-3 shadow-sm">
-            <div className="flex items-center gap-3">
-              <div className="p-2.5 rounded-xl bg-[#0080cd] text-white shrink-0">
-                <GitCompare className="w-5 h-5" aria-hidden="true" />
+          <div className="rounded-2xl border border-sky-200/90 dark:border-sky-800/80 bg-gradient-to-r from-sky-50 via-white to-sky-50 dark:from-[#0d1f36] dark:via-[#132a47] dark:to-[#0d1f36] p-3.5 flex flex-col sm:flex-row sm:items-center justify-between gap-2.5 shadow-sm">
+            <div className="flex items-center gap-2.5">
+              <div className="p-2 rounded-xl bg-[#0080cd] text-white shrink-0">
+                <GitCompare className="w-4 h-4" aria-hidden="true" />
               </div>
               <div>
-                <h3 className="text-sm font-extrabold text-slate-900 dark:text-white">
-                  Análise Especialista Multi-Modelo &amp; Tabela Windguru
+                <h3 className="text-xs sm:text-sm font-extrabold text-slate-900 dark:text-white">
+                  Análise Especialista Multi-Modelo &amp; Mapa Interativo
                 </h3>
-                <p className="text-xs text-slate-600 dark:text-sky-200/80">
-                  Compare ECMWF, GFS, ICON e GEM lado a lado, ative gráficos sob demanda e veja as 168h completas.
+                <p className="text-[11px] sm:text-xs text-slate-600 dark:text-sky-200/80">
+                  Compare ECMWF, GFS, ICON e GEM na matriz horária ou explore vento/radar na aba Mapa.
                 </p>
               </div>
             </div>
 
-            <button
-              type="button"
-              data-testid="goto-comparison-btn"
-              onClick={() => onNavigateTab?.('comparison')}
-              className="min-h-[44px] min-w-[44px] px-5 py-2.5 rounded-full text-xs sm:text-sm font-extrabold inline-flex items-center justify-center gap-2 bg-[#0080cd] hover:bg-[#006bb3] text-white shadow-sm shrink-0 transition-colors focus:outline-none focus:ring-2 focus:ring-sky-500"
-            >
-              <Thermometer className="w-4 h-4 hidden sm:inline" aria-hidden="true" />
-              <span>Abrir Comparação Multi-Modelo &amp; Gráficos (168h)</span>
-              <ArrowRight className="w-4 h-4" aria-hidden="true" />
-            </button>
+            <div className="flex flex-wrap items-center gap-2 shrink-0">
+              <button
+                type="button"
+                data-testid="goto-comparison-btn"
+                onClick={() => onNavigateTab?.('comparison')}
+                className="min-h-[44px] min-w-[44px] px-4 py-2 rounded-full text-xs font-extrabold inline-flex items-center justify-center gap-1.5 bg-[#0080cd] hover:bg-[#006bb3] text-white shadow-sm transition-colors focus:outline-none focus:ring-2 focus:ring-sky-500"
+              >
+                <Thermometer className="w-3.5 h-3.5 hidden sm:inline" aria-hidden="true" />
+                <span>Modelos &amp; Tabela</span>
+                <ArrowRight className="w-3.5 h-3.5" aria-hidden="true" />
+              </button>
+              <button
+                type="button"
+                data-testid="goto-map-btn"
+                onClick={() => onNavigateTab?.('map')}
+                className="min-h-[44px] min-w-[44px] px-4 py-2 rounded-full text-xs font-bold inline-flex items-center justify-center gap-1.5 border border-sky-200 dark:border-sky-700 bg-white dark:bg-[#0d1f36] hover:bg-sky-50 text-[#0070b8] dark:text-sky-200 transition-colors focus:outline-none focus:ring-2 focus:ring-sky-500"
+              >
+                <span>Abrir Mapa</span>
+                <ArrowRight className="w-3.5 h-3.5" aria-hidden="true" />
+              </button>
+            </div>
           </div>
         </section>
 
