@@ -29,7 +29,16 @@ import {
   MODEL_DISPLAY_LABELS,
   MODEL_SHORT_LABELS,
 } from '../../utils/modelComparison';
+import { useLocale } from '../../context/LocaleContext';
 import { useUnits } from '../../context/UnitsContext';
+import {
+  convertPrecipitation,
+  convertPressure,
+  convertTemperature,
+  convertWaveHeight,
+  convertWindSpeed,
+  type WaveHeightUnit,
+} from '../../utils/units';
 import { HelpPopover } from '../common/HelpPopover';
 import { degreesToCardinalShort } from './CurrentSummaryCard';
 import type { ForecastHorizonHours } from './ModelSelectorBar';
@@ -80,26 +89,39 @@ const CAN_ATTACH_ECHARTS_REF =
 
 const MODEL_LABELS: Record<WeatherModelId, string> = MODEL_DISPLAY_LABELS;
 
-function formatAxisHour(timestampUnix: number, timezone: string): string {
+function formatAxisHour(
+  timestampUnix: number,
+  timezone: string,
+  intlLocale = 'pt-BR',
+): string {
   try {
     const d = new Date(timestampUnix * 1000);
-    const weekday = d.toLocaleDateString('pt-BR', {
+    const weekday = d.toLocaleDateString(intlLocale, {
       weekday: 'short',
       timeZone: timezone || undefined,
     });
-    const day = d.toLocaleDateString('pt-BR', {
+    const day = d.toLocaleDateString(intlLocale, {
       day: '2-digit',
       timeZone: timezone || undefined,
     });
-    const hour = d.toLocaleTimeString('pt-BR', {
+    const hour = d.toLocaleTimeString(intlLocale, {
       hour: '2-digit',
       minute: '2-digit',
+      hour12: false,
       timeZone: timezone || undefined,
     });
     return `${weekday.replace('.', '')} ${day} ${hour}`;
   } catch {
     return new Date(timestampUnix * 1000).toISOString().slice(5, 16).replace('T', ' ');
   }
+}
+
+function formatAltLabel(meters: number, waveUnit: WaveHeightUnit): string {
+  if (waveUnit === 'ft') {
+    const converted = convertWaveHeight(meters, 'ft');
+    return `${converted !== null ? Math.round(converted) : Math.round(meters * 3.28084)}ft`;
+  }
+  return `${meters}m`;
 }
 
 function roundOrNull(val: number | null | undefined, decimals = 1): number | null {
@@ -147,8 +169,21 @@ export const ForecastCharts: React.FC<ForecastChartsProps> = ({
   isDark = false,
   visibleParams = COMPLETE_VISIBLE_PARAMS,
 }) => {
-  const { formatWindValue, formatTempValue, formatPrecipValue, formatPressureValue, formatWaveValue } =
-    useUnits();
+  const {
+    units,
+    windLabel,
+    tempLabel,
+    waveLabel,
+    pressureLabel,
+    precipLabel,
+    formatWindValue,
+    formatTempValue,
+    formatPrecipValue,
+    formatPressureValue,
+    formatWaveValue,
+  } = useUnits();
+  const { locale, tr } = useLocale();
+  const intlLocale = locale === 'en' ? 'en-US' : 'pt-BR';
   const [focusTab, setFocusTab] = useState<ChartFocusTab>('all');
   const [fullscreenChartId, setFullscreenChartId] = useState<FullscreenChartId | null>(null);
   const chartRefs = useRef<Record<string, ReactECharts | null>>({});
@@ -250,8 +285,8 @@ export const ForecastCharts: React.FC<ForecastChartsProps> = ({
   const tooltipText = isDark ? '#f8fafc' : '#0f172a';
 
   const xLabels = useMemo(
-    () => slicedHours.map((h) => formatAxisHour(h.timestampUnix, forecast.timezone)),
-    [slicedHours, forecast.timezone],
+    () => slicedHours.map((h) => formatAxisHour(h.timestampUnix, forecast.timezone, intlLocale)),
+    [slicedHours, forecast.timezone, intlLocale],
   );
 
   const currentHourXLabel = isCurrentHourInRange ? xLabels[resolvedCurrentHourIndex] : undefined;
@@ -347,8 +382,8 @@ export const ForecastCharts: React.FC<ForecastChartsProps> = ({
       sourceLabel: isNativeModel
         ? MODEL_LABELS[viewMode]
         : viewMode === 'spaghetti'
-          ? 'Consenso FieldCast (Comparação)'
-          : 'Consenso FieldCast',
+          ? tr('Consenso FieldCast (Comparação)', 'FieldCast Consensus (Compare)')
+          : tr('Consenso FieldCast', 'FieldCast Consensus'),
       windSpeed,
       windDir,
       windCardinal: degreesToCardinalShort(windDir),
@@ -375,6 +410,7 @@ export const ForecastCharts: React.FC<ForecastChartsProps> = ({
     viewMode,
     safeSelectedIdx,
     xLabels,
+    tr,
   ]);
 
   // 1A. Hourly Wind & Gusts Time-Series Chart Option
@@ -382,23 +418,23 @@ export const ForecastCharts: React.FC<ForecastChartsProps> = ({
     const nativeHours: NativeModelHour[] = isNativeModel
       ? (forecast.nativeByModel[viewMode] ?? []).slice(0, slicedHours.length)
       : [];
+    const cw = (kmh: number | null | undefined) =>
+      roundOrNull(convertWindSpeed(kmh, units.wind));
 
     const series: NonNullable<EChartsOption['series']> = [];
 
     if (viewMode === 'fieldcast') {
-      const minValues = slicedHours.map((h) =>
-        roundOrNull(h.windSpeed10m.min ?? h.windSpeed10m.mean),
-      );
+      const minValues = slicedHours.map((h) => cw(h.windSpeed10m.min ?? h.windSpeed10m.mean));
       const bandDiff = slicedHours.map((h) => {
-        const minV = h.windSpeed10m.min;
-        const maxV = h.windSpeed10m.max;
+        const minV = convertWindSpeed(h.windSpeed10m.min, units.wind);
+        const maxV = convertWindSpeed(h.windSpeed10m.max, units.wind);
         if (minV === null || maxV === null) return 0;
         return roundOrNull(Math.max(0, maxV - minV)) ?? 0;
       });
 
       series.push(
         {
-          name: 'Vento 10m Mín',
+          name: tr('Vento 10m Mín', 'Wind 10m Min'),
           type: 'line',
           data: minValues,
           stack: 'wind_uncertainty',
@@ -407,7 +443,7 @@ export const ForecastCharts: React.FC<ForecastChartsProps> = ({
           tooltip: { show: false },
         },
         {
-          name: 'Faixa Mín–Máx (10m)',
+          name: tr('Faixa Mín–Máx (10m)', 'Min–Max Band (10m)'),
           type: 'line',
           data: bandDiff,
           stack: 'wind_uncertainty',
@@ -419,54 +455,54 @@ export const ForecastCharts: React.FC<ForecastChartsProps> = ({
           tooltip: { show: false },
         },
         {
-          name: 'Vento 10m (km/h)',
+          name: tr(`Vento 10m (${windLabel})`, `Wind 10m (${windLabel})`),
           type: 'line',
           smooth: true,
           symbol: 'none',
           lineStyle: { width: 2.5, color: '#0080cd' },
           itemStyle: { color: '#0080cd' },
-          data: slicedHours.map((h) => roundOrNull(h.windSpeed10m.mean)),
+          data: slicedHours.map((h) => cw(h.windSpeed10m.mean)),
           markLine: currentHourMarkLine,
         },
         {
-          name: 'Rajadas 10m (km/h)',
+          name: tr(`Rajadas 10m (${windLabel})`, `Gusts 10m (${windLabel})`),
           type: 'line',
           smooth: true,
           symbol: 'none',
           lineStyle: { width: 2, type: 'dashed', color: '#f97316' },
           itemStyle: { color: '#f97316' },
-          data: slicedHours.map((h) => roundOrNull(h.windGusts10m.mean)),
+          data: slicedHours.map((h) => cw(h.windGusts10m.mean)),
         },
       );
 
       if (includeAltitudeInWindChart) {
         series.push(
           {
-            name: 'Vento 80m',
+            name: tr(`Vento ${formatAltLabel(80, units.wave)}`, `Wind ${formatAltLabel(80, units.wave)}`),
             type: 'line',
             smooth: true,
             symbol: 'none',
             lineStyle: { width: 1.5, color: '#38bdf8' },
             itemStyle: { color: '#38bdf8' },
-            data: slicedHours.map((h) => roundOrNull(h.windSpeed80m.mean)),
+            data: slicedHours.map((h) => cw(h.windSpeed80m.mean)),
           },
           {
-            name: 'Vento 100m',
+            name: tr(`Vento ${formatAltLabel(100, units.wave)}`, `Wind ${formatAltLabel(100, units.wave)}`),
             type: 'line',
             smooth: true,
             symbol: 'none',
             lineStyle: { width: 1.5, color: '#6366f1' },
             itemStyle: { color: '#6366f1' },
-            data: slicedHours.map((h) => roundOrNull(h.windSpeed100m.mean)),
+            data: slicedHours.map((h) => cw(h.windSpeed100m.mean)),
           },
           {
-            name: 'Vento 120m',
+            name: tr(`Vento ${formatAltLabel(120, units.wave)}`, `Wind ${formatAltLabel(120, units.wave)}`),
             type: 'line',
             smooth: true,
             symbol: 'none',
             lineStyle: { width: 1.5, color: '#0d9488' },
             itemStyle: { color: '#0d9488' },
-            data: slicedHours.map((h) => roundOrNull(h.windSpeed120m.mean)),
+            data: slicedHours.map((h) => cw(h.windSpeed120m.mean)),
           },
         );
       }
@@ -478,13 +514,13 @@ export const ForecastCharts: React.FC<ForecastChartsProps> = ({
       for (const modelId of activeWindModels) {
         const list = (forecast.nativeByModel[modelId] ?? []).slice(0, slicedHours.length);
         series.push({
-          name: `${MODEL_SHORT_LABELS[modelId]} Vento 10m`,
+          name: `${MODEL_SHORT_LABELS[modelId]} ${tr('Vento 10m', 'Wind 10m')}`,
           type: 'line',
           smooth: true,
           symbol: 'none',
           lineStyle: { width: 2, color: MODEL_COLORS[modelId] },
           itemStyle: { color: MODEL_COLORS[modelId] },
-          data: list.map((h) => roundOrNull(h.windSpeed10m)),
+          data: list.map((h) => cw(h.windSpeed10m)),
         });
       }
 
@@ -492,22 +528,22 @@ export const ForecastCharts: React.FC<ForecastChartsProps> = ({
         for (const modelId of gustModels) {
           const list = (forecast.nativeByModel[modelId] ?? []).slice(0, slicedHours.length);
           series.push({
-            name: `${MODEL_SHORT_LABELS[modelId]} Rajada 10m`,
+            name: `${MODEL_SHORT_LABELS[modelId]} ${tr('Rajada 10m', 'Gust 10m')}`,
             type: 'line',
             smooth: true,
             symbol: 'none',
             lineStyle: { width: 1.5, type: 'dashed', color: MODEL_COLORS[modelId] },
             itemStyle: { color: MODEL_COLORS[modelId] },
-            data: list.map((h) => roundOrNull(h.windGusts10m)),
+            data: list.map((h) => cw(h.windGusts10m)),
           });
         }
       }
 
       if (includeAltitudeInWindChart) {
         const altFields = [
-          { id: 'windSpeed80m' as const, label: '80m' },
-          { id: 'windSpeed100m' as const, label: '100m' },
-          { id: 'windSpeed120m' as const, label: '120m' },
+          { id: 'windSpeed80m' as const, label: formatAltLabel(80, units.wave) },
+          { id: 'windSpeed100m' as const, label: formatAltLabel(100, units.wave) },
+          { id: 'windSpeed120m' as const, label: formatAltLabel(120, units.wave) },
         ];
         for (const alt of altFields) {
           const models = getSharedModelsForVariable(forecast, alt.id, slicedHours.length);
@@ -521,7 +557,7 @@ export const ForecastCharts: React.FC<ForecastChartsProps> = ({
                 symbol: 'none',
                 lineStyle: { width: 1.3, type: 'dotted', color: MODEL_COLORS[modelId] },
                 itemStyle: { color: MODEL_COLORS[modelId] },
-                data: list.map((h) => roundOrNull(h[alt.id])),
+                data: list.map((h) => cw(h[alt.id])),
               });
             }
           }
@@ -529,71 +565,71 @@ export const ForecastCharts: React.FC<ForecastChartsProps> = ({
       }
 
       series.push({
-        name: 'Consenso FieldCast 10m',
+        name: tr('Consenso FieldCast 10m', 'FieldCast Consensus 10m'),
         type: 'line',
         smooth: true,
         symbol: 'none',
         lineStyle: { width: 2.5, type: 'dotted', color: '#f97316' },
         itemStyle: { color: '#f97316' },
-        data: slicedHours.map((h) => roundOrNull(h.windSpeed10m.mean)),
+        data: slicedHours.map((h) => cw(h.windSpeed10m.mean)),
         markLine: currentHourMarkLine,
       });
     } else if (isNativeModel) {
       const label = MODEL_LABELS[viewMode];
       series.push(
         {
-          name: `${label} Vento 10m`,
+          name: `${label} ${tr('Vento 10m', 'Wind 10m')}`,
           type: 'line',
           smooth: true,
           symbol: 'none',
           lineStyle: { width: 2.5, color: '#0080cd' },
           itemStyle: { color: '#0080cd' },
-          data: nativeHours.map((h) => roundOrNull(h.windSpeed10m)),
+          data: nativeHours.map((h) => cw(h.windSpeed10m)),
           markLine: currentHourMarkLine,
         },
         {
-          name: `${label} Rajadas 10m`,
+          name: `${label} ${tr('Rajadas 10m', 'Gusts 10m')}`,
           type: 'line',
           smooth: true,
           symbol: 'none',
           lineStyle: { width: 2, type: 'dashed', color: '#f97316' },
           itemStyle: { color: '#f97316' },
-          data: nativeHours.map((h) => roundOrNull(h.windGusts10m)),
+          data: nativeHours.map((h) => cw(h.windGusts10m)),
         },
       );
 
       if (includeAltitudeInWindChart) {
         if (nativeHours.some((h) => h.windSpeed80m !== null)) {
           series.push({
-            name: `${label} Vento 80m`,
+            name: `${label} ${tr(`Vento ${formatAltLabel(80, units.wave)}`, `Wind ${formatAltLabel(80, units.wave)}`)}`,
             type: 'line',
             smooth: true,
             symbol: 'none',
             lineStyle: { width: 1.8, color: '#38bdf8' },
             itemStyle: { color: '#38bdf8' },
-            data: nativeHours.map((h) => roundOrNull(h.windSpeed80m)),
+            data: nativeHours.map((h) => cw(h.windSpeed80m)),
           });
         }
         if (nativeHours.some((h) => h.windSpeed100m !== null)) {
           series.push({
-            name: `${label} Vento 100m`,
+            name: `${label} ${tr(`Vento ${formatAltLabel(100, units.wave)}`, `Wind ${formatAltLabel(100, units.wave)}`)}`,
             type: 'line',
             smooth: true,
             symbol: 'none',
             lineStyle: { width: 2, color: '#6366f1' },
             itemStyle: { color: '#6366f1' },
-            data: nativeHours.map((h) => roundOrNull(h.windSpeed100m)),
+            data: nativeHours.map((h) => cw(h.windSpeed100m)),
           });
         }
         if (nativeHours.some((h) => h.windSpeed120m !== null)) {
           series.push({
-            name: `${label} Vento 120m`,
+            name: `${label} ${tr(`Vento ${formatAltLabel(120, units.wave)}`, `Wind ${formatAltLabel(120, units.wave)}`)}`,
             type: 'line',
             smooth: true,
             symbol: 'none',
             lineStyle: { width: 1.8, color: '#0d9488' },
             itemStyle: { color: '#0d9488' },
-            data: nativeHours.map((h) => roundOrNull(h.windSpeed120m)),
+            data: nativeHours.map((h) => cw(h.windSpeed120m)),
           });
         }
       }
@@ -627,7 +663,7 @@ export const ForecastCharts: React.FC<ForecastChartsProps> = ({
       },
       yAxis: {
         type: 'value',
-        name: 'km/h',
+        name: windLabel,
         nameTextStyle: { color: textColor, fontSize: 11 },
         axisLabel: { color: textColor, fontSize: 10 },
         splitLine: { lineStyle: { color: gridBorderColor } },
@@ -648,10 +684,16 @@ export const ForecastCharts: React.FC<ForecastChartsProps> = ({
     textColor,
     xLabels,
     gridBorderColor,
+    units.wind,
+    units.wave,
+    windLabel,
+    tr,
   ]);
 
   // 1B. Temperature & Dew Point Chart Option (supports FieldCast, Native, and Spaghetti)
   const temperatureOption: EChartsOption = useMemo(() => {
+    const ct = (c: number | null | undefined) =>
+      roundOrNull(convertTemperature(c, units.temperature), 1);
     const series: NonNullable<EChartsOption['series']> = [];
 
     if (viewMode === 'spaghetti') {
@@ -668,7 +710,7 @@ export const ForecastCharts: React.FC<ForecastChartsProps> = ({
             symbol: 'none',
             lineStyle: { width: 2, color: MODEL_COLORS[modelId] },
             itemStyle: { color: MODEL_COLORS[modelId] },
-            data: list.map((h) => roundOrNull(h.temperature2m, 1)),
+            data: list.map((h) => ct(h.temperature2m)),
           });
         }
       }
@@ -677,32 +719,32 @@ export const ForecastCharts: React.FC<ForecastChartsProps> = ({
         for (const modelId of dewModels) {
           const list = (forecast.nativeByModel[modelId] ?? []).slice(0, slicedHours.length);
           series.push({
-            name: `${MODEL_SHORT_LABELS[modelId]} Orvalho 2m`,
+            name: `${MODEL_SHORT_LABELS[modelId]} ${tr('Orvalho 2m', 'Dew 2m')}`,
             type: 'line',
             smooth: true,
             symbol: 'none',
             lineStyle: { width: 1.5, type: 'dashed', color: MODEL_COLORS[modelId] },
             itemStyle: { color: MODEL_COLORS[modelId] },
-            data: list.map((h) => roundOrNull(h.dewPoint2m, 1)),
+            data: list.map((h) => ct(h.dewPoint2m)),
           });
         }
       }
 
       series.push({
-        name: 'Consenso Temp 2m (°C)',
+        name: tr(`Consenso Temp 2m (${tempLabel})`, `Consensus Temp 2m (${tempLabel})`),
         type: 'line',
         smooth: true,
         symbol: 'none',
         lineStyle: { width: 2.5, type: 'dotted', color: '#f97316' },
         itemStyle: { color: '#f97316' },
-        data: slicedHours.map((h) => roundOrNull(h.temperature2mC.mean, 1)),
+        data: slicedHours.map((h) => ct(h.temperature2mC.mean)),
       });
     } else if (isNativeModel) {
       const label = MODEL_LABELS[viewMode];
       const nativeHours = (forecast.nativeByModel[viewMode] ?? []).slice(0, slicedHours.length);
       series.push(
         {
-          name: `${label} Temperatura (2m °C)`,
+          name: `${label} ${tr(`Temperatura (2m ${tempLabel})`, `Temperature (2m ${tempLabel})`)}`,
           type: 'line',
           smooth: true,
           symbol: 'none',
@@ -711,22 +753,22 @@ export const ForecastCharts: React.FC<ForecastChartsProps> = ({
           },
           lineStyle: { width: 2.5, color: '#f97316' },
           itemStyle: { color: '#f97316' },
-          data: nativeHours.map((h) => roundOrNull(h.temperature2m, 1)),
+          data: nativeHours.map((h) => ct(h.temperature2m)),
         },
         {
-          name: `${label} Ponto de Orvalho (°C)`,
+          name: `${label} ${tr(`Ponto de Orvalho (${tempLabel})`, `Dew Point (${tempLabel})`)}`,
           type: 'line',
           smooth: true,
           symbol: 'none',
           lineStyle: { width: 2, type: 'dashed', color: '#0080cd' },
           itemStyle: { color: '#0080cd' },
-          data: nativeHours.map((h) => roundOrNull(h.dewPoint2m, 1)),
+          data: nativeHours.map((h) => ct(h.dewPoint2m)),
         },
       );
     } else {
       series.push(
         {
-          name: 'Temperatura (2m °C)',
+          name: tr(`Temperatura (2m ${tempLabel})`, `Temperature (2m ${tempLabel})`),
           type: 'line',
           smooth: true,
           symbol: 'none',
@@ -735,16 +777,16 @@ export const ForecastCharts: React.FC<ForecastChartsProps> = ({
           },
           lineStyle: { width: 2.5, color: '#f97316' },
           itemStyle: { color: '#f97316' },
-          data: slicedHours.map((h) => roundOrNull(h.temperature2mC.mean, 1)),
+          data: slicedHours.map((h) => ct(h.temperature2mC.mean)),
         },
         {
-          name: 'Ponto de Orvalho (°C)',
+          name: tr(`Ponto de Orvalho (${tempLabel})`, `Dew Point (${tempLabel})`),
           type: 'line',
           smooth: true,
           symbol: 'none',
           lineStyle: { width: 2, type: 'dashed', color: '#0080cd' },
           itemStyle: { color: '#0080cd' },
-          data: slicedHours.map((h) => roundOrNull(h.dewPoint2mC.mean, 1)),
+          data: slicedHours.map((h) => ct(h.dewPoint2mC.mean)),
         },
       );
     }
@@ -782,7 +824,7 @@ export const ForecastCharts: React.FC<ForecastChartsProps> = ({
       },
       yAxis: {
         type: 'value',
-        name: '°C',
+        name: tempLabel,
         nameTextStyle: { color: textColor, fontSize: 11 },
         axisLabel: { color: textColor, fontSize: 10, formatter: '{value}°' },
         splitLine: { lineStyle: { color: gridBorderColor } },
@@ -802,6 +844,9 @@ export const ForecastCharts: React.FC<ForecastChartsProps> = ({
     textColor,
     xLabels,
     gridBorderColor,
+    units.temperature,
+    tempLabel,
+    tr,
   ]);
 
   // 1C. Vertical Wind Profile (0-120m) Option for Selected Hour
@@ -810,19 +855,29 @@ export const ForecastCharts: React.FC<ForecastChartsProps> = ({
       return {};
     }
 
+    const cw = (kmh: number | null | undefined) =>
+      roundOrNull(convertWindSpeed(kmh, units.wind));
+    const ch = (m: number) =>
+      units.wave === 'ft'
+        ? roundOrNull(convertWaveHeight(m, 'ft'), 0)
+        : m;
+
     const nativePts = activeHour.verticalProfile.nativeLevels
       .filter((lvl) => lvl.speedKmh !== null)
-      .map((lvl) => [roundOrNull(lvl.speedKmh), lvl.heightM]);
+      .map((lvl) => [cw(lvl.speedKmh), ch(lvl.heightM)]);
 
     const interpPts = showInterpolatedProfile
       ? activeHour.verticalProfile.interpolatedLevels
           .filter((lvl) => lvl.speedKmh !== null)
-          .map((lvl) => [roundOrNull(lvl.speedKmh), lvl.heightM])
+          .map((lvl) => [cw(lvl.speedKmh), ch(lvl.heightM)])
       : [];
 
     const series: NonNullable<EChartsOption['series']> = [
       {
-        name: 'Níveis Diretos (10m/80m/100m/120m)',
+        name: tr(
+          `Níveis Diretos (${formatAltLabel(10, units.wave)}/${formatAltLabel(80, units.wave)}/${formatAltLabel(100, units.wave)}/${formatAltLabel(120, units.wave)})`,
+          `Native Levels (${formatAltLabel(10, units.wave)}/${formatAltLabel(80, units.wave)}/${formatAltLabel(100, units.wave)}/${formatAltLabel(120, units.wave)})`,
+        ),
         type: 'line',
         data: nativePts,
         symbolSize: 9,
@@ -833,7 +888,10 @@ export const ForecastCharts: React.FC<ForecastChartsProps> = ({
 
     if (showInterpolatedProfile && interpPts.length > 0) {
       series.push({
-        name: 'Curva Estimada 10–120m',
+        name: tr(
+          `Curva Estimada ${formatAltLabel(10, units.wave)}–${formatAltLabel(120, units.wave)}`,
+          `Estimated Curve ${formatAltLabel(10, units.wave)}–${formatAltLabel(120, units.wave)}`,
+        ),
         type: 'line',
         smooth: true,
         data: interpPts,
@@ -866,19 +924,19 @@ export const ForecastCharts: React.FC<ForecastChartsProps> = ({
       },
       xAxis: {
         type: 'value',
-        name: 'km/h',
+        name: windLabel,
         nameTextStyle: { color: textColor, fontSize: 11 },
         axisLabel: { color: textColor, fontSize: 10 },
         splitLine: { lineStyle: { color: gridBorderColor } },
       },
       yAxis: {
         type: 'value',
-        name: 'Altura (m)',
+        name: tr(`Altura (${waveLabel})`, `Height (${waveLabel})`),
         min: 0,
-        max: 125,
-        interval: 20,
+        max: units.wave === 'ft' ? 410 : 125,
+        interval: units.wave === 'ft' ? 80 : 20,
         nameTextStyle: { color: textColor, fontSize: 11 },
-        axisLabel: { color: textColor, fontSize: 10, formatter: '{value}m' },
+        axisLabel: { color: textColor, fontSize: 10, formatter: `{value}${waveLabel}` },
         splitLine: { lineStyle: { color: gridBorderColor } },
       },
       series,
@@ -891,6 +949,11 @@ export const ForecastCharts: React.FC<ForecastChartsProps> = ({
     tooltipText,
     textColor,
     gridBorderColor,
+    units.wind,
+    units.wave,
+    windLabel,
+    waveLabel,
+    tr,
   ]);
 
   // 2. Waves, Swell & Optional Sea-Level (MSL) Option
@@ -899,11 +962,14 @@ export const ForecastCharts: React.FC<ForecastChartsProps> = ({
       return {};
     }
 
+    const cWave = (m: number | null | undefined) =>
+      roundOrNull(convertWaveHeight(m, units.wave), units.wave === 'ft' ? 1 : 2);
+
     const minSeaLevel = hasSeaLevelMsl
       ? Math.min(
           0,
           ...slicedHours
-            .map((h) => h.marine?.seaLevelHeightMsl)
+            .map((h) => convertWaveHeight(h.marine?.seaLevelHeightMsl, units.wave))
             .filter((v): v is number => typeof v === 'number' && Number.isFinite(v)),
         )
       : 0;
@@ -911,7 +977,7 @@ export const ForecastCharts: React.FC<ForecastChartsProps> = ({
 
     const marineSeries: NonNullable<EChartsOption['series']> = [
       {
-        name: 'Altura de Onda (m)',
+        name: tr(`Altura de Onda (${waveLabel})`, `Wave Height (${waveLabel})`),
         type: 'line',
         smooth: true,
         symbol: 'none',
@@ -920,20 +986,20 @@ export const ForecastCharts: React.FC<ForecastChartsProps> = ({
         },
         lineStyle: { width: 2.5, color: '#0080cd' },
         itemStyle: { color: '#0080cd' },
-        data: slicedHours.map((h) => roundOrNull(h.marine?.waveHeight, 2)),
+        data: slicedHours.map((h) => cWave(h.marine?.waveHeight)),
         markLine: currentHourMarkLine,
       },
       {
-        name: 'Ondulação Swell (m)',
+        name: tr(`Ondulação Swell (${waveLabel})`, `Swell Wave Height (${waveLabel})`),
         type: 'line',
         smooth: true,
         symbol: 'none',
         lineStyle: { width: 2, type: 'dashed', color: '#0d9488' },
         itemStyle: { color: '#0d9488' },
-        data: slicedHours.map((h) => roundOrNull(h.marine?.swellWaveHeight, 2)),
+        data: slicedHours.map((h) => cWave(h.marine?.swellWaveHeight)),
       },
       {
-        name: 'Período (s)',
+        name: tr('Período (s)', 'Period (s)'),
         type: 'line',
         yAxisIndex: 1,
         smooth: true,
@@ -946,13 +1012,13 @@ export const ForecastCharts: React.FC<ForecastChartsProps> = ({
 
     if (hasSeaLevelMsl) {
       marineSeries.push({
-        name: 'Nível do Mar Est. (MSL m)',
+        name: tr(`Nível do Mar Est. (MSL ${waveLabel})`, `Est. Sea Level (MSL ${waveLabel})`),
         type: 'line',
         smooth: true,
         symbol: 'none',
         lineStyle: { width: 2, type: 'dotted', color: '#6366f1' },
         itemStyle: { color: '#6366f1' },
-        data: slicedHours.map((h) => roundOrNull(h.marine?.seaLevelHeightMsl, 2)),
+        data: slicedHours.map((h) => cWave(h.marine?.seaLevelHeightMsl)),
       });
     }
 
@@ -985,17 +1051,19 @@ export const ForecastCharts: React.FC<ForecastChartsProps> = ({
       yAxis: [
         {
           type: 'value',
-          name: hasSeaLevelMsl ? 'Altura / MSL (m)' : 'Altura (m)',
+          name: hasSeaLevelMsl
+            ? tr(`Altura / MSL (${waveLabel})`, `Height / MSL (${waveLabel})`)
+            : tr(`Altura (${waveLabel})`, `Height (${waveLabel})`),
           min: heightAxisMin,
           max: (value: { max: number }) =>
-            Math.max(1.5, Math.ceil(value.max * 1.25 * 2) / 2),
+            Math.max(units.wave === 'ft' ? 5 : 1.5, Math.ceil(value.max * 1.25 * 2) / 2),
           nameTextStyle: { color: textColor, fontSize: 11 },
           axisLabel: { color: textColor, fontSize: 10 },
           splitLine: { lineStyle: { color: gridBorderColor } },
         },
         {
           type: 'value',
-          name: 'Período (s)',
+          name: tr('Período (s)', 'Period (s)'),
           min: 0,
           max: (value: { max: number }) =>
             Math.max(10, Math.ceil(value.max + 2)),
@@ -1018,12 +1086,22 @@ export const ForecastCharts: React.FC<ForecastChartsProps> = ({
     isDark,
     slicedHours,
     currentHourMarkLine,
+    units.wave,
+    waveLabel,
+    tr,
   ]);
 
-  // 3. Precipitation (mm/h) & Surface Pressure (hPa) (supports FieldCast, Native, and Spaghetti)
+  // 3. Precipitation (mm/h or in/h) & Surface Pressure (hPa or inHg)
   const precipPressureOption: EChartsOption = useMemo(() => {
     const allPressures: number[] = [];
     const series: NonNullable<EChartsOption['series']> = [];
+    const cp = (mm: number | null | undefined) =>
+      roundOrNull(convertPrecipitation(mm, units.precipitation), 2);
+    const cPress = (hpa: number | null | undefined) =>
+      roundOrNull(
+        convertPressure(hpa, units.pressure),
+        units.pressure === 'inhg' ? 2 : 1,
+      );
 
     if (viewMode === 'spaghetti') {
       const precipModels = getSharedModelsForVariable(forecast, 'precipitation', slicedHours.length);
@@ -1037,18 +1115,18 @@ export const ForecastCharts: React.FC<ForecastChartsProps> = ({
         for (const modelId of precipModels) {
           const list = (forecast.nativeByModel[modelId] ?? []).slice(0, slicedHours.length);
           series.push({
-            name: `${MODEL_SHORT_LABELS[modelId]} Chuva (mm/h)`,
+            name: `${MODEL_SHORT_LABELS[modelId]} ${tr('Chuva', 'Rain')} (${precipLabel}/h)`,
             type: 'bar',
             itemStyle: { color: MODEL_COLORS[modelId], borderRadius: [3, 3, 0, 0] },
-            data: list.map((h) => roundOrNull(h.precipitation, 2)),
+            data: list.map((h) => cp(h.precipitation)),
           });
         }
       } else {
         series.push({
-          name: 'Chuva (mm/h)',
+          name: tr(`Chuva (${precipLabel}/h)`, `Rain (${precipLabel}/h)`),
           type: 'bar',
           itemStyle: { color: '#38bdf8', borderRadius: [4, 4, 0, 0] },
-          data: slicedHours.map((h) => roundOrNull(h.precipitationMm.mean, 2)),
+          data: slicedHours.map((h) => cp(h.precipitationMm.mean)),
         });
       }
 
@@ -1056,94 +1134,98 @@ export const ForecastCharts: React.FC<ForecastChartsProps> = ({
         for (const modelId of pressureModels) {
           const list = (forecast.nativeByModel[modelId] ?? []).slice(0, slicedHours.length);
           for (const h of list) {
-            if (typeof h.surfacePressure === 'number' && Number.isFinite(h.surfacePressure)) {
-              allPressures.push(h.surfacePressure);
+            const pConv = cPress(h.surfacePressure);
+            if (pConv !== null) {
+              allPressures.push(pConv);
             }
           }
           series.push({
-            name: `${MODEL_SHORT_LABELS[modelId]} Pressão (hPa)`,
+            name: `${MODEL_SHORT_LABELS[modelId]} ${tr('Pressão', 'Pressure')} (${pressureLabel})`,
             type: 'line',
             yAxisIndex: 1,
             smooth: true,
             symbol: 'none',
             lineStyle: { width: 1.8, color: MODEL_COLORS[modelId] },
             itemStyle: { color: MODEL_COLORS[modelId] },
-            data: list.map((h) => roundOrNull(h.surfacePressure, 1)),
+            data: list.map((h) => cPress(h.surfacePressure)),
           });
         }
       }
 
       for (const h of slicedHours) {
-        if (h.surfacePressureHpa.mean !== null) {
-          allPressures.push(h.surfacePressureHpa.mean);
+        const pConv = cPress(h.surfacePressureHpa.mean);
+        if (pConv !== null) {
+          allPressures.push(pConv);
         }
       }
       series.push({
-        name: 'Consenso Pressão (hPa)',
+        name: tr(`Consenso Pressão (${pressureLabel})`, `Consensus Pressure (${pressureLabel})`),
         type: 'line',
         yAxisIndex: 1,
         smooth: true,
         symbol: 'none',
         lineStyle: { width: 2.2, type: 'dotted', color: '#0d9488' },
         itemStyle: { color: '#0d9488' },
-        data: slicedHours.map((h) => roundOrNull(h.surfacePressureHpa.mean, 1)),
+        data: slicedHours.map((h) => cPress(h.surfacePressureHpa.mean)),
       });
     } else if (isNativeModel) {
       const label = MODEL_LABELS[viewMode];
       const nativeHours = (forecast.nativeByModel[viewMode] ?? []).slice(0, slicedHours.length);
       for (const h of nativeHours) {
-        if (typeof h.surfacePressure === 'number' && Number.isFinite(h.surfacePressure)) {
-          allPressures.push(h.surfacePressure);
+        const pConv = cPress(h.surfacePressure);
+        if (pConv !== null) {
+          allPressures.push(pConv);
         }
       }
       series.push(
         {
-          name: `${label} Chuva (mm/h)`,
+          name: `${label} ${tr('Chuva', 'Rain')} (${precipLabel}/h)`,
           type: 'bar',
           itemStyle: { color: '#38bdf8', borderRadius: [4, 4, 0, 0] },
-          data: nativeHours.map((h) => roundOrNull(h.precipitation, 2)),
+          data: nativeHours.map((h) => cp(h.precipitation)),
         },
         {
-          name: `${label} Pressão (hPa)`,
+          name: `${label} ${tr('Pressão', 'Pressure')} (${pressureLabel})`,
           type: 'line',
           yAxisIndex: 1,
           smooth: true,
           symbol: 'none',
           lineStyle: { width: 2.2, color: '#0d9488' },
           itemStyle: { color: '#0d9488' },
-          data: nativeHours.map((h) => roundOrNull(h.surfacePressure, 1)),
+          data: nativeHours.map((h) => cPress(h.surfacePressure)),
         },
       );
     } else {
       for (const h of slicedHours) {
-        if (h.surfacePressureHpa.mean !== null) {
-          allPressures.push(h.surfacePressureHpa.mean);
+        const pConv = cPress(h.surfacePressureHpa.mean);
+        if (pConv !== null) {
+          allPressures.push(pConv);
         }
       }
       series.push(
         {
-          name: 'Chuva (mm/h)',
+          name: tr(`Chuva (${precipLabel}/h)`, `Rain (${precipLabel}/h)`),
           type: 'bar',
           itemStyle: { color: '#38bdf8', borderRadius: [4, 4, 0, 0] },
-          data: slicedHours.map((h) => roundOrNull(h.precipitationMm.mean, 2)),
+          data: slicedHours.map((h) => cp(h.precipitationMm.mean)),
         },
         {
-          name: 'Chuva Máx (mm/h)',
+          name: tr(`Chuva Máx (${precipLabel}/h)`, `Max Rain (${precipLabel}/h)`),
           type: 'line',
           symbol: 'none',
           lineStyle: { width: 1, type: 'dotted', color: '#0080cd' },
           itemStyle: { color: '#0080cd' },
-          data: slicedHours.map((h) => roundOrNull(h.precipitationMm.max, 2)),
+          data: slicedHours.map((h) => cp(h.precipitationMm.max)),
         },
         {
-          name: 'Pressão (hPa)',
+          name: tr(`Pressão (${pressureLabel})`, `Pressure (${pressureLabel})`),
           type: 'line',
           yAxisIndex: 1,
           smooth: true,
           symbol: 'none',
           lineStyle: { width: 2.2, color: '#0d9488' },
           itemStyle: { color: '#0d9488' },
-          data: slicedHours.map((h) => roundOrNull(h.surfacePressureHpa.mean, 1)),
+          data: slicedHours.map((h) => cPress(h.surfacePressureHpa.mean)),
         },
       );
     }
@@ -1153,8 +1235,22 @@ export const ForecastCharts: React.FC<ForecastChartsProps> = ({
         currentHourMarkLine;
     }
 
-    const minP = allPressures.length > 0 ? Math.floor(Math.min(...allPressures) - 3) : 995;
-    const maxP = allPressures.length > 0 ? Math.ceil(Math.max(...allPressures) + 3) : 1030;
+    const minP =
+      units.pressure === 'inhg'
+        ? allPressures.length > 0
+          ? Math.floor((Math.min(...allPressures) - 0.1) * 10) / 10
+          : 29.4
+        : allPressures.length > 0
+          ? Math.floor(Math.min(...allPressures) - 3)
+          : 995;
+    const maxP =
+      units.pressure === 'inhg'
+        ? allPressures.length > 0
+          ? Math.ceil((Math.max(...allPressures) + 0.1) * 10) / 10
+          : 30.4
+        : allPressures.length > 0
+          ? Math.ceil(Math.max(...allPressures) + 3)
+          : 1030;
 
     return {
       backgroundColor: 'transparent',
@@ -1185,14 +1281,14 @@ export const ForecastCharts: React.FC<ForecastChartsProps> = ({
       yAxis: [
         {
           type: 'value',
-          name: 'Chuva (mm/h)',
+          name: tr(`Chuva (${precipLabel}/h)`, `Rain (${precipLabel}/h)`),
           nameTextStyle: { color: textColor, fontSize: 11 },
           axisLabel: { color: textColor, fontSize: 10 },
           splitLine: { lineStyle: { color: gridBorderColor } },
         },
         {
           type: 'value',
-          name: 'Pressão (hPa)',
+          name: tr(`Pressão (${pressureLabel})`, `Pressure (${pressureLabel})`),
           min: minP,
           max: maxP,
           nameTextStyle: { color: textColor, fontSize: 11 },
@@ -1214,6 +1310,11 @@ export const ForecastCharts: React.FC<ForecastChartsProps> = ({
     textColor,
     xLabels,
     gridBorderColor,
+    units.precipitation,
+    units.pressure,
+    precipLabel,
+    pressureLabel,
+    tr,
   ]);
 
   // 4. Stratified Cloud Cover (Baixa, Média e Alta — %) (supports FieldCast, Native, and Spaghetti)
@@ -1229,7 +1330,7 @@ export const ForecastCharts: React.FC<ForecastChartsProps> = ({
         for (const modelId of lowModels) {
           const list = (forecast.nativeByModel[modelId] ?? []).slice(0, slicedHours.length);
           series.push({
-            name: `${MODEL_SHORT_LABELS[modelId]} Nuvens Baixas`,
+            name: `${MODEL_SHORT_LABELS[modelId]} ${tr('Nuvens Baixas', 'Low Clouds')}`,
             type: 'line',
             smooth: true,
             symbol: 'none',
@@ -1244,7 +1345,7 @@ export const ForecastCharts: React.FC<ForecastChartsProps> = ({
         for (const modelId of midModels) {
           const list = (forecast.nativeByModel[modelId] ?? []).slice(0, slicedHours.length);
           series.push({
-            name: `${MODEL_SHORT_LABELS[modelId]} Nuvens Médias`,
+            name: `${MODEL_SHORT_LABELS[modelId]} ${tr('Nuvens Médias', 'Mid Clouds')}`,
             type: 'line',
             smooth: true,
             symbol: 'none',
@@ -1259,7 +1360,7 @@ export const ForecastCharts: React.FC<ForecastChartsProps> = ({
         for (const modelId of highModels) {
           const list = (forecast.nativeByModel[modelId] ?? []).slice(0, slicedHours.length);
           series.push({
-            name: `${MODEL_SHORT_LABELS[modelId]} Nuvens Altas`,
+            name: `${MODEL_SHORT_LABELS[modelId]} ${tr('Nuvens Altas', 'High Clouds')}`,
             type: 'line',
             smooth: true,
             symbol: 'none',
@@ -1272,7 +1373,7 @@ export const ForecastCharts: React.FC<ForecastChartsProps> = ({
 
       if (series.length === 0) {
         series.push({
-          name: 'Nuvens Baixas (0–2 km)',
+          name: tr('Nuvens Baixas (0–2 km)', 'Low Clouds (0–2 km)'),
           type: 'line',
           smooth: true,
           symbol: 'none',
@@ -1286,7 +1387,7 @@ export const ForecastCharts: React.FC<ForecastChartsProps> = ({
       const nativeHours = (forecast.nativeByModel[viewMode] ?? []).slice(0, slicedHours.length);
       series.push(
         {
-          name: `${label} Nuvens Baixas (0–2 km)`,
+          name: `${label} ${tr('Nuvens Baixas (0–2 km)', 'Low Clouds (0–2 km)')}`,
           type: 'line',
           smooth: true,
           symbol: 'none',
@@ -1296,7 +1397,7 @@ export const ForecastCharts: React.FC<ForecastChartsProps> = ({
           data: nativeHours.map((h) => roundOrNull(h.cloudCoverLow, 0)),
         },
         {
-          name: `${label} Nuvens Médias (2–6 km)`,
+          name: `${label} ${tr('Nuvens Médias (2–6 km)', 'Mid Clouds (2–6 km)')}`,
           type: 'line',
           smooth: true,
           symbol: 'none',
@@ -1306,7 +1407,7 @@ export const ForecastCharts: React.FC<ForecastChartsProps> = ({
           data: nativeHours.map((h) => roundOrNull(h.cloudCoverMid, 0)),
         },
         {
-          name: `${label} Nuvens Altas (> 6 km)`,
+          name: `${label} ${tr('Nuvens Altas (> 6 km)', 'High Clouds (> 6 km)')}`,
           type: 'line',
           smooth: true,
           symbol: 'none',
@@ -1319,7 +1420,7 @@ export const ForecastCharts: React.FC<ForecastChartsProps> = ({
     } else {
       series.push(
         {
-          name: 'Nuvens Baixas (0–2 km)',
+          name: tr('Nuvens Baixas (0–2 km)', 'Low Clouds (0–2 km)'),
           type: 'line',
           smooth: true,
           symbol: 'none',
@@ -1329,7 +1430,7 @@ export const ForecastCharts: React.FC<ForecastChartsProps> = ({
           data: slicedHours.map((h) => roundOrNull(h.cloudCover.lowPct.mean, 0)),
         },
         {
-          name: 'Nuvens Médias (2–6 km)',
+          name: tr('Nuvens Médias (2–6 km)', 'Mid Clouds (2–6 km)'),
           type: 'line',
           smooth: true,
           symbol: 'none',
@@ -1339,7 +1440,7 @@ export const ForecastCharts: React.FC<ForecastChartsProps> = ({
           data: slicedHours.map((h) => roundOrNull(h.cloudCover.midPct.mean, 0)),
         },
         {
-          name: 'Nuvens Altas (> 6 km)',
+          name: tr('Nuvens Altas (> 6 km)', 'High Clouds (> 6 km)'),
           type: 'line',
           smooth: true,
           symbol: 'none',
@@ -1384,7 +1485,7 @@ export const ForecastCharts: React.FC<ForecastChartsProps> = ({
       },
       yAxis: {
         type: 'value',
-        name: '% Nuvens',
+        name: tr('% Nuvens', '% Clouds'),
         min: 0,
         max: 100,
         nameTextStyle: { color: textColor, fontSize: 11 },
@@ -1405,6 +1506,7 @@ export const ForecastCharts: React.FC<ForecastChartsProps> = ({
     textColor,
     xLabels,
     gridBorderColor,
+    tr,
   ]);
 
   const showWindChart =
@@ -1425,25 +1527,57 @@ export const ForecastCharts: React.FC<ForecastChartsProps> = ({
     label: string;
     Icon: React.ComponentType<{ className?: string }>;
   }> = [
-    { id: 'all', label: 'Todos Visíveis', Icon: LayoutGrid },
-    { id: 'wind', label: 'Vento & Rajada', Icon: Wind },
-    { id: 'temperature', label: 'Temperatura', Icon: Thermometer },
-    { id: 'rain', label: 'Chuva & Pressão', Icon: CloudRain },
-    { id: 'waves', label: 'Ondas & Swell', Icon: Waves },
-    { id: 'clouds', label: 'Nuvens', Icon: Cloud },
-    { id: 'vertical', label: 'Perfil Vertical', Icon: Compass },
+    { id: 'all', label: tr('Todos Visíveis', 'All Visible'), Icon: LayoutGrid },
+    { id: 'wind', label: tr('Vento & Rajada', 'Wind & Gusts'), Icon: Wind },
+    { id: 'temperature', label: tr('Temperatura', 'Temperature'), Icon: Thermometer },
+    { id: 'rain', label: tr('Chuva & Pressão', 'Rain & Pressure'), Icon: CloudRain },
+    { id: 'waves', label: tr('Ondas & Swell', 'Waves & Swell'), Icon: Waves },
+    { id: 'clouds', label: tr('Nuvens', 'Clouds'), Icon: Cloud },
+    { id: 'vertical', label: tr('Perfil Vertical', 'Vertical Profile'), Icon: Compass },
   ];
 
+  const windChartTitle = tr(
+    `Vento 10m, Faixa de Oscilação & Rajadas (${windLabel})`,
+    `10m Wind, Spread Band & Gusts (${windLabel})`,
+  );
+  const verticalChartTitle = tr(
+    `Perfil Vertical (0–${formatAltLabel(120, units.wave)})`,
+    `Vertical Profile (0–${formatAltLabel(120, units.wave)})`,
+  );
+  const tempChartTitle = tr(
+    `Temperatura & Ponto de Orvalho (${tempLabel})`,
+    `Temperature & Dew Point (${tempLabel})`,
+  );
+  const rainChartTitle = tr(
+    `Chuva Horária (${precipLabel}/h) & Pressão Atmosférica (${pressureLabel})`,
+    `Hourly Rain (${precipLabel}/h) & Surface Pressure (${pressureLabel})`,
+  );
+  const wavesChartTitle = tr(
+    `Ondas (${waveLabel}), Swell & Período`,
+    `Waves (${waveLabel}), Swell & Period`,
+  );
+  const cloudsChartTitle = tr(
+    'Nebulosidade por Altitude (Baixa • Média • Alta)',
+    'Stratified Cloud Cover (Low • Mid • High)',
+  );
+
   return (
-    <section aria-label="Gráficos Horários Interativos" className="space-y-4">
+    <section
+      aria-label={tr('Gráficos Horários Interativos', 'Interactive Hourly Charts')}
+      className="space-y-4"
+    >
       {/* Climatempo-style Rounded Pill Selector Bar for Hourly Charts */}
       <div className="rounded-2xl border border-slate-200/90 dark:border-sky-800/70 bg-white dark:bg-[#132a47] px-4 py-3 shadow-sm flex flex-wrap items-center justify-between gap-2.5">
         <div className="flex items-center gap-2">
           <h2 className="text-sm sm:text-base font-extrabold text-slate-900 dark:text-white">
-            Gráfico Hora a Hora
+            {tr('Gráfico Hora a Hora', 'Hour-by-Hour Charts')}
           </h2>
           <span className="text-xs text-slate-500 dark:text-sky-200/75 hidden sm:inline">
-            • Escolha um parâmetro em destaque ou veja o painel combinado
+            •{' '}
+            {tr(
+              'Escolha um parâmetro em destaque ou veja o painel combinado',
+              'Focus on one parameter or view all panels',
+            )}
           </span>
         </div>
 
@@ -1480,14 +1614,14 @@ export const ForecastCharts: React.FC<ForecastChartsProps> = ({
             <div className="flex flex-wrap items-center gap-2">
               <span className="inline-flex items-center gap-1.5 text-xs font-extrabold text-slate-900 dark:text-white">
                 <Clock className="w-3.5 h-3.5 text-[#0080cd] dark:text-sky-400" aria-hidden="true" />
-                <span>Resumo da Janela Horária</span>
+                <span>{tr('Resumo da Janela Horária', 'Time-Window Summary')}</span>
               </span>
               <span className="px-2 py-0.5 rounded-full text-[11px] font-bold bg-white dark:bg-[#132a47] text-[#0070b8] dark:text-sky-200 border border-sky-200 dark:border-sky-700 capitalize">
                 {activeSummaryMetrics.timeLabel}
               </span>
               {isCurrentHourInRange && safeSelectedIdx === resolvedCurrentHourIndex && (
                 <span className="px-2 py-0.5 rounded-full text-[10px] font-extrabold bg-amber-100 text-amber-900 dark:bg-amber-950/70 dark:text-amber-200 border border-amber-300 dark:border-amber-700">
-                  Agora
+                  {tr('Agora', 'Now')}
                 </span>
               )}
               <span className="px-2 py-0.5 rounded-full text-[10px] font-semibold bg-white/80 dark:bg-[#132a47]/80 text-slate-600 dark:text-sky-200/80 border border-slate-200/80 dark:border-sky-800">
@@ -1510,11 +1644,14 @@ export const ForecastCharts: React.FC<ForecastChartsProps> = ({
                     }}
                     className="min-h-[30px] px-2.5 py-0.5 rounded-full text-[11px] font-bold bg-amber-500 hover:bg-amber-600 text-slate-950 transition-colors"
                   >
-                    Voltar p/ Agora ({currentHourBadge})
+                    {tr(`Voltar p/ Agora (${currentHourBadge})`, `Back to Now (${currentHourBadge})`)}
                   </button>
                 )}
               <span className="text-[11px] text-slate-500 dark:text-sky-300/75 hidden md:inline">
-                Toque nos gráficos para inspecionar outro horário
+                {tr(
+                  'Toque nos gráficos para inspecionar outro horário',
+                  'Tap charts to inspect another hour',
+                )}
               </span>
             </div>
           </div>
@@ -1522,7 +1659,7 @@ export const ForecastCharts: React.FC<ForecastChartsProps> = ({
           <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 xl:grid-cols-7 gap-2 text-xs">
             <div className="rounded-xl bg-white dark:bg-[#132a47] border border-sky-100 dark:border-sky-800/70 px-2.5 py-2">
               <span className="text-[10px] font-semibold text-slate-500 dark:text-sky-300/75 block">
-                Hora Local
+                {tr('Hora Local', 'Local Time')}
               </span>
               <span className="font-extrabold text-slate-900 dark:text-white">
                 {activeSummaryMetrics.hourBadge}
@@ -1531,7 +1668,7 @@ export const ForecastCharts: React.FC<ForecastChartsProps> = ({
 
             <div className="rounded-xl bg-white dark:bg-[#132a47] border border-sky-100 dark:border-sky-800/70 px-2.5 py-2">
               <span className="text-[10px] font-semibold text-slate-500 dark:text-sky-300/75 block">
-                Vento Médio 10m
+                {tr('Vento Médio 10m', 'Mean Wind 10m')}
               </span>
               <span className="font-extrabold text-slate-900 dark:text-white">
                 {formatWindValue(activeSummaryMetrics.windSpeed, 0)}{' '}
@@ -1546,7 +1683,7 @@ export const ForecastCharts: React.FC<ForecastChartsProps> = ({
 
             <div className="rounded-xl bg-white dark:bg-[#132a47] border border-sky-100 dark:border-sky-800/70 px-2.5 py-2">
               <span className="text-[10px] font-semibold text-slate-500 dark:text-sky-300/75 block">
-                Rajadas 10m
+                {tr('Rajadas 10m', 'Gusts 10m')}
               </span>
               <span className="font-extrabold text-orange-600 dark:text-orange-300">
                 {formatWindValue(activeSummaryMetrics.gusts, 0)}
@@ -1555,7 +1692,7 @@ export const ForecastCharts: React.FC<ForecastChartsProps> = ({
 
             <div className="rounded-xl bg-white dark:bg-[#132a47] border border-sky-100 dark:border-sky-800/70 px-2.5 py-2">
               <span className="text-[10px] font-semibold text-slate-500 dark:text-sky-300/75 block">
-                Temp / Orvalho
+                {tr('Temp / Orvalho', 'Temp / Dew Pt')}
               </span>
               <span className="font-extrabold text-slate-900 dark:text-white">
                 {formatTempValue(activeSummaryMetrics.temp, 1)}{' '}
@@ -1567,7 +1704,7 @@ export const ForecastCharts: React.FC<ForecastChartsProps> = ({
 
             <div className="rounded-xl bg-white dark:bg-[#132a47] border border-sky-100 dark:border-sky-800/70 px-2.5 py-2">
               <span className="text-[10px] font-semibold text-slate-500 dark:text-sky-300/75 block">
-                Precipitação
+                {tr('Precipitação', 'Precipitation')}
               </span>
               <span className="font-extrabold text-slate-900 dark:text-white">
                 {activeSummaryMetrics.precipMm !== null
@@ -1584,7 +1721,7 @@ export const ForecastCharts: React.FC<ForecastChartsProps> = ({
 
             <div className="rounded-xl bg-white dark:bg-[#132a47] border border-sky-100 dark:border-sky-800/70 px-2.5 py-2">
               <span className="text-[10px] font-semibold text-slate-500 dark:text-sky-300/75 block">
-                Pressão
+                {tr('Pressão', 'Pressure')}
               </span>
               <span className="font-extrabold text-slate-900 dark:text-white">
                 {formatPressureValue(activeSummaryMetrics.pressureHpa)}
@@ -1594,7 +1731,7 @@ export const ForecastCharts: React.FC<ForecastChartsProps> = ({
             {forecast.marineAvailable && (
               <div className="rounded-xl bg-white dark:bg-[#132a47] border border-sky-100 dark:border-sky-800/70 px-2.5 py-2">
                 <span className="text-[10px] font-semibold text-slate-500 dark:text-sky-300/75 block">
-                  Onda / Período
+                  {tr('Onda / Período', 'Wave / Period')}
                   {activeSummaryMetrics.seaLevelHeightMsl !== null ? ' • MSL' : ''}
                 </span>
                 <span className="font-extrabold text-slate-900 dark:text-white">
@@ -1607,8 +1744,13 @@ export const ForecastCharts: React.FC<ForecastChartsProps> = ({
                 </span>
                 {activeSummaryMetrics.seaLevelHeightMsl !== null && (
                   <span className="block text-[10px] font-bold text-indigo-700 dark:text-indigo-300">
-                    Nível do Mar Est. (MSL):{' '}
-                    {`${activeSummaryMetrics.seaLevelHeightMsl >= 0 ? '+' : ''}${activeSummaryMetrics.seaLevelHeightMsl.toFixed(2)} m`}
+                    {tr('Nível do Mar Est. (MSL):', 'Est. Sea Level (MSL):')}{' '}
+                    {(() => {
+                      const mslConv =
+                        convertWaveHeight(activeSummaryMetrics.seaLevelHeightMsl, units.wave) ??
+                        activeSummaryMetrics.seaLevelHeightMsl;
+                      return `${mslConv >= 0 ? '+' : ''}${mslConv.toFixed(units.wave === 'ft' ? 1 : 2)} ${waveLabel}`;
+                    })()}
                   </span>
                 )}
               </div>
@@ -1633,7 +1775,7 @@ export const ForecastCharts: React.FC<ForecastChartsProps> = ({
                 <div className="flex items-center gap-2">
                   <Wind className="w-5 h-5 text-[#0080cd] dark:text-sky-400" aria-hidden="true" />
                   <h3 className="text-sm sm:text-base font-bold text-slate-900 dark:text-white">
-                    Vento 10m, Faixa de Oscilação &amp; Rajadas (km/h)
+                    {windChartTitle}
                   </h3>
                 </div>
                 <div className="flex items-center gap-1.5">
@@ -1647,20 +1789,20 @@ export const ForecastCharts: React.FC<ForecastChartsProps> = ({
                     aria-pressed={fullscreenChartId === 'wind'}
                     aria-label={
                       fullscreenChartId === 'wind'
-                        ? 'Reduzir gráfico de Vento'
-                        : 'Tela Cheia do gráfico de Vento'
+                        ? tr('Reduzir gráfico de Vento', 'Minimize Wind chart')
+                        : tr('Tela Cheia do gráfico de Vento', 'Fullscreen Wind chart')
                     }
                     className="min-h-[44px] min-w-[44px] px-3 py-1.5 rounded-xl text-xs font-bold inline-flex items-center justify-center gap-1.5 bg-[#f4f8fb] dark:bg-[#0d1f36] hover:bg-sky-50 dark:hover:bg-sky-900/50 text-slate-700 dark:text-sky-200 border border-slate-200 dark:border-sky-800 transition-colors focus:outline-none focus:ring-2 focus:ring-sky-500"
                   >
                     {fullscreenChartId === 'wind' ? (
                       <>
                         <Minimize2 className="w-4 h-4 text-[#0080cd] dark:text-sky-300" aria-hidden="true" />
-                        <span className="hidden sm:inline">Reduzir</span>
+                        <span className="hidden sm:inline">{tr('Reduzir', 'Minimize')}</span>
                       </>
                     ) : (
                       <>
                         <Maximize2 className="w-4 h-4 text-[#0080cd] dark:text-sky-300" aria-hidden="true" />
-                        <span className="hidden sm:inline">Tela Cheia</span>
+                        <span className="hidden sm:inline">{tr('Tela Cheia', 'Fullscreen')}</span>
                       </>
                     )}
                   </button>
@@ -1694,11 +1836,11 @@ export const ForecastCharts: React.FC<ForecastChartsProps> = ({
                   <div className="flex flex-wrap items-center gap-2">
                     <Compass className="w-5 h-5 text-[#0080cd] dark:text-sky-400" aria-hidden="true" />
                     <h3 className="text-sm font-bold text-slate-900 dark:text-white">
-                      Perfil Vertical (0–120m)
+                      {verticalChartTitle}
                     </h3>
                     {showInterpolatedProfile && (
                       <span className="px-2 py-0.5 rounded-full text-[10px] font-bold bg-sky-100 text-[#0070b8] dark:bg-sky-900 dark:text-sky-200">
-                        Estimado
+                        {tr('Estimado', 'Estimated')}
                       </span>
                     )}
                     {isCurrentHourInRange && currentHourBadge && (
@@ -1706,7 +1848,7 @@ export const ForecastCharts: React.FC<ForecastChartsProps> = ({
                         data-testid="vertical-profile-current-badge"
                         className="px-2 py-0.5 rounded-full text-[10px] font-extrabold bg-amber-100 text-amber-900 dark:bg-amber-950/60 dark:text-amber-200 border border-amber-300 dark:border-amber-700"
                       >
-                        Agora: {currentHourBadge}
+                        {tr('Agora:', 'Now:')} {currentHourBadge}
                       </span>
                     )}
                   </div>
@@ -1721,8 +1863,8 @@ export const ForecastCharts: React.FC<ForecastChartsProps> = ({
                       aria-pressed={fullscreenChartId === 'vertical'}
                       aria-label={
                         fullscreenChartId === 'vertical'
-                          ? 'Reduzir gráfico de Perfil Vertical'
-                          : 'Tela Cheia do gráfico de Perfil Vertical'
+                          ? tr('Reduzir gráfico de Perfil Vertical', 'Minimize Vertical Profile chart')
+                          : tr('Tela Cheia do gráfico de Perfil Vertical', 'Fullscreen Vertical Profile chart')
                       }
                       className="min-h-[44px] min-w-[44px] px-2.5 py-1.5 rounded-xl text-xs font-bold inline-flex items-center justify-center gap-1.5 bg-[#f4f8fb] dark:bg-[#0d1f36] hover:bg-sky-50 dark:hover:bg-sky-900/50 text-slate-700 dark:text-sky-200 border border-slate-200 dark:border-sky-800 transition-colors focus:outline-none focus:ring-2 focus:ring-sky-500"
                     >
@@ -1738,7 +1880,7 @@ export const ForecastCharts: React.FC<ForecastChartsProps> = ({
 
                 <div className="flex flex-wrap items-center justify-between gap-2 text-xs text-slate-600 dark:text-sky-200">
                   <span>
-                    Horário: <strong>{xLabels[safeSelectedIdx] ?? 'Agora'}</strong>
+                    {tr('Horário:', 'Time:')} <strong>{xLabels[safeSelectedIdx] ?? tr('Agora', 'Now')}</strong>
                   </span>
                   <div className="flex items-center gap-2">
                     {isCurrentHourInRange &&
@@ -1755,7 +1897,7 @@ export const ForecastCharts: React.FC<ForecastChartsProps> = ({
                           }}
                           className="px-2 py-0.5 rounded-full text-[10px] font-bold bg-amber-500 hover:bg-amber-600 text-slate-950 transition-colors"
                         >
-                          Ir para Agora
+                          {tr('Ir para Agora', 'Go to Now')}
                         </button>
                       )}
                     <span className="font-mono">
@@ -1775,7 +1917,10 @@ export const ForecastCharts: React.FC<ForecastChartsProps> = ({
                     max={slicedHours.length - 1}
                     value={safeSelectedIdx}
                     onChange={(e) => onSelectHourIndex(Number(e.target.value))}
-                    aria-label="Selecionar hora para inspecionar perfil vertical de vento"
+                    aria-label={tr(
+                      'Selecionar hora para inspecionar perfil vertical de vento',
+                      'Select hour to inspect vertical wind profile',
+                    )}
                     className="w-full accent-[#0080cd] cursor-pointer"
                   />
                 )}
@@ -1813,7 +1958,7 @@ export const ForecastCharts: React.FC<ForecastChartsProps> = ({
                 <div className="flex items-center gap-2">
                   <Thermometer className="w-5 h-5 text-orange-500" aria-hidden="true" />
                   <h3 className="text-sm sm:text-base font-bold text-slate-900 dark:text-white">
-                    Temperatura &amp; Ponto de Orvalho (°C)
+                    {tempChartTitle}
                   </h3>
                 </div>
                 <div className="flex items-center gap-1.5">
@@ -1829,20 +1974,20 @@ export const ForecastCharts: React.FC<ForecastChartsProps> = ({
                     aria-pressed={fullscreenChartId === 'temperature'}
                     aria-label={
                       fullscreenChartId === 'temperature'
-                        ? 'Reduzir gráfico de Temperatura'
-                        : 'Tela Cheia do gráfico de Temperatura'
+                        ? tr('Reduzir gráfico de Temperatura', 'Minimize Temperature chart')
+                        : tr('Tela Cheia do gráfico de Temperatura', 'Fullscreen Temperature chart')
                     }
                     className="min-h-[44px] min-w-[44px] px-3 py-1.5 rounded-xl text-xs font-bold inline-flex items-center justify-center gap-1.5 bg-[#f4f8fb] dark:bg-[#0d1f36] hover:bg-sky-50 dark:hover:bg-sky-900/50 text-slate-700 dark:text-sky-200 border border-slate-200 dark:border-sky-800 transition-colors focus:outline-none focus:ring-2 focus:ring-sky-500"
                   >
                     {fullscreenChartId === 'temperature' ? (
                       <>
                         <Minimize2 className="w-4 h-4 text-[#0080cd] dark:text-sky-300" aria-hidden="true" />
-                        <span className="hidden sm:inline">Reduzir</span>
+                        <span className="hidden sm:inline">{tr('Reduzir', 'Minimize')}</span>
                       </>
                     ) : (
                       <>
                         <Maximize2 className="w-4 h-4 text-[#0080cd] dark:text-sky-300" aria-hidden="true" />
-                        <span className="hidden sm:inline">Tela Cheia</span>
+                        <span className="hidden sm:inline">{tr('Tela Cheia', 'Fullscreen')}</span>
                       </>
                     )}
                   </button>
@@ -1873,7 +2018,7 @@ export const ForecastCharts: React.FC<ForecastChartsProps> = ({
                 <div className="flex items-center gap-2">
                   <CloudRain className="w-5 h-5 text-[#0080cd] dark:text-sky-400" aria-hidden="true" />
                   <h3 className="text-sm sm:text-base font-bold text-slate-900 dark:text-white">
-                    Chuva Horária (mm/h) &amp; Pressão Atmosférica (hPa)
+                    {rainChartTitle}
                   </h3>
                 </div>
                 <div className="flex items-center gap-1.5">
@@ -1887,20 +2032,20 @@ export const ForecastCharts: React.FC<ForecastChartsProps> = ({
                     aria-pressed={fullscreenChartId === 'rain'}
                     aria-label={
                       fullscreenChartId === 'rain'
-                        ? 'Reduzir gráfico de Chuva e Pressão'
-                        : 'Tela Cheia do gráfico de Chuva e Pressão'
+                        ? tr('Reduzir gráfico de Chuva e Pressão', 'Minimize Rain & Pressure chart')
+                        : tr('Tela Cheia do gráfico de Chuva e Pressão', 'Fullscreen Rain & Pressure chart')
                     }
                     className="min-h-[44px] min-w-[44px] px-3 py-1.5 rounded-xl text-xs font-bold inline-flex items-center justify-center gap-1.5 bg-[#f4f8fb] dark:bg-[#0d1f36] hover:bg-sky-50 dark:hover:bg-sky-900/50 text-slate-700 dark:text-sky-200 border border-slate-200 dark:border-sky-800 transition-colors focus:outline-none focus:ring-2 focus:ring-sky-500"
                   >
                     {fullscreenChartId === 'rain' ? (
                       <>
                         <Minimize2 className="w-4 h-4 text-[#0080cd] dark:text-sky-300" aria-hidden="true" />
-                        <span className="hidden sm:inline">Reduzir</span>
+                        <span className="hidden sm:inline">{tr('Reduzir', 'Minimize')}</span>
                       </>
                     ) : (
                       <>
                         <Maximize2 className="w-4 h-4 text-[#0080cd] dark:text-sky-300" aria-hidden="true" />
-                        <span className="hidden sm:inline">Tela Cheia</span>
+                        <span className="hidden sm:inline">{tr('Tela Cheia', 'Fullscreen')}</span>
                       </>
                     )}
                   </button>
@@ -1940,7 +2085,7 @@ export const ForecastCharts: React.FC<ForecastChartsProps> = ({
                 <div className="flex items-center gap-2">
                   <Waves className="w-5 h-5 text-[#0080cd] dark:text-sky-400" aria-hidden="true" />
                   <h3 className="text-sm sm:text-base font-bold text-slate-900 dark:text-white">
-                    Ondas, Ondulação (Swell) &amp; Período
+                    {wavesChartTitle}
                   </h3>
                 </div>
                 <div className="flex items-center gap-1.5">
@@ -1954,20 +2099,20 @@ export const ForecastCharts: React.FC<ForecastChartsProps> = ({
                     aria-pressed={fullscreenChartId === 'waves'}
                     aria-label={
                       fullscreenChartId === 'waves'
-                        ? 'Reduzir gráfico de Ondas e Maré MSL'
-                        : 'Tela Cheia do gráfico de Ondas e Maré MSL'
+                        ? tr('Reduzir gráfico de Ondas e Maré MSL', 'Minimize Waves & MSL chart')
+                        : tr('Tela Cheia do gráfico de Ondas e Maré MSL', 'Fullscreen Waves & MSL chart')
                     }
                     className="min-h-[44px] min-w-[44px] px-3 py-1.5 rounded-xl text-xs font-bold inline-flex items-center justify-center gap-1.5 bg-[#f4f8fb] dark:bg-[#0d1f36] hover:bg-sky-50 dark:hover:bg-sky-900/50 text-slate-700 dark:text-sky-200 border border-slate-200 dark:border-sky-800 transition-colors focus:outline-none focus:ring-2 focus:ring-sky-500"
                   >
                     {fullscreenChartId === 'waves' ? (
                       <>
                         <Minimize2 className="w-4 h-4 text-[#0080cd] dark:text-sky-300" aria-hidden="true" />
-                        <span className="hidden sm:inline">Reduzir</span>
+                        <span className="hidden sm:inline">{tr('Reduzir', 'Minimize')}</span>
                       </>
                     ) : (
                       <>
                         <Maximize2 className="w-4 h-4 text-[#0080cd] dark:text-sky-300" aria-hidden="true" />
-                        <span className="hidden sm:inline">Tela Cheia</span>
+                        <span className="hidden sm:inline">{tr('Tela Cheia', 'Fullscreen')}</span>
                       </>
                     )}
                   </button>
@@ -1992,7 +2137,10 @@ export const ForecastCharts: React.FC<ForecastChartsProps> = ({
                       data-testid="waves-msl-disclaimer"
                       className="text-[11px] leading-snug text-slate-600 dark:text-sky-200/85 bg-sky-50/80 dark:bg-[#0d1f36]/80 border border-sky-200/80 dark:border-sky-800/70 rounded-xl px-3 py-2"
                     >
-                      Nível do Mar (MSL ~8 km): estimativa barométrica/maré indicativa; não substitui Tábua de Marés oficial da DHN/Marinha.
+                      {tr(
+                        'Nível do Mar (MSL ~8 km): estimativa barométrica/maré indicativa; não substitui Tábua de Marés oficial da DHN/Marinha.',
+                        'Sea Level (MSL ~8 km): hydrodynamic estimate only; does NOT replace official DHN/Marinha port tide tables.',
+                      )}
                     </p>
                   )}
                 </>
@@ -2002,10 +2150,13 @@ export const ForecastCharts: React.FC<ForecastChartsProps> = ({
                     <Mountain className="w-6 h-6" aria-hidden="true" />
                   </div>
                   <h4 className="text-sm font-bold text-slate-800 dark:text-white">
-                    Localidade Continental (Sem Grade Marítima)
+                    {tr('Localidade Continental (Sem Grade Marítima)', 'Inland Coordinate (No Marine Grid)')}
                   </h4>
                   <p className="text-xs text-slate-500 dark:text-sky-200/80 max-w-md leading-relaxed">
-                    Esta coordenada fica em terra firme. Você pode ocultar &ldquo;Ondas &amp; Swell&rdquo; na barra de parâmetros acima para deixar a tela ainda mais limpa.
+                    {tr(
+                      'Esta coordenada fica em terra firme. Você pode ocultar “Ondas & Swell” na barra de parâmetros acima para deixar a tela ainda mais limpa.',
+                      'This coordinate is inland. You can hide "Waves & Swell" in the parameter bar above to keep the screen cleaner.',
+                    )}
                   </p>
                 </div>
               )}
@@ -2023,7 +2174,7 @@ export const ForecastCharts: React.FC<ForecastChartsProps> = ({
                 <div className="flex items-center gap-2">
                   <Cloud className="w-5 h-5 text-[#0080cd] dark:text-sky-400" aria-hidden="true" />
                   <h3 className="text-sm sm:text-base font-bold text-slate-900 dark:text-white">
-                    Nebulosidade por Altitude (Baixa • Média • Alta)
+                    {cloudsChartTitle}
                   </h3>
                 </div>
                 <div className="flex items-center gap-1.5">
@@ -2037,20 +2188,20 @@ export const ForecastCharts: React.FC<ForecastChartsProps> = ({
                     aria-pressed={fullscreenChartId === 'clouds'}
                     aria-label={
                       fullscreenChartId === 'clouds'
-                        ? 'Reduzir gráfico de Nebulosidade'
-                        : 'Tela Cheia do gráfico de Nebulosidade'
+                        ? tr('Reduzir gráfico de Nebulosidade', 'Minimize Cloud Cover chart')
+                        : tr('Tela Cheia do gráfico de Nebulosidade', 'Fullscreen Cloud Cover chart')
                     }
                     className="min-h-[44px] min-w-[44px] px-3 py-1.5 rounded-xl text-xs font-bold inline-flex items-center justify-center gap-1.5 bg-[#f4f8fb] dark:bg-[#0d1f36] hover:bg-sky-50 dark:hover:bg-sky-900/50 text-slate-700 dark:text-sky-200 border border-slate-200 dark:border-sky-800 transition-colors focus:outline-none focus:ring-2 focus:ring-sky-500"
                   >
                     {fullscreenChartId === 'clouds' ? (
                       <>
                         <Minimize2 className="w-4 h-4 text-[#0080cd] dark:text-sky-300" aria-hidden="true" />
-                        <span className="hidden sm:inline">Reduzir</span>
+                        <span className="hidden sm:inline">{tr('Reduzir', 'Minimize')}</span>
                       </>
                     ) : (
                       <>
                         <Maximize2 className="w-4 h-4 text-[#0080cd] dark:text-sky-300" aria-hidden="true" />
-                        <span className="hidden sm:inline">Tela Cheia</span>
+                        <span className="hidden sm:inline">{tr('Tela Cheia', 'Fullscreen')}</span>
                       </>
                     )}
                   </button>
@@ -2079,7 +2230,7 @@ export const ForecastCharts: React.FC<ForecastChartsProps> = ({
           <div
             role="dialog"
             aria-modal="true"
-            aria-label="Visualização de Gráfico em Tela Cheia"
+            aria-label={tr('Visualização de Gráfico em Tela Cheia', 'Fullscreen Chart View')}
             data-testid="chart-fullscreen-modal"
             onClick={() => setFullscreenChartId(null)}
             className="fixed inset-0 z-[85] bg-slate-950/80 backdrop-blur-sm flex flex-col p-3 sm:p-6 overflow-y-auto"
@@ -2091,17 +2242,16 @@ export const ForecastCharts: React.FC<ForecastChartsProps> = ({
               <div className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-200 dark:border-sky-800 pb-3">
                 <div className="flex flex-wrap items-center gap-2">
                   <h3 className="text-base sm:text-lg font-extrabold text-slate-900 dark:text-white">
-                    {fullscreenChartId === 'wind' &&
-                      'Vento 10m, Faixa de Oscilação & Rajadas (km/h)'}
-                    {fullscreenChartId === 'vertical' && 'Perfil Vertical de Vento (0–120m)'}
-                    {fullscreenChartId === 'temperature' &&
-                      'Temperatura & Ponto de Orvalho (°C)'}
-                    {fullscreenChartId === 'rain' &&
-                      'Chuva Horária (mm/h) & Pressão Atmosférica (hPa)'}
+                    {fullscreenChartId === 'wind' && windChartTitle}
+                    {fullscreenChartId === 'vertical' && verticalChartTitle}
+                    {fullscreenChartId === 'temperature' && tempChartTitle}
+                    {fullscreenChartId === 'rain' && rainChartTitle}
                     {fullscreenChartId === 'waves' &&
-                      'Ondas, Ondulação (Swell), Período & Maré Est. (MSL)'}
-                    {fullscreenChartId === 'clouds' &&
-                      'Nebulosidade por Altitude (Baixa • Média • Alta)'}
+                      tr(
+                        `Ondas (${waveLabel}), Swell, Período & Maré Est. (MSL)`,
+                        `Waves (${waveLabel}), Swell, Period & Est. Sea Level (MSL)`,
+                      )}
+                    {fullscreenChartId === 'clouds' && cloudsChartTitle}
                   </h3>
                   {activeSummaryMetrics && (
                     <span className="px-2.5 py-0.5 rounded-full text-xs font-bold bg-sky-50 dark:bg-[#0d1f36] text-[#0070b8] dark:text-sky-200 border border-sky-200 dark:border-sky-700 capitalize">
@@ -2114,11 +2264,11 @@ export const ForecastCharts: React.FC<ForecastChartsProps> = ({
                   type="button"
                   data-testid="chart-fullscreen-btn"
                   onClick={() => setFullscreenChartId(null)}
-                  aria-label="Reduzir gráfico em tela cheia"
+                  aria-label={tr('Reduzir gráfico em tela cheia', 'Minimize fullscreen chart')}
                   className="min-h-[44px] min-w-[44px] px-4 py-2 rounded-xl text-xs font-bold inline-flex items-center justify-center gap-2 bg-[#0080cd] hover:bg-[#006bb3] text-white shadow-sm transition-colors focus:outline-none focus:ring-2 focus:ring-sky-500"
                 >
                   <Minimize2 className="w-4 h-4" aria-hidden="true" />
-                  <span>Reduzir</span>
+                  <span>{tr('Reduzir', 'Minimize')}</span>
                 </button>
               </div>
 
@@ -2126,7 +2276,8 @@ export const ForecastCharts: React.FC<ForecastChartsProps> = ({
                 <div className="space-y-1">
                   <div className="flex items-center justify-between text-xs text-slate-600 dark:text-sky-200">
                     <span>
-                      Janela inspecionada: <strong>{xLabels[safeSelectedIdx] ?? 'Agora'}</strong>
+                      {tr('Janela inspecionada:', 'Inspected window:')}{' '}
+                      <strong>{xLabels[safeSelectedIdx] ?? tr('Agora', 'Now')}</strong>
                     </span>
                     <span className="font-mono">
                       α ={' '}
@@ -2142,7 +2293,10 @@ export const ForecastCharts: React.FC<ForecastChartsProps> = ({
                     max={slicedHours.length - 1}
                     value={safeSelectedIdx}
                     onChange={(e) => onSelectHourIndex(Number(e.target.value))}
-                    aria-label="Selecionar hora no perfil vertical em tela cheia"
+                    aria-label={tr(
+                      'Selecionar hora no perfil vertical em tela cheia',
+                      'Select hour in fullscreen vertical profile',
+                    )}
                     className="w-full accent-[#0080cd] cursor-pointer"
                   />
                 </div>
@@ -2152,10 +2306,13 @@ export const ForecastCharts: React.FC<ForecastChartsProps> = ({
                 <div className="min-h-[40vh] rounded-2xl border border-dashed border-sky-200 dark:border-sky-800 bg-[#f4f8fb] dark:bg-[#0d1f36]/60 p-8 flex flex-col items-center justify-center text-center space-y-2">
                   <Mountain className="w-8 h-8 text-[#0080cd] dark:text-sky-300" aria-hidden="true" />
                   <h4 className="text-base font-bold text-slate-800 dark:text-white">
-                    Localidade Continental (Sem Grade Marítima)
+                    {tr('Localidade Continental (Sem Grade Marítima)', 'Inland Coordinate (No Marine Grid)')}
                   </h4>
                   <p className="text-xs text-slate-500 dark:text-sky-200/80 max-w-md">
-                    A coordenada selecionada está em terra firme e não possui grade oceânica costeira.
+                    {tr(
+                      'A coordenada selecionada está em terra firme e não possui grade oceânica costeira.',
+                      'The selected coordinate is inland and has no coastal marine grid.',
+                    )}
                   </p>
                 </div>
               ) : (
@@ -2185,7 +2342,10 @@ export const ForecastCharts: React.FC<ForecastChartsProps> = ({
 
               {fullscreenChartId === 'waves' && forecast.marineAvailable && hasSeaLevelMsl && (
                 <p className="text-xs leading-snug text-slate-600 dark:text-sky-200/85 bg-sky-50/80 dark:bg-[#0d1f36]/80 border border-sky-200/80 dark:border-sky-800/70 rounded-xl px-3.5 py-2">
-                  Nível do Mar (MSL ~8 km): estimativa barométrica/maré indicativa; não substitui Tábua de Marés oficial da DHN/Marinha.
+                  {tr(
+                    'Nível do Mar (MSL ~8 km): estimativa barométrica/maré indicativa; não substitui Tábua de Marés oficial da DHN/Marinha.',
+                    'Sea Level (MSL ~8 km): hydrodynamic estimate only; does NOT replace official DHN/Marinha port tide tables.',
+                  )}
                 </p>
               )}
             </div>

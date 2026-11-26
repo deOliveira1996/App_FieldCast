@@ -1,5 +1,6 @@
 import React, { useEffect, useState } from 'react';
 import { CloudRain, RotateCcw, Save, Sliders, Waves, Wind, X } from 'lucide-react';
+import { useLocale } from '../../context/LocaleContext';
 import { useUnits } from '../../context/UnitsContext';
 import type { ToastMessage } from '../../types/health';
 import { SafeWindowThresholdsSchema } from '../../types/schemas';
@@ -18,6 +19,7 @@ import {
   windSpeedToKmh,
 } from '../../utils/units';
 import { HelpPopover } from '../common/HelpPopover';
+import { NumericInput } from '../common/NumericInput';
 
 export interface ThresholdSettingsModalProps {
   isOpen: boolean;
@@ -25,6 +27,10 @@ export interface ThresholdSettingsModalProps {
   thresholds: SafeWindowThresholds;
   onSaveThresholds: (nextThresholds: SafeWindowThresholds) => void | Promise<void>;
   onToast?: (toast: Omit<ToastMessage, 'id'>) => void;
+}
+
+function clampVal(value: number, min: number, max: number): number {
+  return Math.min(max, Math.max(min, value));
 }
 
 export const ThresholdSettingsModal: React.FC<ThresholdSettingsModalProps> = ({
@@ -35,10 +41,25 @@ export const ThresholdSettingsModal: React.FC<ThresholdSettingsModalProps> = ({
   onToast,
 }) => {
   const { units } = useUnits();
-  const [maxWindKmh, setMaxWindKmh] = useState<number>(thresholds.maxWindKmh);
-  const [maxGustKmh, setMaxGustKmh] = useState<number>(thresholds.maxGustKmh);
-  const [maxWaveM, setMaxWaveM] = useState<number>(thresholds.maxWaveM);
-  const [maxPrecipProbPct, setMaxPrecipProbPct] = useState<number>(thresholds.maxPrecipProbPct);
+  const { tr } = useLocale();
+
+  const windMinDisplay = Number((Math.ceil((convertWindSpeed(5, units.wind) ?? 5) * 10) / 10).toFixed(1));
+  const windMaxDisplay = Number((Math.floor((convertWindSpeed(150, units.wind) ?? 150) * 10) / 10).toFixed(1));
+  const gustMinDisplay = Number((Math.ceil((convertWindSpeed(5, units.wind) ?? 5) * 10) / 10).toFixed(1));
+  const gustMaxDisplay = Number((Math.floor((convertWindSpeed(200, units.wind) ?? 200) * 10) / 10).toFixed(1));
+  const waveMinDisplay = Number((Math.ceil((convertWaveHeight(0.1, units.wave) ?? 0.1) * 10) / 10).toFixed(1));
+  const waveMaxDisplay = Number((Math.floor((convertWaveHeight(20, units.wave) ?? 20) * 10) / 10).toFixed(1));
+
+  const [windDisplay, setWindDisplay] = useState<number | null>(() =>
+    Number((convertWindSpeed(thresholds.maxWindKmh, units.wind) ?? thresholds.maxWindKmh).toFixed(1)),
+  );
+  const [gustDisplay, setGustDisplay] = useState<number | null>(() =>
+    Number((convertWindSpeed(thresholds.maxGustKmh, units.wind) ?? thresholds.maxGustKmh).toFixed(1)),
+  );
+  const [waveDisplay, setWaveDisplay] = useState<number | null>(() =>
+    Number((convertWaveHeight(thresholds.maxWaveM, units.wave) ?? thresholds.maxWaveM).toFixed(1)),
+  );
+  const [precipDisplay, setPrecipDisplay] = useState<number | null>(thresholds.maxPrecipProbPct);
   const [enabledMap, setEnabledMap] = useState<Record<SafeWindowThresholdKey, boolean>>({
     maxWindKmh: thresholds.enabled?.maxWindKmh ?? true,
     maxGustKmh: thresholds.enabled?.maxGustKmh ?? true,
@@ -50,10 +71,16 @@ export const ThresholdSettingsModal: React.FC<ThresholdSettingsModalProps> = ({
 
   useEffect(() => {
     if (isOpen) {
-      setMaxWindKmh(thresholds.maxWindKmh);
-      setMaxGustKmh(thresholds.maxGustKmh);
-      setMaxWaveM(thresholds.maxWaveM);
-      setMaxPrecipProbPct(thresholds.maxPrecipProbPct);
+      setWindDisplay(
+        Number((convertWindSpeed(thresholds.maxWindKmh, units.wind) ?? thresholds.maxWindKmh).toFixed(1)),
+      );
+      setGustDisplay(
+        Number((convertWindSpeed(thresholds.maxGustKmh, units.wind) ?? thresholds.maxGustKmh).toFixed(1)),
+      );
+      setWaveDisplay(
+        Number((convertWaveHeight(thresholds.maxWaveM, units.wave) ?? thresholds.maxWaveM).toFixed(1)),
+      );
+      setPrecipDisplay(thresholds.maxPrecipProbPct);
       setEnabledMap({
         maxWindKmh: thresholds.enabled?.maxWindKmh ?? true,
         maxGustKmh: thresholds.enabled?.maxGustKmh ?? true,
@@ -62,7 +89,7 @@ export const ThresholdSettingsModal: React.FC<ThresholdSettingsModalProps> = ({
       });
       setValidationError(null);
     }
-  }, [isOpen, thresholds]);
+  }, [isOpen, thresholds, units.wind, units.wave]);
 
   useEffect(() => {
     if (!isOpen) {
@@ -82,10 +109,31 @@ export const ThresholdSettingsModal: React.FC<ThresholdSettingsModalProps> = ({
   }
 
   const handleRestoreDefaults = () => {
-    setMaxWindKmh(DEFAULT_SAFE_WINDOW_THRESHOLDS.maxWindKmh);
-    setMaxGustKmh(DEFAULT_SAFE_WINDOW_THRESHOLDS.maxGustKmh);
-    setMaxWaveM(DEFAULT_SAFE_WINDOW_THRESHOLDS.maxWaveM);
-    setMaxPrecipProbPct(DEFAULT_SAFE_WINDOW_THRESHOLDS.maxPrecipProbPct);
+    setWindDisplay(
+      Number(
+        (
+          convertWindSpeed(DEFAULT_SAFE_WINDOW_THRESHOLDS.maxWindKmh, units.wind) ??
+          DEFAULT_SAFE_WINDOW_THRESHOLDS.maxWindKmh
+        ).toFixed(1),
+      ),
+    );
+    setGustDisplay(
+      Number(
+        (
+          convertWindSpeed(DEFAULT_SAFE_WINDOW_THRESHOLDS.maxGustKmh, units.wind) ??
+          DEFAULT_SAFE_WINDOW_THRESHOLDS.maxGustKmh
+        ).toFixed(1),
+      ),
+    );
+    setWaveDisplay(
+      Number(
+        (
+          convertWaveHeight(DEFAULT_SAFE_WINDOW_THRESHOLDS.maxWaveM, units.wave) ??
+          DEFAULT_SAFE_WINDOW_THRESHOLDS.maxWaveM
+        ).toFixed(1),
+      ),
+    );
+    setPrecipDisplay(DEFAULT_SAFE_WINDOW_THRESHOLDS.maxPrecipProbPct);
     setEnabledMap({
       maxWindKmh: true,
       maxGustKmh: true,
@@ -99,11 +147,55 @@ export const ThresholdSettingsModal: React.FC<ThresholdSettingsModalProps> = ({
     e.preventDefault();
     setValidationError(null);
 
+    if (
+      (enabledMap.maxWindKmh && (windDisplay === null || !Number.isFinite(windDisplay))) ||
+      (enabledMap.maxGustKmh && (gustDisplay === null || !Number.isFinite(gustDisplay))) ||
+      (enabledMap.maxWaveM && (waveDisplay === null || !Number.isFinite(waveDisplay))) ||
+      (enabledMap.maxPrecipProbPct && (precipDisplay === null || !Number.isFinite(precipDisplay)))
+    ) {
+      setValidationError(
+        tr(
+          'Preencha todos os limites monitorados antes de salvar.',
+          'Fill in all monitored thresholds before saving.',
+        ),
+      );
+      return;
+    }
+
+    const resolvedWindKmh =
+      windDisplay !== null && Number.isFinite(windDisplay)
+        ? clampVal(
+            Number(windSpeedToKmh(clampVal(windDisplay, windMinDisplay, windMaxDisplay), units.wind).toFixed(2)),
+            5,
+            150,
+          )
+        : thresholds.maxWindKmh;
+    const resolvedGustKmh =
+      gustDisplay !== null && Number.isFinite(gustDisplay)
+        ? clampVal(
+            Number(windSpeedToKmh(clampVal(gustDisplay, gustMinDisplay, gustMaxDisplay), units.wind).toFixed(2)),
+            5,
+            200,
+          )
+        : thresholds.maxGustKmh;
+    const resolvedWaveM =
+      waveDisplay !== null && Number.isFinite(waveDisplay)
+        ? clampVal(
+            Number(waveHeightToM(clampVal(waveDisplay, waveMinDisplay, waveMaxDisplay), units.wave).toFixed(2)),
+            0.1,
+            20,
+          )
+        : thresholds.maxWaveM;
+    const resolvedPrecipPct =
+      precipDisplay !== null && Number.isFinite(precipDisplay)
+        ? clampVal(Math.round(precipDisplay), 0, 100)
+        : thresholds.maxPrecipProbPct;
+
     const candidate: SafeWindowThresholds = {
-      maxWindKmh: Number(maxWindKmh),
-      maxGustKmh: Number(maxGustKmh),
-      maxWaveM: Number(maxWaveM),
-      maxPrecipProbPct: Number(maxPrecipProbPct),
+      maxWindKmh: resolvedWindKmh,
+      maxGustKmh: resolvedGustKmh,
+      maxWaveM: resolvedWaveM,
+      maxPrecipProbPct: resolvedPrecipPct,
       enabled: { ...enabledMap },
     };
 
@@ -111,7 +203,11 @@ export const ThresholdSettingsModal: React.FC<ThresholdSettingsModalProps> = ({
     if (!parsed.success) {
       const firstIssue = parsed.error.issues[0];
       setValidationError(
-        firstIssue?.message ?? 'Verifique os valores inseridos nos limites operacionais.',
+        firstIssue?.message ??
+          tr(
+            'Verifique os valores inseridos nos limites operacionais.',
+            'Check the operational threshold values entered.',
+          ),
       );
       return;
     }
@@ -124,13 +220,22 @@ export const ThresholdSettingsModal: React.FC<ThresholdSettingsModalProps> = ({
       {
         actionKey: 'save_safe_window_thresholds',
         moduleName: 'ThresholdSettingsModal',
-        successTitle: 'Limites de operação atualizados',
-        errorTitle: 'Erro ao salvar limites operacionais',
+        successTitle: tr(
+          'Limites de operação atualizados',
+          'Operational thresholds updated',
+        ),
+        errorTitle: tr(
+          'Erro ao salvar limites operacionais',
+          'Failed to save operational thresholds',
+        ),
         onLoadingChange: setIsSaving,
         onToast,
       },
     );
   };
+
+  const windUnit = getWindUnitLabel(units.wind);
+  const waveUnit = getWaveUnitLabel(units.wave);
 
   return (
     <div
@@ -153,12 +258,15 @@ export const ThresholdSettingsModal: React.FC<ThresholdSettingsModalProps> = ({
             <div>
               <div className="flex items-center gap-1">
                 <h2 id="threshold-modal-title" className="text-base sm:text-lg font-bold text-slate-900 dark:text-white">
-                  Limites da Janela Segura
+                  {tr('Limites da Janela Segura', 'Safe Window Thresholds')}
                 </h2>
                 <HelpPopover topic="safe_window" align="left" />
               </div>
               <p className="text-xs text-slate-600 dark:text-sky-200/80">
-                Defina os valores máximos ideais para sua atividade no mar ou em campo
+                {tr(
+                  'Defina os valores máximos ideais para sua atividade no mar ou em campo',
+                  'Set ideal maximum limits for your marine or field operation',
+                )}
               </p>
             </div>
           </div>
@@ -166,7 +274,7 @@ export const ThresholdSettingsModal: React.FC<ThresholdSettingsModalProps> = ({
           <button
             type="button"
             onClick={onClose}
-            aria-label="Fechar configuração de limites"
+            aria-label={tr('Fechar configuração de limites', 'Close threshold settings')}
             className="min-h-[44px] min-w-[44px] rounded-2xl inline-flex items-center justify-center text-slate-500 dark:text-sky-200 hover:bg-sky-100/80 dark:hover:bg-sky-900/50 transition-colors"
           >
             <X className="w-5 h-5" aria-hidden="true" />
@@ -193,7 +301,7 @@ export const ThresholdSettingsModal: React.FC<ThresholdSettingsModalProps> = ({
                   className="flex items-center gap-1.5 text-xs font-bold text-slate-700 dark:text-sky-200"
                 >
                   <Wind className="w-4 h-4 text-[#0080cd]" aria-hidden="true" />
-                  <span>Vento Máx 10m ({getWindUnitLabel(units.wind)})</span>
+                  <span>{tr(`Vento Máx 10m (${windUnit})`, `Max Wind 10m (${windUnit})`)}</span>
                 </label>
                 <label className="inline-flex items-center gap-1 text-[11px] font-semibold text-slate-600 dark:text-sky-300 cursor-pointer">
                   <input
@@ -205,30 +313,25 @@ export const ThresholdSettingsModal: React.FC<ThresholdSettingsModalProps> = ({
                     }
                     className="h-4 w-4 accent-sky-600 rounded"
                   />
-                  <span>Monitorar</span>
+                  <span>{tr('Monitorar', 'Monitor')}</span>
                 </label>
               </div>
-              <input
+              <NumericInput
                 id="threshold-wind"
-                type="number"
-                min={1}
-                max={250}
-                step={0.5}
-                required={enabledMap.maxWindKmh}
+                min={windMinDisplay}
+                max={windMaxDisplay}
+                decimals={1}
+                allowEmpty={true}
                 disabled={!enabledMap.maxWindKmh}
-                value={Number((convertWindSpeed(maxWindKmh, units.wind) ?? maxWindKmh).toFixed(1))}
-                onChange={(e) => {
-                  const val = Number(e.target.value);
-                  if (Number.isFinite(val)) {
-                    setMaxWindKmh(Number(windSpeedToKmh(val, units.wind).toFixed(2)));
-                  }
-                }}
+                value={windDisplay}
+                onValueChange={(_raw, parsed) => setWindDisplay(parsed)}
+                onCommit={(committed) => setWindDisplay(committed)}
                 className="w-full min-h-[44px] px-3.5 py-2 rounded-xl border border-sky-200 dark:border-sky-700 bg-[#f4f8fb] dark:bg-[#0d1f36] text-sm font-bold disabled:opacity-45 focus:outline-none focus:ring-2 focus:ring-sky-500"
               />
               <p className="text-[11px] text-slate-500 dark:text-sky-200/75">
                 {enabledMap.maxWindKmh
-                  ? `Padrão: ${(convertWindSpeed(DEFAULT_SAFE_WINDOW_THRESHOLDS.maxWindKmh, units.wind) ?? DEFAULT_SAFE_WINDOW_THRESHOLDS.maxWindKmh).toFixed(1)} ${getWindUnitLabel(units.wind)}`
-                  : 'Opcional — desativado no semáforo'}
+                  ? `${tr('Padrão:', 'Default:')} ${(convertWindSpeed(DEFAULT_SAFE_WINDOW_THRESHOLDS.maxWindKmh, units.wind) ?? DEFAULT_SAFE_WINDOW_THRESHOLDS.maxWindKmh).toFixed(1)} ${windUnit}`
+                  : tr('Opcional — desativado no semáforo', 'Optional — disabled in semaphore')}
               </p>
             </div>
 
@@ -240,7 +343,7 @@ export const ThresholdSettingsModal: React.FC<ThresholdSettingsModalProps> = ({
                   className="flex items-center gap-1.5 text-xs font-bold text-slate-700 dark:text-sky-200"
                 >
                   <Wind className="w-4 h-4 text-orange-500" aria-hidden="true" />
-                  <span>Rajada Máx 10m ({getWindUnitLabel(units.wind)})</span>
+                  <span>{tr(`Rajada Máx 10m (${windUnit})`, `Max Gust 10m (${windUnit})`)}</span>
                 </label>
                 <label className="inline-flex items-center gap-1 text-[11px] font-semibold text-slate-600 dark:text-sky-300 cursor-pointer">
                   <input
@@ -252,30 +355,25 @@ export const ThresholdSettingsModal: React.FC<ThresholdSettingsModalProps> = ({
                     }
                     className="h-4 w-4 accent-sky-600 rounded"
                   />
-                  <span>Monitorar</span>
+                  <span>{tr('Monitorar', 'Monitor')}</span>
                 </label>
               </div>
-              <input
+              <NumericInput
                 id="threshold-gust"
-                type="number"
-                min={1}
-                max={300}
-                step={0.5}
-                required={enabledMap.maxGustKmh}
+                min={gustMinDisplay}
+                max={gustMaxDisplay}
+                decimals={1}
+                allowEmpty={true}
                 disabled={!enabledMap.maxGustKmh}
-                value={Number((convertWindSpeed(maxGustKmh, units.wind) ?? maxGustKmh).toFixed(1))}
-                onChange={(e) => {
-                  const val = Number(e.target.value);
-                  if (Number.isFinite(val)) {
-                    setMaxGustKmh(Number(windSpeedToKmh(val, units.wind).toFixed(2)));
-                  }
-                }}
+                value={gustDisplay}
+                onValueChange={(_raw, parsed) => setGustDisplay(parsed)}
+                onCommit={(committed) => setGustDisplay(committed)}
                 className="w-full min-h-[44px] px-3.5 py-2 rounded-xl border border-sky-200 dark:border-sky-700 bg-[#f4f8fb] dark:bg-[#0d1f36] text-sm font-bold disabled:opacity-45 focus:outline-none focus:ring-2 focus:ring-sky-500"
               />
               <p className="text-[11px] text-slate-500 dark:text-sky-200/75">
                 {enabledMap.maxGustKmh
-                  ? `Padrão: ${(convertWindSpeed(DEFAULT_SAFE_WINDOW_THRESHOLDS.maxGustKmh, units.wind) ?? DEFAULT_SAFE_WINDOW_THRESHOLDS.maxGustKmh).toFixed(1)} ${getWindUnitLabel(units.wind)}`
-                  : 'Opcional — desativado no semáforo'}
+                  ? `${tr('Padrão:', 'Default:')} ${(convertWindSpeed(DEFAULT_SAFE_WINDOW_THRESHOLDS.maxGustKmh, units.wind) ?? DEFAULT_SAFE_WINDOW_THRESHOLDS.maxGustKmh).toFixed(1)} ${windUnit}`
+                  : tr('Opcional — desativado no semáforo', 'Optional — disabled in semaphore')}
               </p>
             </div>
 
@@ -287,7 +385,7 @@ export const ThresholdSettingsModal: React.FC<ThresholdSettingsModalProps> = ({
                   className="flex items-center gap-1.5 text-xs font-bold text-slate-700 dark:text-sky-200"
                 >
                   <Waves className="w-4 h-4 text-[#0080cd]" aria-hidden="true" />
-                  <span>Altura Máx. Onda ({getWaveUnitLabel(units.wave)})</span>
+                  <span>{tr(`Altura Máx. Onda (${waveUnit})`, `Max Wave Height (${waveUnit})`)}</span>
                 </label>
                 <label className="inline-flex items-center gap-1 text-[11px] font-semibold text-slate-600 dark:text-sky-300 cursor-pointer">
                   <input
@@ -299,30 +397,25 @@ export const ThresholdSettingsModal: React.FC<ThresholdSettingsModalProps> = ({
                     }
                     className="h-4 w-4 accent-sky-600 rounded"
                   />
-                  <span>Monitorar</span>
+                  <span>{tr('Monitorar', 'Monitor')}</span>
                 </label>
               </div>
-              <input
+              <NumericInput
                 id="threshold-wave"
-                type="number"
-                min={0.1}
-                max={65}
-                step={0.1}
-                required={enabledMap.maxWaveM}
+                min={waveMinDisplay}
+                max={waveMaxDisplay}
+                decimals={1}
+                allowEmpty={true}
                 disabled={!enabledMap.maxWaveM}
-                value={Number((convertWaveHeight(maxWaveM, units.wave) ?? maxWaveM).toFixed(1))}
-                onChange={(e) => {
-                  const val = Number(e.target.value);
-                  if (Number.isFinite(val)) {
-                    setMaxWaveM(Number(waveHeightToM(val, units.wave).toFixed(2)));
-                  }
-                }}
+                value={waveDisplay}
+                onValueChange={(_raw, parsed) => setWaveDisplay(parsed)}
+                onCommit={(committed) => setWaveDisplay(committed)}
                 className="w-full min-h-[44px] px-3.5 py-2 rounded-xl border border-sky-200 dark:border-sky-700 bg-[#f4f8fb] dark:bg-[#0d1f36] text-sm font-bold disabled:opacity-45 focus:outline-none focus:ring-2 focus:ring-sky-500"
               />
               <p className="text-[11px] text-slate-500 dark:text-sky-200/75">
                 {enabledMap.maxWaveM
-                  ? `Padrão: ${(convertWaveHeight(DEFAULT_SAFE_WINDOW_THRESHOLDS.maxWaveM, units.wave) ?? DEFAULT_SAFE_WINDOW_THRESHOLDS.maxWaveM).toFixed(1)} ${getWaveUnitLabel(units.wave)}`
-                  : 'Opcional — desativado no semáforo'}
+                  ? `${tr('Padrão:', 'Default:')} ${(convertWaveHeight(DEFAULT_SAFE_WINDOW_THRESHOLDS.maxWaveM, units.wave) ?? DEFAULT_SAFE_WINDOW_THRESHOLDS.maxWaveM).toFixed(1)} ${waveUnit}`
+                  : tr('Opcional — desativado no semáforo', 'Optional — disabled in semaphore')}
               </p>
             </div>
 
@@ -334,7 +427,7 @@ export const ThresholdSettingsModal: React.FC<ThresholdSettingsModalProps> = ({
                   className="flex items-center gap-1.5 text-xs font-bold text-slate-700 dark:text-sky-200"
                 >
                   <CloudRain className="w-4 h-4 text-[#0080cd]" aria-hidden="true" />
-                  <span>Chance Máx. Chuva (%)</span>
+                  <span>{tr('Chance Máx. Chuva (%)', 'Max Rain Prob. (%)')}</span>
                 </label>
                 <label className="inline-flex items-center gap-1 text-[11px] font-semibold text-slate-600 dark:text-sky-300 cursor-pointer">
                   <input
@@ -346,25 +439,25 @@ export const ThresholdSettingsModal: React.FC<ThresholdSettingsModalProps> = ({
                     }
                     className="h-4 w-4 accent-sky-600 rounded"
                   />
-                  <span>Monitorar</span>
+                  <span>{tr('Monitorar', 'Monitor')}</span>
                 </label>
               </div>
-              <input
+              <NumericInput
                 id="threshold-precip"
-                type="number"
                 min={0}
                 max={100}
-                step={5}
-                required={enabledMap.maxPrecipProbPct}
+                decimals={0}
+                allowEmpty={true}
                 disabled={!enabledMap.maxPrecipProbPct}
-                value={maxPrecipProbPct}
-                onChange={(e) => setMaxPrecipProbPct(Number(e.target.value))}
+                value={precipDisplay}
+                onValueChange={(_raw, parsed) => setPrecipDisplay(parsed)}
+                onCommit={(committed) => setPrecipDisplay(committed)}
                 className="w-full min-h-[44px] px-3.5 py-2 rounded-xl border border-sky-200 dark:border-sky-700 bg-[#f4f8fb] dark:bg-[#0d1f36] text-sm font-bold disabled:opacity-45 focus:outline-none focus:ring-2 focus:ring-sky-500"
               />
               <p className="text-[11px] text-slate-500 dark:text-sky-200/75">
                 {enabledMap.maxPrecipProbPct
-                  ? `Padrão: ${DEFAULT_SAFE_WINDOW_THRESHOLDS.maxPrecipProbPct}%`
-                  : 'Opcional — desativado no semáforo'}
+                  ? `${tr('Padrão:', 'Default:')} ${DEFAULT_SAFE_WINDOW_THRESHOLDS.maxPrecipProbPct}%`
+                  : tr('Opcional — desativado no semáforo', 'Optional — disabled in semaphore')}
               </p>
             </div>
           </div>
@@ -377,7 +470,7 @@ export const ThresholdSettingsModal: React.FC<ThresholdSettingsModalProps> = ({
               className="min-h-[42px] min-w-[44px] px-4 py-2 rounded-full text-xs font-semibold inline-flex items-center justify-center gap-2 bg-[#f4f8fb] dark:bg-[#0d1f36] hover:bg-sky-50 text-slate-700 dark:text-sky-200 border border-sky-200 dark:border-sky-800 transition-colors"
             >
               <RotateCcw className="w-4 h-4" aria-hidden="true" />
-              <span>Restaurar Padrão</span>
+              <span>{tr('Restaurar Padrão', 'Reset Defaults')}</span>
             </button>
 
             <div className="flex items-center gap-2">
@@ -386,7 +479,7 @@ export const ThresholdSettingsModal: React.FC<ThresholdSettingsModalProps> = ({
                 onClick={onClose}
                 className="min-h-[42px] min-w-[44px] px-4 py-2 rounded-full text-xs font-semibold bg-slate-100 dark:bg-sky-900/50 hover:bg-slate-200 text-slate-700 dark:text-sky-100 transition-colors flex-1 sm:flex-initial"
               >
-                Cancelar
+                {tr('Cancelar', 'Cancel')}
               </button>
               <button
                 type="submit"
@@ -394,7 +487,11 @@ export const ThresholdSettingsModal: React.FC<ThresholdSettingsModalProps> = ({
                 className="min-h-[42px] min-w-[44px] px-5 py-2 rounded-full text-xs font-bold inline-flex items-center justify-center gap-2 bg-[#0080cd] hover:bg-[#006bb3] disabled:opacity-60 text-white shadow-sm transition-colors flex-1 sm:flex-initial"
               >
                 <Save className="w-4 h-4" aria-hidden="true" />
-                <span>{isSaving ? 'Salvando...' : 'Salvar Limites'}</span>
+                <span>
+                  {isSaving
+                    ? tr('Salvando...', 'Saving...')
+                    : tr('Salvar Limites', 'Save Limits')}
+                </span>
               </button>
             </div>
           </div>
