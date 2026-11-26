@@ -6,20 +6,23 @@ import {
   AlertTriangle,
   BookOpen,
   Calendar,
+  CheckCircle2,
   Compass,
   Droplets,
   ExternalLink,
   FileCode,
+  FileDown,
   FileSpreadsheet,
   FileText,
   Flame,
   GraduationCap,
   History,
-  Printer,
   RefreshCw,
   Search,
+  Share2,
   Sunrise,
 } from 'lucide-react';
+import { useLocale } from '../../context/LocaleContext';
 import { useUnits } from '../../context/UnitsContext';
 import {
   computePhysicalHourlyEt0FallbackMm,
@@ -29,16 +32,25 @@ import {
   fetchHybridPast15DaysSeries,
   type HybridPast15DaysResult,
 } from '../../services/historicalWeatherService';
-import { triggerBrowserFileDownload } from '../../services/platform/ShareService';
+import {
+  exportAndDeliverFile,
+  shareDeliveredPayload,
+  type ExportDeliveryResult,
+} from '../../services/platform/ShareService';
 import type {
   ActiveCoordinates,
+  ExportFormat,
   HistoricalHourRecord,
   HistoricalLogEntry,
   HistoricalSeriesRequest,
   HistoricalSeriesResult,
 } from '../../types/field';
 import type { ErrorLogRecord, ToastMessage } from '../../types/health';
-import type { AgroClimaticWaterBalance, ScientificAnalysisSummary } from '../../types/v4';
+import type {
+  AgroClimaticWaterBalance,
+  DescriptiveMetricStats,
+  ScientificAnalysisSummary,
+} from '../../types/v4';
 import type { ForecastViewMode, NormalizedForecast } from '../../types/weather';
 import { formatCardinalDirection } from '../../utils/exporters';
 import { formatLocalYMD } from '../../utils/localTimeHour';
@@ -65,15 +77,29 @@ import {
   formatTechnicalReportJson,
   formatTechnicalReportMarkdown,
   generateTechnicalReportDocument,
+  generateTechnicalReportDocxBytes,
+  generateTechnicalReportPdfBytes,
 } from '../../utils/technicalReportGenerator';
 import {
+  convertPrecipitation,
+  convertPressure,
+  convertTemperature,
+  convertWaveHeight,
+  convertWindSpeed,
   formatPrecip,
   formatPressure,
   formatTemp,
   formatWind,
+  getPrecipUnitLabel,
+  getPressureUnitLabel,
+  getTempUnitLabel,
+  getWaveUnitLabel,
+  getWindUnitLabel,
+  type UnitPreferences,
 } from '../../utils/units';
 import { CollapsibleModule } from '../common/CollapsibleModule';
 import { FullscreenViewer } from '../common/FullscreenViewer';
+import { HelpPopover } from '../common/HelpPopover';
 import { ModuleErrorBoundary } from '../common/ModuleErrorBoundary';
 
 const CAN_ATTACH_ECHARTS_REF =
@@ -233,6 +259,96 @@ function formatShortChartAxisLabel(timestampUnix: number, timezone: string): str
   }
 }
 
+function convertMetricRowForUnits(
+  metric: DescriptiveMetricStats,
+  units: UnitPreferences,
+): {
+  unitLabel: string;
+  mean: number | null;
+  median: number | null;
+  stdDev: number | null;
+  min: number | null;
+  p10: number | null;
+  p90: number | null;
+  max: number | null;
+  iqr: number | null;
+  linearTrendPerDay: number | null;
+} {
+  const convertPoint = (v: number | null): number | null => {
+    if (v === null || !Number.isFinite(v)) return null;
+    switch (metric.variableKey) {
+      case 'temperature_2m':
+      case 'dew_point_2m':
+      case 'apparent_temperature':
+        return convertTemperature(v, units.temperature);
+      case 'wind_speed_10m':
+      case 'wind_gusts_10m':
+        return convertWindSpeed(v, units.wind);
+      case 'precipitation':
+      case 'et0_fao_evapotranspiration':
+        return convertPrecipitation(v, units.precipitation);
+      case 'surface_pressure':
+        return convertPressure(v, units.pressure);
+      case 'wave_height':
+      case 'sea_level_msl':
+        return convertWaveHeight(v, units.wave);
+      default:
+        return v;
+    }
+  };
+
+  const convertDelta = (v: number | null): number | null => {
+    if (v === null || !Number.isFinite(v)) return null;
+    switch (metric.variableKey) {
+      case 'temperature_2m':
+      case 'dew_point_2m':
+      case 'apparent_temperature':
+        return units.temperature === 'f' ? v * 1.8 : v;
+      default:
+        return convertPoint(v);
+    }
+  };
+
+  let unitLabel = metric.unit;
+  switch (metric.variableKey) {
+    case 'temperature_2m':
+    case 'dew_point_2m':
+    case 'apparent_temperature':
+      unitLabel = getTempUnitLabel(units.temperature);
+      break;
+    case 'wind_speed_10m':
+    case 'wind_gusts_10m':
+      unitLabel = getWindUnitLabel(units.wind);
+      break;
+    case 'precipitation':
+    case 'et0_fao_evapotranspiration':
+      unitLabel = metric.unit.includes('/h')
+        ? `${getPrecipUnitLabel(units.precipitation)}/h`
+        : getPrecipUnitLabel(units.precipitation);
+      break;
+    case 'surface_pressure':
+      unitLabel = getPressureUnitLabel(units.pressure);
+      break;
+    case 'wave_height':
+    case 'sea_level_msl':
+      unitLabel = getWaveUnitLabel(units.wave);
+      break;
+  }
+
+  return {
+    unitLabel,
+    mean: convertPoint(metric.mean),
+    median: convertPoint(metric.median),
+    stdDev: convertDelta(metric.stdDev),
+    min: convertPoint(metric.min),
+    p10: convertPoint(metric.p10),
+    p90: convertPoint(metric.p90),
+    max: convertPoint(metric.max),
+    iqr: convertDelta(metric.iqr),
+    linearTrendPerDay: convertDelta(metric.linearTrendPerDay),
+  };
+}
+
 export const TechnicalReportsPanel: React.FC<TechnicalReportsPanelProps> = ({
   forecast,
   activeLocation,
@@ -245,6 +361,7 @@ export const TechnicalReportsPanel: React.FC<TechnicalReportsPanelProps> = ({
   onToast,
   onErrorLog,
 }) => {
+  const { tr } = useLocale();
   const { units } = useUnits();
   const [sourceMode, setSourceMode] = useState<ReportDatasetSourceMode>(defaultSource);
   const [selectedModelView, setSelectedModelView] = useState<ForecastViewMode>(viewMode);
@@ -269,6 +386,13 @@ export const TechnicalReportsPanel: React.FC<TechnicalReportsPanelProps> = ({
   const [extended16dForecast, setExtended16dForecast] =
     useState<ExtendedForecast16dResult | null>(null);
   const [isLoadingExtended16d, setIsLoadingExtended16d] = useState<boolean>(false);
+
+  const [lastExportDelivery, setLastExportDelivery] = useState<{
+    result: ExportDeliveryResult;
+    data: string | Uint8Array;
+    format: ExportFormat;
+    title: string;
+  } | null>(null);
 
   const chartRef = useRef<ReactECharts | null>(null);
 
@@ -632,6 +756,23 @@ export const TechnicalReportsPanel: React.FC<TechnicalReportsPanelProps> = ({
     let precips: Array<number | null> = [];
     let et0s: Array<number | null> = [];
 
+    const tempLabel = getTempUnitLabel(units.temperature);
+    const windLabel = getWindUnitLabel(units.wind);
+    const precipLabel = getPrecipUnitLabel(units.precipitation);
+
+    const convertT = (c: number | null | undefined): number | null => {
+      const v = convertTemperature(c, units.temperature);
+      return v !== null ? Number(v.toFixed(1)) : null;
+    };
+    const convertW = (kmh: number | null | undefined): number | null => {
+      const v = convertWindSpeed(kmh, units.wind);
+      return v !== null ? Number(v.toFixed(1)) : null;
+    };
+    const convertP = (mm: number | null | undefined): number | null => {
+      const v = convertPrecipitation(mm, units.precipitation);
+      return v !== null ? Number(v.toFixed(units.precipitation === 'in' ? 3 : 2)) : null;
+    };
+
     if (sourceMode === 'historical') {
       const series =
         activeHistoricalSeries ??
@@ -647,39 +788,27 @@ export const TechnicalReportsPanel: React.FC<TechnicalReportsPanelProps> = ({
           forecast,
         );
       labels = series.hours.map((h) => formatShortChartAxisLabel(h.timestampUnix, series.timezone));
-      temps = series.hours.map((h) =>
-        h.temperature2mC !== null ? Number(h.temperature2mC.toFixed(1)) : null,
-      );
-      winds = series.hours.map((h) =>
-        h.windSpeed10mKmh !== null ? Number(h.windSpeed10mKmh.toFixed(1)) : null,
-      );
-      precips = series.hours.map((h) =>
-        h.precipitationMm !== null ? Number(h.precipitationMm.toFixed(2)) : null,
-      );
+      temps = series.hours.map((h) => convertT(h.temperature2mC));
+      winds = series.hours.map((h) => convertW(h.windSpeed10mKmh));
+      precips = series.hours.map((h) => convertP(h.precipitationMm));
       et0s = series.hours.map((h) => {
         const val =
           h.et0FaoEvapotranspirationMm ??
           computePhysicalHourlyEt0FallbackMm(h.temperature2mC, 6);
-        return val !== null ? Number(val.toFixed(3)) : null;
+        return convertP(val);
       });
     } else if (forecast) {
       labels = forecast.hours.map((h) =>
         formatShortChartAxisLabel(h.timestampUnix, forecast.timezone),
       );
-      temps = forecast.hours.map((h) =>
-        h.temperature2mC.mean !== null ? Number(h.temperature2mC.mean.toFixed(1)) : null,
-      );
-      winds = forecast.hours.map((h) =>
-        h.windSpeed10m.mean !== null ? Number(h.windSpeed10m.mean.toFixed(1)) : null,
-      );
-      precips = forecast.hours.map((h) =>
-        h.precipitationMm.mean !== null ? Number(h.precipitationMm.mean.toFixed(2)) : null,
-      );
+      temps = forecast.hours.map((h) => convertT(h.temperature2mC.mean));
+      winds = forecast.hours.map((h) => convertW(h.windSpeed10m.mean));
+      precips = forecast.hours.map((h) => convertP(h.precipitationMm.mean));
       et0s = forecast.hours.map((h) => {
         const val =
           h.et0FaoMm?.mean ??
           computePhysicalHourlyEt0FallbackMm(h.temperature2mC.mean, 6);
-        return val !== null ? Number(val.toFixed(3)) : null;
+        return convertP(val);
       });
     }
 
@@ -712,14 +841,14 @@ export const TechnicalReportsPanel: React.FC<TechnicalReportsPanelProps> = ({
       yAxis: [
         {
           type: 'value',
-          name: '°C / km/h',
+          name: `${tempLabel} / ${windLabel}`,
           nameTextStyle: { color: textColor, fontSize: 10 },
           axisLabel: { color: textColor, fontSize: 10 },
           splitLine: { lineStyle: { color: gridColor } },
         },
         {
           type: 'value',
-          name: 'mm/h',
+          name: `${precipLabel}/h`,
           nameTextStyle: { color: textColor, fontSize: 10 },
           axisLabel: { color: textColor, fontSize: 10 },
           splitLine: { show: false },
@@ -727,7 +856,7 @@ export const TechnicalReportsPanel: React.FC<TechnicalReportsPanelProps> = ({
       ],
       series: [
         {
-          name: 'Temperatura 2m (°C)',
+          name: `${tr('Temperatura 2m', '2m Temperature')} (${tempLabel})`,
           type: 'line',
           yAxisIndex: 0,
           smooth: true,
@@ -737,7 +866,7 @@ export const TechnicalReportsPanel: React.FC<TechnicalReportsPanelProps> = ({
           data: temps,
         },
         {
-          name: 'Vento 10m (km/h)',
+          name: `${tr('Vento 10m', '10m Wind')} (${windLabel})`,
           type: 'line',
           yAxisIndex: 0,
           smooth: true,
@@ -747,14 +876,14 @@ export const TechnicalReportsPanel: React.FC<TechnicalReportsPanelProps> = ({
           data: winds,
         },
         {
-          name: 'Precipitação (mm/h)',
+          name: `${tr('Precipitação', 'Precipitation')} (${precipLabel}/h)`,
           type: 'bar',
           yAxisIndex: 1,
           itemStyle: { color: 'rgba(14, 165, 233, 0.72)' },
           data: precips,
         },
         {
-          name: 'ET0 FAO-56 (mm/h)',
+          name: `ET0 FAO-56 (${precipLabel}/h)`,
           type: 'line',
           yAxisIndex: 1,
           smooth: true,
@@ -766,7 +895,18 @@ export const TechnicalReportsPanel: React.FC<TechnicalReportsPanelProps> = ({
         },
       ],
     };
-  }, [activeHistoricalSeries, activeLocation, analysis, forecast, isDark, sourceMode]);
+  }, [
+    activeHistoricalSeries,
+    activeLocation,
+    analysis,
+    forecast,
+    isDark,
+    sourceMode,
+    tr,
+    units.precipitation,
+    units.temperature,
+    units.wind,
+  ]);
 
   useEffect(() => {
     if (typeof window === 'undefined') {
@@ -787,7 +927,9 @@ export const TechnicalReportsPanel: React.FC<TechnicalReportsPanelProps> = ({
     };
   }, []);
 
-  const handleDownloadReport = (kind: 'html' | 'md' | 'csv' | 'json'): void => {
+  const handleDownloadReport = (
+    kind: 'pdf' | 'docx' | 'html' | 'md' | 'csv' | 'json',
+  ): void => {
     if (!analysis || !reportDoc) {
       return;
     }
@@ -796,80 +938,97 @@ export const TechnicalReportsPanel: React.FC<TechnicalReportsPanelProps> = ({
         const locSlug = slugifyFilePart(analysis.locationName);
         const dateTag = analysis.periodStartIso.slice(0, 10);
         const base = `fieldcast-relatorio-tecnico-${locSlug}-${dateTag}`;
+        const reportTitle = `FieldCast — ${analysis.locationName} (${kind.toUpperCase()})`;
 
-        if (kind === 'html') {
-          const html = formatTechnicalReportHtml(reportDoc);
-          triggerBrowserFileDownload(`${base}.html`, html, 'text/html;charset=utf-8');
+        let filename: string;
+        let content: string | Uint8Array;
+
+        if (kind === 'pdf') {
+          filename = `${base}.pdf`;
+          content = generateTechnicalReportPdfBytes(reportDoc);
+        } else if (kind === 'docx') {
+          filename = `${base}.docx`;
+          content = generateTechnicalReportDocxBytes(reportDoc);
+        } else if (kind === 'html') {
+          filename = `${base}.html`;
+          content = formatTechnicalReportHtml(reportDoc);
         } else if (kind === 'md') {
-          const md = formatTechnicalReportMarkdown(reportDoc);
-          triggerBrowserFileDownload(`${base}.md`, md, 'text/markdown;charset=utf-8');
+          filename = `${base}.md`;
+          content = formatTechnicalReportMarkdown(reportDoc);
         } else if (kind === 'csv') {
-          const csv = formatScientificStatsCsvBom(analysis);
-          triggerBrowserFileDownload(`${base}-estatisticas.csv`, csv, 'text/csv;charset=utf-8');
+          filename = `${base}-estatisticas.csv`;
+          content = formatScientificStatsCsvBom(analysis);
         } else {
-          const json = formatTechnicalReportJson(reportDoc);
-          triggerBrowserFileDownload(`${base}.json`, json, 'application/json;charset=utf-8');
+          filename = `${base}.json`;
+          content = formatTechnicalReportJson(reportDoc);
         }
+
+        const result = await exportAndDeliverFile({
+          filename,
+          content,
+          format: kind,
+          title: reportTitle,
+          text: tr(
+            `Relatório técnico FieldCast (${kind.toUpperCase()}) — ${analysis.locationName}`,
+            `FieldCast technical report (${kind.toUpperCase()}) — ${analysis.locationName}`,
+          ),
+          preferNativeShare: false,
+        });
+
+        setLastExportDelivery({
+          result,
+          data: content,
+          format: kind,
+          title: reportTitle,
+        });
 
         onToast?.({
           type: 'success',
-          title: `Relatório exportado (${kind.toUpperCase()})`,
-          message: `Arquivo científico gerado localmente para ${analysis.locationName}.`,
+          title: tr(`Relatório salvo (${kind.toUpperCase()})`, `Report saved (${kind.toUpperCase()})`),
+          message: tr(
+            `Salvo em ${result.savedPathDisplay} (${(result.byteLength / 1024).toFixed(1)} KB).`,
+            `Saved to ${result.savedPathDisplay} (${(result.byteLength / 1024).toFixed(1)} KB).`,
+          ),
         });
       },
       {
         actionKey: `download_technical_report_${kind}`,
         moduleName: 'TechnicalReportsPanel',
-        errorTitle: `Erro ao exportar relatório (${kind.toUpperCase()})`,
+        errorTitle: tr(
+          `Erro ao exportar relatório (${kind.toUpperCase()})`,
+          `Failed to export report (${kind.toUpperCase()})`,
+        ),
         onToast,
         onErrorLog,
       },
     );
   };
 
-  const handlePrintPdf = (): void => {
-    if (!reportDoc) {
+  const handleShareLastReport = (): void => {
+    if (!lastExportDelivery) {
       return;
     }
     void safeAction(
       async () => {
-        const html = formatTechnicalReportHtml(reportDoc);
-        let printedInPopup = false;
-
-        if (typeof window !== 'undefined' && typeof window.open === 'function') {
-          try {
-            const printWin = window.open('', '_blank', 'noopener,width=980,height=800');
-            if (printWin && printWin.document) {
-              printWin.document.open();
-              printWin.document.write(html);
-              printWin.document.close();
-              printWin.focus?.();
-              printWin.print?.();
-              printedInPopup = true;
-            }
-          } catch {
-            printedInPopup = false;
-          }
-        }
-
-        if (!printedInPopup && typeof window !== 'undefined') {
-          try {
-            window.print?.();
-          } catch {
-            // Ambiente headless/jsdom sem spooler nativo
-          }
-        }
-
+        const shared = await shareDeliveredPayload({
+          filename: lastExportDelivery.result.filename,
+          format: lastExportDelivery.format,
+          data: lastExportDelivery.data,
+          title: lastExportDelivery.title,
+          uri: lastExportDelivery.result.uri,
+        });
         onToast?.({
-          type: 'info',
-          title: 'Impressão / Exportação PDF acionada',
-          message: 'Use "Salvar como PDF" na janela de impressão para gerar o laudo A4.',
+          type: shared ? 'success' : 'info',
+          title: shared
+            ? tr('Folha de compartilhamento aberta', 'Share sheet opened')
+            : tr('Arquivo preparado para download', 'File downloaded locally'),
+          message: lastExportDelivery.result.savedPathDisplay,
         });
       },
       {
-        actionKey: 'print_technical_report_pdf',
+        actionKey: 'share_technical_report_payload',
         moduleName: 'TechnicalReportsPanel',
-        errorTitle: 'Erro ao preparar impressão PDF',
+        errorTitle: tr('Erro ao compartilhar relatório', 'Failed to share report'),
         onToast,
         onErrorLog,
       },
@@ -890,30 +1049,52 @@ export const TechnicalReportsPanel: React.FC<TechnicalReportsPanelProps> = ({
       aria-label="Estúdio de Análise Estatística ERA5 e Relatórios Técnicos/Acadêmicos"
       className="rounded-2xl border border-slate-200/90 dark:border-sky-800/70 bg-white dark:bg-[#132a47] p-4 sm:p-5 shadow-sm space-y-5"
     >
-      {/* Cabeçalho Acadêmico & Seletor de Fonte */}
+      {/* Cabeçalho Conciso & Seletor de Fonte */}
       <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-4">
         <div className="flex items-start gap-3">
           <div className="p-2.5 rounded-xl bg-indigo-500/15 text-indigo-600 dark:text-indigo-300 shrink-0">
             <GraduationCap className="w-6 h-6" aria-hidden="true" />
           </div>
           <div>
-            <div className="flex flex-wrap items-center gap-2">
+            <div className="flex flex-wrap items-center gap-1.5">
               <h2 className="text-base sm:text-lg font-extrabold text-slate-900 dark:text-white">
-                Estúdio de Análise Estatística ERA5 &amp; Relatório Técnico-Acadêmico
+                {tr('Relatórios Técnicos & Análise Climática', 'Technical Reports & Climate Analytics')}
               </h2>
-              <span className="px-2.5 py-0.5 rounded-full text-[11px] font-bold bg-indigo-100 dark:bg-indigo-900/60 text-indigo-800 dark:text-indigo-200">
-                FAO-56 • Quantis • OLS • Vetorial R
-              </span>
+              <HelpPopover topic="report_studio_overview" align="left" />
             </div>
             <p className="text-xs text-slate-600 dark:text-slate-300 mt-0.5">
-              Síntese descritiva auditável, balanço hídrico superficial (P &minus; ET0), graus-dia
-              e geração de laudo publicável (HTML5, Markdown, CSV UTF-8 BOM, JSON e PDF/Print)
+              {tr(
+                'Indicadores de campo, balanço hídrico e exportação direta em 6 formatos.',
+                'Field indicators, water balance, and direct export in 6 formats.',
+              )}
             </p>
           </div>
         </div>
 
-        {/* Botões de Download / Print 1-Clique */}
+        {/* Botões de Download 1-Clique (6 Formatos) */}
         <div className="flex flex-wrap items-center gap-2">
+          <button
+            type="button"
+            data-testid="download-report-pdf"
+            disabled={!reportDoc}
+            onClick={() => handleDownloadReport('pdf')}
+            className="min-h-[44px] min-w-[44px] px-3.5 py-2 rounded-xl text-xs font-bold inline-flex items-center gap-1.5 bg-indigo-600 hover:bg-indigo-500 disabled:opacity-50 text-white shadow-sm transition-colors"
+          >
+            <FileDown className="w-4 h-4" aria-hidden="true" />
+            <span>PDF</span>
+          </button>
+
+          <button
+            type="button"
+            data-testid="download-report-docx"
+            disabled={!reportDoc}
+            onClick={() => handleDownloadReport('docx')}
+            className="min-h-[44px] min-w-[44px] px-3.5 py-2 rounded-xl text-xs font-bold inline-flex items-center gap-1.5 bg-sky-700 hover:bg-sky-600 disabled:opacity-50 text-white shadow-sm transition-colors"
+          >
+            <FileText className="w-4 h-4" aria-hidden="true" />
+            <span>DOCX</span>
+          </button>
+
           <button
             type="button"
             data-testid="download-report-html"
@@ -957,19 +1138,41 @@ export const TechnicalReportsPanel: React.FC<TechnicalReportsPanelProps> = ({
             <FileCode className="w-4 h-4 text-amber-500" aria-hidden="true" />
             <span>JSON</span>
           </button>
+        </div>
+      </div>
+
+      {/* Banner de Confirmação Pós-Exportação + Compartilhamento Imediato */}
+      {lastExportDelivery && (
+        <div
+          role="status"
+          data-testid="report-export-saved-banner"
+          className="rounded-xl border border-emerald-300 dark:border-emerald-700/70 bg-emerald-50/90 dark:bg-emerald-950/40 px-4 py-3 flex flex-wrap items-center justify-between gap-3"
+        >
+          <div className="flex items-center gap-2.5 text-xs text-emerald-950 dark:text-emerald-100 min-w-0">
+            <CheckCircle2 className="w-4 h-4 text-emerald-600 dark:text-emerald-400 shrink-0" />
+            <div className="min-w-0">
+              <div className="font-bold truncate">
+                {tr('Arquivo salvo com sucesso:', 'File saved successfully:')}{' '}
+                <span className="font-mono">{lastExportDelivery.result.savedPathDisplay}</span>
+              </div>
+              <div className="text-[11px] opacity-85">
+                {lastExportDelivery.format.toUpperCase()} •{' '}
+                {(lastExportDelivery.result.byteLength / 1024).toFixed(1)} KB
+              </div>
+            </div>
+          </div>
 
           <button
             type="button"
-            data-testid="print-report-pdf"
-            disabled={!reportDoc}
-            onClick={handlePrintPdf}
-            className="min-h-[44px] min-w-[44px] px-3.5 py-2 rounded-xl text-xs font-bold inline-flex items-center gap-1.5 bg-indigo-600 hover:bg-indigo-500 disabled:opacity-50 text-white shadow-sm transition-colors"
+            data-testid="share-exported-report-btn"
+            onClick={handleShareLastReport}
+            className="min-h-[44px] px-4 py-2 rounded-xl text-xs font-bold inline-flex items-center gap-1.5 bg-emerald-600 hover:bg-emerald-500 text-white shadow-sm transition-colors"
           >
-            <Printer className="w-4 h-4" aria-hidden="true" />
-            <span>Imprimir / PDF</span>
+            <Share2 className="w-4 h-4" aria-hidden="true" />
+            <span>{tr('Compartilhar / Enviar', 'Share / Send')}</span>
           </button>
         </div>
-      </div>
+      )}
 
       {/* Seletor de Fonte: Previsão 168h vs Série Histórica / ERA5 */}
       <div className="rounded-xl border border-slate-200 dark:border-sky-800/70 bg-slate-50/80 dark:bg-[#0f243d] p-3.5 space-y-3">
@@ -1122,8 +1325,8 @@ export const TechnicalReportsPanel: React.FC<TechnicalReportsPanelProps> = ({
         <>
           {/* Módulo 1: 4 KPI Cards Científicos */}
           <CollapsibleModule
-            title="Indicadores-Chave Científicos (KPIs)"
-            subtitle={`Balanço Hídrico FAO-56, GDD, Consistência R e Z-Score (${analysis.periodStartIso.slice(0, 10)})`}
+            title={tr('Indicadores-Chave (KPIs)', 'Key Indicators (KPIs)')}
+            subtitle={`${tr('Balanço hídrico, graus-dia, vento e extremos', 'Water balance, degree-days, wind, and extremes')} (${analysis.periodStartIso.slice(0, 10)})`}
             icon={<Activity className="w-4 h-4 text-sky-600 dark:text-sky-400" />}
             defaultOpen={true}
             keepMounted={true}
@@ -1135,18 +1338,21 @@ export const TechnicalReportsPanel: React.FC<TechnicalReportsPanelProps> = ({
               data-testid="kpi-water-balance"
               className="rounded-xl border border-slate-200 dark:border-sky-800/70 bg-slate-50/80 dark:bg-[#0f243d] p-3.5 space-y-1.5"
             >
-              <div className="flex items-center justify-between gap-2">
+              <div className="flex items-center justify-between gap-1.5">
                 <span className="text-[11px] font-bold uppercase tracking-wider text-slate-500 dark:text-slate-400 inline-flex items-center gap-1">
                   <Droplets className="w-3.5 h-3.5 text-sky-500" aria-hidden="true" />
-                  Balanço Hídrico (P &minus; ET0)
+                  {tr('Balanço Hídrico', 'Water Balance')}
                 </span>
-                <span
-                  className={`px-2 py-0.5 rounded-full text-[10px] font-bold ${
-                    STRESS_BADGE_MAP[analysis.waterBalance.waterStressClassification].className
-                  }`}
-                >
-                  {STRESS_BADGE_MAP[analysis.waterBalance.waterStressClassification].label}
-                </span>
+                <div className="flex items-center gap-1">
+                  <span
+                    className={`px-2 py-0.5 rounded-full text-[10px] font-bold ${
+                      STRESS_BADGE_MAP[analysis.waterBalance.waterStressClassification].className
+                    }`}
+                  >
+                    {STRESS_BADGE_MAP[analysis.waterBalance.waterStressClassification].label}
+                  </span>
+                  <HelpPopover topic="report_water_balance" align="left" />
+                </div>
               </div>
               <div className="text-xl font-black font-mono text-slate-900 dark:text-white">
                 {analysis.waterBalance.netWaterBalanceMm >= 0 ? '+' : ''}
@@ -1162,9 +1368,12 @@ export const TechnicalReportsPanel: React.FC<TechnicalReportsPanelProps> = ({
               data-testid="kpi-gdd"
               className="rounded-xl border border-slate-200 dark:border-sky-800/70 bg-slate-50/80 dark:bg-[#0f243d] p-3.5 space-y-1.5"
             >
-              <div className="text-[11px] font-bold uppercase tracking-wider text-slate-500 dark:text-slate-400 inline-flex items-center gap-1">
-                <Flame className="w-3.5 h-3.5 text-orange-500" aria-hidden="true" />
-                Graus-Dia (GDD Base 10°C)
+              <div className="flex items-center justify-between gap-1.5">
+                <span className="text-[11px] font-bold uppercase tracking-wider text-slate-500 dark:text-slate-400 inline-flex items-center gap-1">
+                  <Flame className="w-3.5 h-3.5 text-orange-500" aria-hidden="true" />
+                  {tr('Graus-Dia (GDD)', 'Growing Degree Days')}
+                </span>
+                <HelpPopover topic="report_gdd" align="right" />
               </div>
               <div className="text-xl font-black font-mono text-slate-900 dark:text-white">
                 {analysis.waterBalance.growingDegreeDaysBase10C.toFixed(1)} °C·d
@@ -1185,9 +1394,12 @@ export const TechnicalReportsPanel: React.FC<TechnicalReportsPanelProps> = ({
               data-testid="kpi-wind-consistency"
               className="rounded-xl border border-slate-200 dark:border-sky-800/70 bg-slate-50/80 dark:bg-[#0f243d] p-3.5 space-y-1.5"
             >
-              <div className="text-[11px] font-bold uppercase tracking-wider text-slate-500 dark:text-slate-400 inline-flex items-center gap-1">
-                <Compass className="w-3.5 h-3.5 text-teal-500" aria-hidden="true" />
-                Consistência Vetorial (R)
+              <div className="flex items-center justify-between gap-1.5">
+                <span className="text-[11px] font-bold uppercase tracking-wider text-slate-500 dark:text-slate-400 inline-flex items-center gap-1">
+                  <Compass className="w-3.5 h-3.5 text-teal-500" aria-hidden="true" />
+                  {tr('Direção & Consistência (R)', 'Wind Consistency (R)')}
+                </span>
+                <HelpPopover topic="report_vector_r" align="right" />
               </div>
               <div className="text-xl font-black font-mono text-slate-900 dark:text-white">
                 {analysis.windDirectionalConsistencyR !== null
@@ -1195,7 +1407,7 @@ export const TechnicalReportsPanel: React.FC<TechnicalReportsPanelProps> = ({
                   : 'N/D'}
               </div>
               <div className="text-xs text-slate-600 dark:text-slate-400 font-mono">
-                Rumo Dominante:{' '}
+                {tr('Rumo Dominante:', 'Dominant:')}{' '}
                 {analysis.dominantWindDirectionDeg !== null
                   ? `${analysis.dominantWindDirectionDeg.toFixed(0)}° (${formatCardinalDirection(analysis.dominantWindDirectionDeg)})`
                   : 'N/D'}
@@ -1206,9 +1418,12 @@ export const TechnicalReportsPanel: React.FC<TechnicalReportsPanelProps> = ({
               data-testid="kpi-anomaly-zmax"
               className="rounded-xl border border-slate-200 dark:border-sky-800/70 bg-slate-50/80 dark:bg-[#0f243d] p-3.5 space-y-1.5"
             >
-              <div className="text-[11px] font-bold uppercase tracking-wider text-slate-500 dark:text-slate-400 inline-flex items-center gap-1">
-                <AlertTriangle className="w-3.5 h-3.5 text-amber-500" aria-hidden="true" />
-                Anomalia Máx (|Z|)
+              <div className="flex items-center justify-between gap-1.5">
+                <span className="text-[11px] font-bold uppercase tracking-wider text-slate-500 dark:text-slate-400 inline-flex items-center gap-1">
+                  <AlertTriangle className="w-3.5 h-3.5 text-amber-500" aria-hidden="true" />
+                  {tr('Anomalia Máx (|Z|)', 'Max Anomaly (|Z|)')}
+                </span>
+                <HelpPopover topic="report_zscore_ols" align="right" />
               </div>
               <div className="text-xl font-black font-mono text-slate-900 dark:text-white">
                 {maxAnomalyEntry.value !== null
@@ -1224,27 +1439,37 @@ export const TechnicalReportsPanel: React.FC<TechnicalReportsPanelProps> = ({
 
           {/* Módulo 2: Visão Pretérita (Últimos 15 Dias) & Consulta Pontual por Data */}
           <CollapsibleModule
-            title="Visão Pretérita (Últimos 15 Dias) & Consulta Pontual por Data"
-            subtitle="ERA5 + NWP recente em 4 faixas horárias (Madrugada/Manhã/Tarde/Noite) e histórico diário"
+            title={tr('Histórico Recente (15 Dias) & Consulta por Data', 'Recent History (15 Days) & Date Lookup')}
+            subtitle={tr(
+              'Resumo por turno (Madrugada, Manhã, Tarde, Noite) e registro horário de qualquer dia',
+              'Period summary (Dawn, Morning, Afternoon, Night) and hourly lookup by date',
+            )}
             icon={<Calendar className="w-4 h-4 text-teal-600 dark:text-teal-400" />}
             defaultOpen={true}
             keepMounted={true}
             hideIconStyle="eye"
             testId="report-past-15d-module"
             headerActions={
-              <button
-                type="button"
-                data-testid="report-past-15d-btn"
-                disabled={isLoadingPast15d}
-                onClick={handleExtractHybridPast15d}
-                className="min-h-[44px] px-3 py-1.5 rounded-xl text-xs font-bold inline-flex items-center gap-1.5 bg-teal-600 hover:bg-teal-500 disabled:opacity-50 text-white shadow-sm transition-colors"
-              >
-                <RefreshCw
-                  className={`w-3.5 h-3.5 ${isLoadingPast15d ? 'animate-spin' : ''}`}
-                  aria-hidden="true"
-                />
-                <span>{isLoadingPast15d ? 'Extraindo 15d...' : 'Carregar Últimos 15d'}</span>
-              </button>
+              <div className="flex items-center gap-1.5">
+                <HelpPopover topic="report_era5_hybrid" align="right" />
+                <button
+                  type="button"
+                  data-testid="report-past-15d-btn"
+                  disabled={isLoadingPast15d}
+                  onClick={handleExtractHybridPast15d}
+                  className="min-h-[44px] px-3 py-1.5 rounded-xl text-xs font-bold inline-flex items-center gap-1.5 bg-teal-600 hover:bg-teal-500 disabled:opacity-50 text-white shadow-sm transition-colors"
+                >
+                  <RefreshCw
+                    className={`w-3.5 h-3.5 ${isLoadingPast15d ? 'animate-spin' : ''}`}
+                    aria-hidden="true"
+                  />
+                  <span>
+                    {isLoadingPast15d
+                      ? tr('Extraindo 15d...', 'Loading 15d...')
+                      : tr('Carregar Últimos 15d', 'Load Last 15d')}
+                  </span>
+                </button>
+              </div>
             }
           >
             <div className="space-y-4">
@@ -1428,8 +1653,11 @@ export const TechnicalReportsPanel: React.FC<TechnicalReportsPanelProps> = ({
 
           {/* Módulo 3: Projeção Futura Estendida (15–16 Dias por Faixas Horárias) */}
           <CollapsibleModule
-            title="Projeção Futura Estendida (15–16 Dias por Faixas Horárias)"
-            subtitle="Consolidado de tendência por turno (+1..+7d Multi-Modelo e +8..+16d NOAA GFS)"
+            title={tr('Projeção Estendida (15–16 Dias)', 'Extended Outlook (15–16 Days)')}
+            subtitle={tr(
+              'Tendência por turno nos próximos 7 a 16 dias',
+              'Period trend across the next 7 to 16 days',
+            )}
             icon={<Sunrise className="w-4 h-4 text-amber-600 dark:text-amber-400" />}
             defaultOpen={false}
             keepMounted={true}
@@ -1437,19 +1665,26 @@ export const TechnicalReportsPanel: React.FC<TechnicalReportsPanelProps> = ({
             testId="report-future-16d-module"
             badge={extended16dForecast ? `${future16dReport?.totalDays ?? 16}d` : `${future16dReport?.totalDays ?? 7}d`}
             headerActions={
-              <button
-                type="button"
-                data-testid="report-load-extended-16d-btn"
-                disabled={isLoadingExtended16d}
-                onClick={handleLoadExtended16d}
-                className="min-h-[44px] px-3 py-1.5 rounded-xl text-xs font-bold inline-flex items-center gap-1.5 bg-indigo-600 hover:bg-indigo-500 disabled:opacity-50 text-white shadow-sm transition-colors"
-              >
-                <RefreshCw
-                  className={`w-3.5 h-3.5 ${isLoadingExtended16d ? 'animate-spin' : ''}`}
-                  aria-hidden="true"
-                />
-                <span>{isLoadingExtended16d ? 'Estendendo...' : 'Estender 15–16d'}</span>
-              </button>
+              <div className="flex items-center gap-1.5">
+                <HelpPopover topic="report_16d_projection" align="right" />
+                <button
+                  type="button"
+                  data-testid="report-load-extended-16d-btn"
+                  disabled={isLoadingExtended16d}
+                  onClick={handleLoadExtended16d}
+                  className="min-h-[44px] px-3 py-1.5 rounded-xl text-xs font-bold inline-flex items-center gap-1.5 bg-indigo-600 hover:bg-indigo-500 disabled:opacity-50 text-white shadow-sm transition-colors"
+                >
+                  <RefreshCw
+                    className={`w-3.5 h-3.5 ${isLoadingExtended16d ? 'animate-spin' : ''}`}
+                    aria-hidden="true"
+                  />
+                  <span>
+                    {isLoadingExtended16d
+                      ? tr('Estendendo...', 'Extending...')
+                      : tr('Estender 15–16d', 'Extend 15–16d')}
+                  </span>
+                </button>
+              </div>
             }
           >
             {future16dReport ? (
@@ -1539,13 +1774,17 @@ export const TechnicalReportsPanel: React.FC<TechnicalReportsPanelProps> = ({
 
           {/* Módulo 5: Tabela Completa de Percentis Estatísticos e Tendência OLS */}
           <CollapsibleModule
-            title="Tabela de Percentis Estatísticos, Dispersão (IQR) e Tendência Linear (OLS)"
-            subtitle="Média, Mediana, P10, P90, IQR, Regressão Linear e Máximo |Z|"
+            title={tr('Resumo Estatístico & Tendência', 'Statistical Summary & Trend')}
+            subtitle={tr(
+              'Média, mediana, dispersão e tendência diária nas unidades ativas',
+              'Mean, median, spread, and daily trend in active units',
+            )}
             icon={<FileSpreadsheet className="w-4 h-4 text-indigo-600 dark:text-indigo-400" />}
             defaultOpen={false}
             keepMounted={true}
             hideIconStyle="eye"
             testId="report-percentiles-module"
+            headerActions={<HelpPopover topic="report_zscore_ols" align="right" />}
           >
             <div className="overflow-x-auto rounded-xl border border-slate-200 dark:border-sky-800/70">
               <table
@@ -1554,22 +1793,24 @@ export const TechnicalReportsPanel: React.FC<TechnicalReportsPanelProps> = ({
               >
                 <thead className="bg-slate-100 dark:bg-[#0b192c] text-slate-700 dark:text-sky-200 font-bold uppercase tracking-wider text-[11px]">
                   <tr>
-                    <th className="py-2.5 px-3">Variável</th>
+                    <th className="py-2.5 px-3">{tr('Variável', 'Variable')}</th>
                     <th className="py-2.5 px-2.5 text-right">N</th>
-                    <th className="py-2.5 px-2.5 text-right">Média</th>
-                    <th className="py-2.5 px-2.5 text-right">Mediana</th>
-                    <th className="py-2.5 px-2.5 text-right">DP</th>
-                    <th className="py-2.5 px-2.5 text-right">Mín</th>
+                    <th className="py-2.5 px-2.5 text-right">{tr('Média', 'Mean')}</th>
+                    <th className="py-2.5 px-2.5 text-right">{tr('Mediana', 'Median')}</th>
+                    <th className="py-2.5 px-2.5 text-right">{tr('DP', 'SD')}</th>
+                    <th className="py-2.5 px-2.5 text-right">{tr('Mín', 'Min')}</th>
                     <th className="py-2.5 px-2.5 text-right">P10</th>
                     <th className="py-2.5 px-2.5 text-right">P90</th>
-                    <th className="py-2.5 px-2.5 text-right">Máx</th>
+                    <th className="py-2.5 px-2.5 text-right">{tr('Máx', 'Max')}</th>
                     <th className="py-2.5 px-2.5 text-right">IQR</th>
-                    <th className="py-2.5 px-2.5 text-right">Tendência/dia</th>
-                    <th className="py-2.5 px-3 text-right">|Z| máx</th>
+                    <th className="py-2.5 px-2.5 text-right">{tr('Tendência/dia', 'Trend/day')}</th>
+                    <th className="py-2.5 px-3 text-right">|Z| {tr('máx', 'max')}</th>
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-slate-200 dark:divide-sky-900/60 bg-white dark:bg-[#132a47]">
-                  {analysis.metrics.map((m) => (
+                  {analysis.metrics.map((m) => {
+                    const row = convertMetricRowForUnits(m, units);
+                    return (
                     <tr
                       key={m.variableKey}
                       className="hover:bg-slate-50/80 dark:hover:bg-sky-900/25"
@@ -1577,46 +1818,47 @@ export const TechnicalReportsPanel: React.FC<TechnicalReportsPanelProps> = ({
                       <td className="py-2.5 px-3 font-semibold text-slate-900 dark:text-white whitespace-nowrap">
                         {m.label}{' '}
                         <span className="text-slate-500 dark:text-slate-400 font-normal">
-                          ({m.unit})
+                          ({row.unitLabel})
                         </span>
                       </td>
                       <td className="py-2.5 px-2.5 text-right font-mono text-slate-600 dark:text-slate-300">
                         {m.sampleCount}
                       </td>
                       <td className="py-2.5 px-2.5 text-right font-mono font-bold text-slate-900 dark:text-white">
-                        {m.mean !== null ? m.mean.toFixed(2) : 'N/D'}
+                        {row.mean !== null ? row.mean.toFixed(2) : 'N/D'}
                       </td>
                       <td className="py-2.5 px-2.5 text-right font-mono text-slate-700 dark:text-slate-200">
-                        {m.median !== null ? m.median.toFixed(2) : 'N/D'}
+                        {row.median !== null ? row.median.toFixed(2) : 'N/D'}
                       </td>
                       <td className="py-2.5 px-2.5 text-right font-mono text-slate-600 dark:text-slate-300">
-                        {m.stdDev !== null ? m.stdDev.toFixed(2) : 'N/D'}
+                        {row.stdDev !== null ? row.stdDev.toFixed(2) : 'N/D'}
                       </td>
                       <td className="py-2.5 px-2.5 text-right font-mono text-slate-600 dark:text-slate-300">
-                        {m.min !== null ? m.min.toFixed(2) : 'N/D'}
+                        {row.min !== null ? row.min.toFixed(2) : 'N/D'}
                       </td>
                       <td className="py-2.5 px-2.5 text-right font-mono text-sky-700 dark:text-sky-300">
-                        {m.p10 !== null ? m.p10.toFixed(2) : 'N/D'}
+                        {row.p10 !== null ? row.p10.toFixed(2) : 'N/D'}
                       </td>
                       <td className="py-2.5 px-2.5 text-right font-mono text-sky-700 dark:text-sky-300">
-                        {m.p90 !== null ? m.p90.toFixed(2) : 'N/D'}
+                        {row.p90 !== null ? row.p90.toFixed(2) : 'N/D'}
                       </td>
                       <td className="py-2.5 px-2.5 text-right font-mono text-slate-600 dark:text-slate-300">
-                        {m.max !== null ? m.max.toFixed(2) : 'N/D'}
+                        {row.max !== null ? row.max.toFixed(2) : 'N/D'}
                       </td>
                       <td className="py-2.5 px-2.5 text-right font-mono text-slate-600 dark:text-slate-300">
-                        {m.iqr !== null ? m.iqr.toFixed(2) : 'N/D'}
+                        {row.iqr !== null ? row.iqr.toFixed(2) : 'N/D'}
                       </td>
                       <td className="py-2.5 px-2.5 text-right font-mono font-semibold text-indigo-700 dark:text-indigo-300">
-                        {m.linearTrendPerDay !== null
-                          ? `${m.linearTrendPerDay >= 0 ? '+' : ''}${m.linearTrendPerDay.toFixed(2)}`
+                        {row.linearTrendPerDay !== null
+                          ? `${row.linearTrendPerDay >= 0 ? '+' : ''}${row.linearTrendPerDay.toFixed(2)}`
                           : 'N/D'}
                       </td>
                       <td className="py-2.5 px-3 text-right font-mono font-semibold text-amber-700 dark:text-amber-300">
                         {m.anomalyZScoreMax !== null ? m.anomalyZScoreMax.toFixed(2) : 'N/D'}
                       </td>
                     </tr>
-                  ))}
+                    );
+                  })}
                 </tbody>
               </table>
             </div>

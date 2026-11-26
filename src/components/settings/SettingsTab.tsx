@@ -9,23 +9,25 @@ import {
   Gauge,
   Moon,
   Navigation,
+  Pencil,
   Plus,
   RotateCcw,
+  Save,
   Send,
   Settings,
   ShieldCheck,
   Sliders,
-  Sparkles,
   Sun,
   Trash2,
+  X,
 } from 'lucide-react';
+import { useLocale } from '../../context/LocaleContext';
 import { useUnits } from '../../context/UnitsContext';
 import { useTheme, type ThemeMode } from '../../hooks/useTheme';
 import {
   dispatchSystemNotification,
   getSystemNotificationPermissionState,
   loadNotificationPreferences,
-  NOTIFICATION_RULE_TEMPLATES,
   requestSystemNotificationPermission,
   saveNotificationPreferences,
 } from '../../services/notificationService';
@@ -41,7 +43,6 @@ import type {
   CustomNotificationConditions,
   CustomNotificationRule,
   DailyFieldThresholdKey,
-  NotificationRuleTemplate,
   UserNotificationPreferences,
 } from '../../types/v4';
 import {
@@ -73,7 +74,7 @@ import {
   type WaveHeightUnit,
   type WindSpeedUnit,
 } from '../../utils/units';
-import { CollapsibleModule } from '../common';
+import { CollapsibleModule, HelpPopover, NumericInput } from '../common';
 
 const SAFE_WINDOW_STORAGE_KEY = 'fieldcast_safe_window_thresholds';
 
@@ -226,6 +227,7 @@ export function SettingsTab({
   onToast,
   onErrorLog,
 }: SettingsTabProps): React.ReactElement {
+  const { tr } = useLocale();
   const {
     units,
     setWindUnit,
@@ -251,7 +253,7 @@ export function SettingsTab({
   const [enabledRuleFields, setEnabledRuleFields] = useState<Record<RuleConditionKey, boolean>>(
     DEFAULT_ENABLED_RULE_FIELDS,
   );
-  const [activeTemplateId, setActiveTemplateId] = useState<string | null>(null);
+  const [editingRuleId, setEditingRuleId] = useState<string | null>(null);
   const [isAlertBuilderOpen, setIsAlertBuilderOpen] = useState<boolean>(false);
 
   const [bgGpsConsent, setBgGpsConsent] = useState<boolean>(() =>
@@ -271,6 +273,19 @@ export function SettingsTab({
       setSafeWindowDraft(externalThresholds);
     }
   }, [externalThresholds]);
+
+  useEffect(() => {
+    const handlePrefsUpdated = (event: Event) => {
+      const detail = (event as CustomEvent<UserNotificationPreferences | undefined>).detail;
+      const refreshed = detail ?? loadNotificationPreferences();
+      setPrefs(refreshed);
+      onNotificationPreferencesChange?.(refreshed);
+    };
+    window.addEventListener('fieldcast:notification-prefs-updated', handlePrefsUpdated);
+    return () => {
+      window.removeEventListener('fieldcast:notification-prefs-updated', handlePrefsUpdated);
+    };
+  }, [onNotificationPreferencesChange]);
 
   useEffect(() => {
     let mounted = true;
@@ -447,21 +462,21 @@ export function SettingsTab({
     );
   }, [onErrorLog, onToast]);
 
-  const handleApplyTemplateToBuilder = useCallback(
-    (tpl: NotificationRuleTemplate) => {
-      const c = tpl.suggestedConditions;
+  const handleStartEditRule = useCallback(
+    (rule: CustomNotificationRule) => {
+      const c = rule.conditions;
       const fmtVal = (val: number | null | undefined, convertFn?: (n: number) => number | null) => {
         if (val === undefined || val === null) return '';
         const converted = convertFn ? convertFn(val) : val;
         return converted !== null ? String(Number(converted.toFixed(1))) : '';
       };
 
-      setActiveTemplateId(tpl.templateId);
+      setEditingRuleId(rule.id);
       setRuleDraft({
-        name: tpl.name,
-        startHHMM: tpl.suggestedTimeWindow.startHHMM,
-        endHHMM: tpl.suggestedTimeWindow.endHHMM,
-        notifyFromHHMM: tpl.suggestedTimeWindow.notifyFromHHMM ?? '',
+        name: rule.name,
+        startHHMM: rule.timeWindow.startHHMM,
+        endHHMM: rule.timeWindow.endHHMM,
+        notifyFromHHMM: rule.timeWindow.notifyFromHHMM ?? '',
         minTempC: fmtVal(c.minTempC, (n) => convertTemperature(n, units.temperature)),
         maxTempC: fmtVal(c.maxTempC, (n) => convertTemperature(n, units.temperature)),
         minPrecipProbPct: fmtVal(c.minPrecipProbPct),
@@ -470,8 +485,8 @@ export function SettingsTab({
         maxCloudCoverPct: fmtVal(c.maxCloudCoverPct),
         maxWaveM: fmtVal(c.maxWaveM, (n) => convertWaveHeight(n, units.wave)),
         maxKpIndex: fmtVal(c.maxKpIndex),
-        customTitle: tpl.suggestedTitle,
-        customMessage: tpl.suggestedMessage,
+        customTitle: rule.customTitle,
+        customMessage: rule.customMessage,
       });
 
       setEnabledRuleFields({
@@ -486,15 +501,22 @@ export function SettingsTab({
       });
 
       setIsAlertBuilderOpen(true);
-      setStatusFeedback(`Template "${tpl.name}" carregado no construtor para personalização.`);
-      onToast?.({
-        type: 'info',
-        title: 'Template carregado como guia',
-        message: 'Revise os parâmetros marcados abaixo e clique em Salvar Regra de Alerta.',
-      });
+      setStatusFeedback(
+        tr(
+          `Editando regra "${rule.name}". Ajuste os campos e clique em Salvar Alterações.`,
+          `Editing rule "${rule.name}". Adjust fields and click Save Changes.`,
+        ),
+      );
     },
-    [onToast, units.temperature, units.wave, units.wind],
+    [tr, units.temperature, units.wave, units.wind],
   );
+
+  const handleCancelEditRule = useCallback(() => {
+    setEditingRuleId(null);
+    setRuleDraft(INITIAL_RULE_DRAFT);
+    setEnabledRuleFields(DEFAULT_ENABLED_RULE_FIELDS);
+    setStatusFeedback(null);
+  }, []);
 
   const handleSaveCustomRule = useCallback(
     (event: React.FormEvent) => {
@@ -537,20 +559,69 @@ export function SettingsTab({
           const resolvedName =
             ruleDraft.name.trim() ||
             ruleDraft.customTitle.trim() ||
-            `Alerta Personalizado #${prefs.rules.length + 1}`;
+            tr(
+              `Alerta Personalizado #${prefs.rules.length + 1}`,
+              `Custom Alert #${prefs.rules.length + 1}`,
+            );
+
+          const nextTimeWindow = {
+            startHHMM: ruleDraft.startHHMM || '06:00',
+            endHHMM: ruleDraft.endHHMM || '18:00',
+            notifyFromHHMM: ruleDraft.notifyFromHHMM.trim() || null,
+          };
+
+          const resolvedTitle =
+            ruleDraft.customTitle.trim() || `${tr('Alerta', 'Alert')}: ${resolvedName}`;
+          const resolvedMessage = ruleDraft.customMessage.trim();
+
+          const existingRule = editingRuleId
+            ? prefs.rules.find((r) => r.id === editingRuleId)
+            : undefined;
+
+          if (existingRule) {
+            const updatedRule: CustomNotificationRule = {
+              ...existingRule,
+              name: resolvedName,
+              conditions,
+              timeWindow: nextTimeWindow,
+              customTitle: resolvedTitle,
+              customMessage: resolvedMessage,
+            };
+
+            persistPrefs({
+              ...prefs,
+              rules: prefs.rules.map((r) => (r.id === existingRule.id ? updatedRule : r)),
+            });
+
+            setEditingRuleId(null);
+            setRuleDraft(INITIAL_RULE_DRAFT);
+            setEnabledRuleFields(DEFAULT_ENABLED_RULE_FIELDS);
+            setStatusFeedback(
+              tr(
+                `Alterações da regra "${updatedRule.name}" salvas com sucesso.`,
+                `Changes to rule "${updatedRule.name}" saved successfully.`,
+              ),
+            );
+
+            onToast?.({
+              type: 'success',
+              title: tr('Regra de alerta atualizada', 'Alert rule updated'),
+              message: tr(
+                `"${updatedRule.name}" foi atualizada com sucesso.`,
+                `"${updatedRule.name}" has been updated.`,
+              ),
+            });
+            return;
+          }
 
           const newRule: CustomNotificationRule = {
             id: `rule-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
             name: resolvedName,
             enabled: true,
             conditions,
-            timeWindow: {
-              startHHMM: ruleDraft.startHHMM || '06:00',
-              endHHMM: ruleDraft.endHHMM || '18:00',
-              notifyFromHHMM: ruleDraft.notifyFromHHMM.trim() || null,
-            },
-            customTitle: ruleDraft.customTitle.trim() || `Alerta: ${resolvedName}`,
-            customMessage: ruleDraft.customMessage.trim(),
+            timeWindow: nextTimeWindow,
+            customTitle: resolvedTitle,
+            customMessage: resolvedMessage,
             createdAtIso: new Date().toISOString(),
             lastTriggeredIso: null,
           };
@@ -562,13 +633,20 @@ export function SettingsTab({
 
           setRuleDraft(INITIAL_RULE_DRAFT);
           setEnabledRuleFields(DEFAULT_ENABLED_RULE_FIELDS);
-          setActiveTemplateId(null);
-          setStatusFeedback(`Regra "${newRule.name}" salva com sucesso.`);
+          setStatusFeedback(
+            tr(
+              `Regra "${newRule.name}" salva com sucesso.`,
+              `Rule "${newRule.name}" saved successfully.`,
+            ),
+          );
 
           onToast?.({
             type: 'success',
-            title: 'Regra de alerta salva',
-            message: `"${newRule.name}" adicionada às suas regras personalizadas.`,
+            title: tr('Regra de alerta salva', 'Alert rule saved'),
+            message: tr(
+              `"${newRule.name}" adicionada às suas regras personalizadas.`,
+              `"${newRule.name}" added to your custom rules.`,
+            ),
           });
         },
         {
@@ -580,12 +658,14 @@ export function SettingsTab({
       );
     },
     [
+      editingRuleId,
       enabledRuleFields,
       onErrorLog,
       onToast,
       persistPrefs,
       prefs,
       ruleDraft,
+      tr,
       units.temperature,
       units.wave,
       units.wind,
@@ -613,15 +693,20 @@ export function SettingsTab({
         ...prefs,
         rules: updatedRules,
       });
+      if (editingRuleId === ruleId) {
+        setEditingRuleId(null);
+        setRuleDraft(INITIAL_RULE_DRAFT);
+        setEnabledRuleFields(DEFAULT_ENABLED_RULE_FIELDS);
+      }
       if (target) {
         onToast?.({
           type: 'info',
-          title: 'Regra removida',
-          message: `"${target.name}" foi excluída.`,
+          title: tr('Regra removida', 'Rule removed'),
+          message: tr(`"${target.name}" foi excluída.`, `"${target.name}" was deleted.`),
         });
       }
     },
-    [onToast, persistPrefs, prefs],
+    [editingRuleId, onToast, persistPrefs, prefs, tr],
   );
 
   const handleToggleBackgroundGpsConsent = useCallback(() => {
@@ -717,21 +802,21 @@ export function SettingsTab({
   const permissionBadge =
     permissionState === 'granted'
       ? {
-          label: 'Autorizado no dispositivo',
+          label: tr('Autorizado no dispositivo', 'Authorized on device'),
           cls: 'border-emerald-300 bg-emerald-50 text-emerald-800 dark:border-emerald-700/60 dark:bg-emerald-950/50 dark:text-emerald-200',
         }
       : permissionState === 'denied'
         ? {
-            label: 'Bloqueado no sistema',
+            label: tr('Bloqueado no sistema', 'Blocked by system'),
             cls: 'border-rose-300 bg-rose-50 text-rose-800 dark:border-rose-700/60 dark:bg-rose-950/50 dark:text-rose-200',
           }
         : permissionState === 'unsupported'
           ? {
-              label: 'Apenas alertas internos (WebView/Sandbox)',
+              label: tr('Alertas internos no aplicativo', 'In-app alerts only'),
               cls: 'border-slate-300 bg-slate-100 text-slate-700 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-300',
             }
           : {
-              label: 'Aguardando autorização',
+              label: tr('Aguardando autorização', 'Awaiting permission'),
               cls: 'border-amber-300 bg-amber-50 text-amber-800 dark:border-amber-700/60 dark:bg-amber-950/50 dark:text-amber-200',
             };
 
@@ -749,10 +834,13 @@ export function SettingsTab({
             </div>
             <div>
               <h1 className="text-lg font-bold tracking-tight text-slate-900 dark:text-white sm:text-xl">
-                Configurações Modulares &amp; Alertas
+                {tr('Configurações Modulares & Alertas', 'Modular Settings & Alerts')}
               </h1>
               <p className="mt-0.5 text-xs text-slate-600 dark:text-slate-400">
-                Abra apenas os módulos desejados: escalas globais, permissões, notificações opt-in e limiares opcionais.
+                {tr(
+                  'Unidades globais, permissões do dispositivo, alertas personalizados e limites operacionais.',
+                  'Global units, device permissions, custom alerts, and operational limits.',
+                )}
               </p>
             </div>
           </div>
@@ -777,8 +865,8 @@ export function SettingsTab({
 
       {/* MÓDULO 0 — Unidades & Escalas de Exibição */}
       <CollapsibleModule
-        title="Unidades & Escalas de Exibição"
-        subtitle={`Ativo: ${getWindUnitLabel(units.wind)} · ${getTempUnitLabel(units.temperature)} · ${getWaveUnitLabel(units.wave)}`}
+        title={tr('Unidades & Escalas de Exibição', 'Units & Display Scales')}
+        subtitle={`${tr('Ativo:', 'Active:')} ${getWindUnitLabel(units.wind)} · ${getTempUnitLabel(units.temperature)} · ${getWaveUnitLabel(units.wave)}`}
         icon={<Gauge className="h-4 w-4 text-sky-600 dark:text-sky-400" />}
         defaultOpen={true}
         keepMounted={true}
@@ -790,10 +878,10 @@ export function SettingsTab({
             data-testid="reset-units-btn"
             onClick={resetUnits}
             className="inline-flex min-h-[44px] items-center gap-1 rounded-xl border border-slate-200 bg-slate-50 px-2.5 py-1 text-[11px] font-semibold text-slate-700 hover:bg-slate-100 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-200"
-            title="Restaurar unidades métricas padrão"
+            title={tr('Restaurar unidades métricas padrão', 'Reset default metric units')}
           >
             <RotateCcw className="h-3.5 w-3.5" aria-hidden="true" />
-            <span className="hidden sm:inline">Padrão</span>
+            <span className="hidden sm:inline">{tr('Padrão', 'Default')}</span>
           </button>
         }
       >
@@ -1158,85 +1246,24 @@ export function SettingsTab({
         </div>
       </CollapsibleModule>
 
-      {/* MÓDULO 2 — Templates Guia (3 Sugestões Prontas) */}
+      {/* MÓDULO 2 — Construtor de Alerta Personalizado (com Checkboxes Opcionais) */}
       <CollapsibleModule
-        title="2. Templates Guia (3 Sugestões Prontas)"
-        subtitle="Não ativos por padrão — clique para preencher o construtor com os parâmetros sugeridos"
-        icon={<Sparkles className="h-4 w-4 text-indigo-600 dark:text-indigo-400" />}
-        defaultOpen={false}
-        keepMounted={true}
-        hideIconStyle="eye"
-        testId="settings-templates-module"
-        badge={`${NOTIFICATION_RULE_TEMPLATES.length}`}
-      >
-        <div className="grid grid-cols-1 gap-4 lg:grid-cols-3">
-          {NOTIFICATION_RULE_TEMPLATES.map((tpl) => {
-            const chips = formatRuleConditionChips(tpl.suggestedConditions, units);
-            const isSelected = activeTemplateId === tpl.templateId;
-            return (
-              <article
-                key={tpl.templateId}
-                className={`flex flex-col justify-between rounded-xl border p-4 transition ${
-                  isSelected
-                    ? 'border-sky-500 bg-sky-50/60 dark:border-sky-500 dark:bg-sky-950/30'
-                    : 'border-slate-200 bg-slate-50/50 dark:border-slate-800 dark:bg-slate-950/50'
-                }`}
-              >
-                <div>
-                  <span className="inline-block rounded-md bg-indigo-100 px-2 py-0.5 text-[11px] font-semibold text-indigo-800 dark:bg-indigo-950/80 dark:text-indigo-300">
-                    {tpl.categoryLabel}
-                  </span>
-                  <h3 className="mt-2 text-sm font-bold text-slate-900 dark:text-slate-100">
-                    {tpl.name}
-                  </h3>
-                  <p className="mt-1 text-xs text-slate-600 dark:text-slate-400">
-                    {tpl.description}
-                  </p>
-
-                  <div className="mt-3 flex flex-wrap gap-1.5">
-                    <span className="rounded-md border border-slate-300 bg-white px-2 py-0.5 text-[11px] font-medium text-slate-700 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-300">
-                      Janela {tpl.suggestedTimeWindow.startHHMM}–{tpl.suggestedTimeWindow.endHHMM}
-                    </span>
-                    {tpl.suggestedTimeWindow.notifyFromHHMM && (
-                      <span className="rounded-md border border-sky-300 bg-sky-50 px-2 py-0.5 text-[11px] font-medium text-sky-800 dark:border-sky-800 dark:bg-sky-950/60 dark:text-sky-300">
-                        Avisar a partir das {tpl.suggestedTimeWindow.notifyFromHHMM}
-                      </span>
-                    )}
-                    {chips.map((chip) => (
-                      <span
-                        key={chip}
-                        className="rounded-md bg-slate-200/80 px-2 py-0.5 text-[11px] font-medium text-slate-800 dark:bg-slate-800 dark:text-slate-200"
-                      >
-                        {chip}
-                      </span>
-                    ))}
-                  </div>
-                </div>
-
-                <button
-                  type="button"
-                  data-testid={`use-template-${tpl.templateId}`}
-                  onClick={() => handleApplyTemplateToBuilder(tpl)}
-                  className="mt-4 inline-flex min-h-[44px] w-full items-center justify-center gap-2 rounded-xl border border-sky-600 bg-white px-3 py-2 text-xs font-bold text-sky-700 transition hover:bg-sky-50 dark:border-sky-500 dark:bg-slate-900 dark:text-sky-300 dark:hover:bg-sky-950/50"
-                >
-                  Usar Template como Guia
-                </button>
-              </article>
-            );
-          })}
-        </div>
-      </CollapsibleModule>
-
-      {/* MÓDULO 3 — Construtor de Alerta Personalizado (com Checkboxes Opcionais) */}
-      <CollapsibleModule
-        title="3. Construtor de Alerta Personalizado & Janela Horária"
-        subtitle="Marque apenas os parâmetros que deseja monitorar (itens desmarcados são ignorados)"
+        title={
+          editingRuleId
+            ? tr('2. Editando Alerta Personalizado', '2. Editing Custom Alert')
+            : tr('2. Construtor de Alerta Personalizado & Janela Horária', '2. Custom Alert Builder & Time Window')
+        }
+        subtitle={tr(
+          'Marque apenas os parâmetros que deseja monitorar (itens desmarcados são ignorados)',
+          'Check only the parameters you want to monitor (unchecked items are ignored)',
+        )}
         icon={<Plus className="h-4 w-4 text-emerald-600 dark:text-emerald-400" />}
         isOpen={isAlertBuilderOpen}
         onOpenChange={setIsAlertBuilderOpen}
         keepMounted={true}
         hideIconStyle="eye"
         testId="settings-alert-builder-module"
+        headerActions={<HelpPopover topic="alerts_builder_help" align="right" />}
       >
         <form
           data-testid="custom-alert-form"
@@ -1399,16 +1426,16 @@ export function SettingsTab({
                         className="h-4 w-4 accent-sky-600 rounded"
                       />
                     </label>
-                    <input
-                      type="number"
-                      step={field.step}
-                      min={field.min}
-                      max={field.max}
+                    <NumericInput
+                      step={Number(field.step)}
+                      min={field.min !== undefined ? Number(field.min) : undefined}
+                      max={field.max !== undefined ? Number(field.max) : undefined}
+                      allowNegative={field.key === 'minTempC' || field.key === 'maxTempC'}
+                      allowEmpty={true}
                       data-testid={field.testId}
                       placeholder={field.placeholder}
                       value={ruleDraft[field.key]}
-                      onChange={(e) => {
-                        const val = e.target.value;
+                      onValueChange={(val) => {
                         setRuleDraft((d) => ({ ...d, [field.key]: val }));
                         setEnabledRuleFields((prev) => ({
                           ...prev,
@@ -1456,22 +1483,48 @@ export function SettingsTab({
               <code>{'{wind}'}</code>, <code>{'{wave}'}</code> e <code>{'{details}'}</code>.
             </p>
 
-            <button
-              type="submit"
-              data-testid="save-custom-rule-btn"
-              className="inline-flex min-h-[44px] items-center justify-center gap-2 rounded-xl bg-emerald-600 px-5 py-2.5 text-sm font-bold text-white shadow-sm transition hover:bg-emerald-700 focus:outline-none focus:ring-2 focus:ring-emerald-500/40"
-            >
-              <Plus className="h-4 w-4" aria-hidden="true" />
-              Salvar Regra de Alerta
-            </button>
+            <div className="flex flex-wrap items-center gap-2">
+              {editingRuleId && (
+                <button
+                  type="button"
+                  data-testid="cancel-edit-rule-btn"
+                  onClick={handleCancelEditRule}
+                  className="inline-flex min-h-[44px] items-center justify-center gap-1.5 rounded-xl border border-slate-300 bg-white px-4 py-2.5 text-sm font-semibold text-slate-700 transition hover:bg-slate-100 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-200 dark:hover:bg-slate-800"
+                >
+                  <X className="h-4 w-4" aria-hidden="true" />
+                  {tr('Cancelar Edição', 'Cancel Edit')}
+                </button>
+              )}
+
+              <button
+                type="submit"
+                data-testid="save-custom-rule-btn"
+                className="inline-flex min-h-[44px] items-center justify-center gap-2 rounded-xl bg-emerald-600 px-5 py-2.5 text-sm font-bold text-white shadow-sm transition hover:bg-emerald-700 focus:outline-none focus:ring-2 focus:ring-emerald-500/40"
+              >
+                {editingRuleId ? (
+                  <>
+                    <Save className="h-4 w-4" aria-hidden="true" />
+                    {tr('Salvar Alterações', 'Save Changes')}
+                  </>
+                ) : (
+                  <>
+                    <Plus className="h-4 w-4" aria-hidden="true" />
+                    {tr('Salvar Regra de Alerta', 'Save Alert Rule')}
+                  </>
+                )}
+              </button>
+            </div>
           </div>
         </form>
       </CollapsibleModule>
 
-      {/* MÓDULO 4 — Regras Personalizadas Salvas */}
+      {/* MÓDULO 3 — Regras Personalizadas Salvas */}
       <CollapsibleModule
-        title="4. Regras Personalizadas Salvas"
-        subtitle="Ative, pause ou remova alertas configurados para sua operação"
+        title={tr('3. Regras Personalizadas Salvas', '3. Saved Custom Rules')}
+        subtitle={tr(
+          'Ative, edite, pause ou remova alertas configurados para sua operação',
+          'Enable, edit, pause, or remove alerts configured for your operation',
+        )}
         icon={<Bell className="h-4 w-4 text-emerald-600 dark:text-emerald-400" />}
         defaultOpen={true}
         keepMounted={true}
@@ -1481,18 +1534,25 @@ export function SettingsTab({
       >
         {prefs.rules.length === 0 ? (
           <p className="rounded-xl border border-dashed border-slate-300 p-4 text-xs text-slate-500 dark:border-slate-700 dark:text-slate-400">
-            Nenhuma regra personalizada cadastrada. Crie no Construtor acima ou escolha um dos 3
-            Templates Guia.
+            {tr(
+              'Nenhuma regra personalizada cadastrada. Crie no Construtor acima ou ative um modelo pronto na Central de Ajuda (?).',
+              'No custom rules registered yet. Create one in the Builder above or activate a ready template in the Help Center (?).',
+            )}
           </p>
         ) : (
           <ul data-testid="saved-rules-list" className="space-y-3">
             {prefs.rules.map((rule) => {
               const chips = formatRuleConditionChips(rule.conditions, units);
+              const isEditingThis = editingRuleId === rule.id;
               return (
                 <li
                   key={rule.id}
                   data-testid={`saved-rule-${rule.id}`}
-                  className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-slate-200 bg-slate-50/70 p-3.5 dark:border-slate-800 dark:bg-slate-950/60"
+                  className={`flex flex-wrap items-center justify-between gap-3 rounded-xl border p-3.5 transition ${
+                    isEditingThis
+                      ? 'border-sky-500 bg-sky-50/70 dark:border-sky-500 dark:bg-sky-950/30'
+                      : 'border-slate-200 bg-slate-50/70 dark:border-slate-800 dark:bg-slate-950/60'
+                  }`}
                 >
                   <div className="min-w-0 flex-1">
                     <div className="flex flex-wrap items-center gap-2">
@@ -1506,12 +1566,12 @@ export function SettingsTab({
                             : 'bg-slate-200 text-slate-600 dark:bg-slate-800 dark:text-slate-400'
                         }`}
                       >
-                        {rule.enabled ? 'Ativa' : 'Pausada'}
+                        {rule.enabled ? tr('Ativa', 'Active') : tr('Pausada', 'Paused')}
                       </span>
                       <span className="rounded-md border border-slate-300 bg-white px-2 py-0.5 text-[11px] text-slate-700 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-300">
-                        Janela {rule.timeWindow.startHHMM}–{rule.timeWindow.endHHMM}
+                        {tr('Janela', 'Window')} {rule.timeWindow.startHHMM}–{rule.timeWindow.endHHMM}
                         {rule.timeWindow.notifyFromHHMM
-                          ? ` • Avisar das ${rule.timeWindow.notifyFromHHMM}`
+                          ? ` • ${tr('Avisar das', 'Notify from')} ${rule.timeWindow.notifyFromHHMM}`
                           : ''}
                       </span>
                     </div>
@@ -1538,16 +1598,27 @@ export function SettingsTab({
                   <div className="flex items-center gap-2">
                     <button
                       type="button"
-                      data-testid={`toggle-rule-${rule.id}`}
-                      onClick={() => handleToggleRuleEnabled(rule.id)}
-                      className="inline-flex min-h-[44px] items-center justify-center rounded-xl border border-slate-300 bg-white px-3 py-2 text-xs font-semibold text-slate-800 transition hover:bg-slate-100 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-200 dark:hover:bg-slate-800"
+                      data-testid={`edit-rule-${rule.id}`}
+                      onClick={() => handleStartEditRule(rule)}
+                      aria-label={tr(`Editar regra ${rule.name}`, `Edit rule ${rule.name}`)}
+                      className="inline-flex min-h-[44px] items-center justify-center gap-1.5 rounded-xl border border-sky-300 bg-sky-50 px-3 py-2 text-xs font-semibold text-sky-800 transition hover:bg-sky-100 dark:border-sky-800/70 dark:bg-sky-950/40 dark:text-sky-200 dark:hover:bg-sky-900/60"
                     >
-                      {rule.enabled ? 'Desativar' : 'Ativar'}
+                      <Pencil className="h-3.5 w-3.5" aria-hidden="true" />
+                      {tr('Editar', 'Edit')}
                     </button>
 
                     <button
                       type="button"
-                      aria-label={`Excluir regra ${rule.name}`}
+                      data-testid={`toggle-rule-${rule.id}`}
+                      onClick={() => handleToggleRuleEnabled(rule.id)}
+                      className="inline-flex min-h-[44px] items-center justify-center rounded-xl border border-slate-300 bg-white px-3 py-2 text-xs font-semibold text-slate-800 transition hover:bg-slate-100 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-200 dark:hover:bg-slate-800"
+                    >
+                      {rule.enabled ? tr('Desativar', 'Pause') : tr('Ativar', 'Enable')}
+                    </button>
+
+                    <button
+                      type="button"
+                      aria-label={tr(`Excluir regra ${rule.name}`, `Delete rule ${rule.name}`)}
                       data-testid={`delete-rule-${rule.id}`}
                       onClick={() => handleDeleteRule(rule.id)}
                       className="inline-flex min-h-[44px] min-w-[44px] items-center justify-center rounded-xl border border-rose-300 bg-rose-50 px-3 py-2 text-xs font-semibold text-rose-700 transition hover:bg-rose-100 dark:border-rose-800/70 dark:bg-rose-950/40 dark:text-rose-300 dark:hover:bg-rose-950/70"
@@ -1562,9 +1633,12 @@ export function SettingsTab({
         )}
       </CollapsibleModule>
 
-      {/* MÓDULO 5 — Limiares Opcionais dos Scores & Janela Segura (168h) */}
+      {/* MÓDULO 4 — Limiares Opcionais dos Scores & Janela Segura (168h) */}
       <CollapsibleModule
-        title="5. Limiares Opcionais dos Scores & Janela Segura (168h)"
+        title={tr(
+          '4. Limiares Opcionais dos Scores & Janela Segura (168h)',
+          '4. Optional Score Thresholds & Safe Window (168h)',
+        )}
         subtitle="Desmarque qualquer parâmetro para ignorá-lo nos scores de Campo, Navegação e Semáforo"
         icon={<Sliders className="h-4 w-4 text-sky-600 dark:text-sky-400" />}
         defaultOpen={false}
@@ -1689,14 +1763,15 @@ export function SettingsTab({
                             className="h-4 w-4 accent-sky-600 rounded shrink-0"
                           />
                         </label>
-                        <input
-                          type="number"
+                        <NumericInput
                           step={item.step ?? 1}
+                          allowNegative={item.key === 'idealMinTempC' || item.key === 'idealMaxTempC'}
+                          allowEmpty={false}
+                          fallbackValue={item.display}
                           disabled={!checked}
                           value={item.display}
-                          onChange={(e) => {
-                            const num = Number(e.target.value);
-                            if (!Number.isFinite(num)) return;
+                          onValueChange={(_, num) => {
+                            if (num === null) return;
                             setQualityDraft((q) => ({
                               ...q,
                               dailyField: {
@@ -1805,14 +1880,15 @@ export function SettingsTab({
                             className="h-4 w-4 accent-sky-600 rounded shrink-0"
                           />
                         </label>
-                        <input
-                          type="number"
+                        <NumericInput
                           step={item.step ?? 1}
+                          min={0}
+                          allowEmpty={false}
+                          fallbackValue={item.display}
                           disabled={!checked}
                           value={item.display}
-                          onChange={(e) => {
-                            const num = Number(e.target.value);
-                            if (!Number.isFinite(num)) return;
+                          onValueChange={(_, num) => {
+                            if (num === null) return;
                             setQualityDraft((q) => ({
                               ...q,
                               coastalNavigation: {
@@ -1924,14 +2000,16 @@ export function SettingsTab({
                         className="h-4 w-4 accent-sky-600 rounded shrink-0"
                       />
                     </label>
-                    <input
-                      type="number"
+                    <NumericInput
                       step={item.step ?? 1}
+                      min={0}
+                      max={item.key === 'maxPrecipProbPct' ? 100 : undefined}
+                      allowEmpty={false}
+                      fallbackValue={item.display}
                       disabled={!checked}
                       value={item.display}
-                      onChange={(e) => {
-                        const num = Number(e.target.value);
-                        if (!Number.isFinite(num)) return;
+                      onValueChange={(_, num) => {
+                        if (num === null) return;
                         setSafeWindowDraft((s) => ({
                           ...s,
                           [item.key]: item.onChangeVal(num),

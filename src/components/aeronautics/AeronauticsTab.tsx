@@ -14,12 +14,14 @@ import {
   Plane,
   RefreshCw,
   RotateCcw,
+  Save,
   ShieldAlert,
   Sliders,
   Thermometer,
   Wind,
   Zap,
 } from 'lucide-react';
+import { useLocale } from '../../context/LocaleContext';
 import { useUnits } from '../../context/UnitsContext';
 import {
   buildFallbackKpDataset,
@@ -49,6 +51,7 @@ import {
 import {
   convertPressure,
   convertWindSpeed,
+  formatWind,
   getPressureUnitLabel,
   getWindUnitLabel,
   windSpeedToKmh,
@@ -59,7 +62,7 @@ import {
   useCurrentLocalHourIndex,
 } from '../../utils/localTimeHour';
 import { safeAction } from '../../utils/safeAction';
-import { FullscreenViewer, ModelModeSwitchPill } from '../common';
+import { FullscreenViewer, ModelModeSwitchPill, NumericInput } from '../common';
 
 const DRONE_LIMITS_STORAGE_KEY = 'fieldcast_drone_limits_v1';
 
@@ -567,6 +570,7 @@ export const AeronauticsTab: React.FC<AeronauticsTabProps> = ({
   onToast,
   onErrorLog,
 }) => {
+  const { tr } = useLocale();
   const { units } = useUnits();
   const hours = forecast?.hours ?? [];
   const currentHourIndex = useCurrentLocalHourIndex(hours, forecast?.timezone);
@@ -841,12 +845,41 @@ export const AeronauticsTab: React.FC<AeronauticsTabProps> = ({
     );
   };
 
+  const handleSaveDroneLimits = () => {
+    void safeAction(
+      async () => {
+        if (typeof window !== 'undefined' && typeof window.localStorage !== 'undefined') {
+          window.localStorage.setItem(DRONE_LIMITS_STORAGE_KEY, JSON.stringify(droneLimits));
+        }
+        onToast?.({
+          type: 'success',
+          title: tr('Limites de voo salvos', 'Flight limits saved'),
+          message: tr(
+            `Alvo ${droneLimits.targetAltitudeM}m AGL · Vento máx ${formatWind(droneLimits.maxWindKmh, units.wind, 1)}`,
+            `Target ${droneLimits.targetAltitudeM}m AGL · Max wind ${formatWind(droneLimits.maxWindKmh, units.wind, 1)}`,
+          ),
+        });
+      },
+      {
+        actionKey: 'aeronautics_save_drone_limits',
+        moduleName: 'AeronauticsTab',
+        errorTitle: tr('Erro ao salvar limites do drone', 'Failed to save drone limits'),
+        onToast,
+        onErrorLog,
+      },
+    );
+  };
+
   const verticalChartOption: EChartsOption = useMemo(() => {
+    const windUnitLabel = getWindUnitLabel(units.wind);
     const altitudes = [10, 50, 80, 100, 120];
     const values = altitudes.map((alt) => {
-      const speed = getWindSpeedAtAltitude(selectedHour, alt);
-      return speed !== null ? Number(speed.toFixed(1)) : 0;
+      const speedKmh = getWindSpeedAtAltitude(selectedHour, alt);
+      const converted = convertWindSpeed(speedKmh, units.wind);
+      return converted !== null ? Number(converted.toFixed(1)) : 0;
     });
+    const maxWindConverted =
+      convertWindSpeed(droneLimits.maxWindKmh, units.wind) ?? droneLimits.maxWindKmh;
     const textColor = isDark ? '#cbd5e1' : '#334155';
     const gridColor = isDark ? 'rgba(56, 189, 248, 0.14)' : 'rgba(148, 163, 184, 0.25)';
 
@@ -861,14 +894,14 @@ export const AeronauticsTab: React.FC<AeronauticsTabProps> = ({
       },
       yAxis: {
         type: 'value',
-        name: 'km/h',
+        name: windUnitLabel,
         nameTextStyle: { color: textColor, fontSize: 10 },
         axisLabel: { color: textColor, fontSize: 10 },
         splitLine: { lineStyle: { color: gridColor } },
       },
       series: [
         {
-          name: 'Vento em Altitude',
+          name: `${tr('Vento em Altitude', 'Wind Aloft')} (${windUnitLabel})`,
           type: 'bar',
           barWidth: '48%',
           data: values.map((v, idx) => ({
@@ -878,7 +911,7 @@ export const AeronauticsTab: React.FC<AeronauticsTabProps> = ({
               color:
                 altitudes[idx] === droneLimits.targetAltitudeM
                   ? '#0284c7'
-                  : v > droneLimits.maxWindKmh
+                  : v > maxWindConverted
                     ? '#e11d48'
                     : '#10b981',
             },
@@ -886,7 +919,7 @@ export const AeronauticsTab: React.FC<AeronauticsTabProps> = ({
         },
       ],
     };
-  }, [droneLimits.maxWindKmh, droneLimits.targetAltitudeM, isDark, selectedHour]);
+  }, [droneLimits.maxWindKmh, droneLimits.targetAltitudeM, isDark, selectedHour, tr, units.wind]);
 
   const kpTimelineOption: EChartsOption = useMemo(() => {
     const entries = kpDataset.entries.slice(-16);
@@ -1367,17 +1400,17 @@ export const AeronauticsTab: React.FC<AeronauticsTabProps> = ({
                             className="h-4 w-4 accent-sky-600 rounded shrink-0"
                           />
                         </label>
-                        <input
-                          type="number"
+                        <NumericInput
                           data-testid={item.testId}
                           min={item.min}
                           max={item.max}
                           step={item.step}
+                          allowEmpty={false}
+                          fallbackValue={item.value}
                           disabled={!checked}
                           value={item.value}
-                          onChange={(e) => {
-                            const num = Number(e.target.value);
-                            if (!Number.isFinite(num)) return;
+                          onValueChange={(_, num) => {
+                            if (num === null) return;
                             setDroneLimits((prev) => ({
                               ...prev,
                               ...item.onValueChange(num),
@@ -1388,6 +1421,18 @@ export const AeronauticsTab: React.FC<AeronauticsTabProps> = ({
                       </div>
                     );
                   })}
+                </div>
+
+                <div className="flex justify-end pt-1">
+                  <button
+                    type="button"
+                    data-testid="save-drone-limits-btn"
+                    onClick={handleSaveDroneLimits}
+                    className="inline-flex min-h-[40px] items-center gap-1.5 rounded-xl bg-sky-600 hover:bg-sky-700 px-3.5 py-1.5 text-xs font-bold text-white shadow-sm transition-colors"
+                  >
+                    <Save className="w-3.5 h-3.5" aria-hidden="true" />
+                    {tr('Salvar Limites', 'Save Limits')}
+                  </button>
                 </div>
               </div>
             </>
@@ -1512,15 +1557,25 @@ export const AeronauticsTab: React.FC<AeronauticsTabProps> = ({
                     <label className="block text-[11px] font-semibold text-slate-600 dark:text-slate-300 mb-1">
                       Valor Kp Manual
                     </label>
-                    <input
-                      type="number"
+                    <NumericInput
                       data-testid="kp-manual-input"
-                      aria-label="Índice Kp Manual"
+                      aria-label={tr('Índice Kp Manual', 'Manual Kp Index')}
                       min={0}
                       max={9}
                       step={0.1}
+                      allowEmpty={false}
+                      fallbackValue={manualOverride.enabled ? manualOverride.kpValue : kpDataset.currentKp}
                       value={manualOverride.enabled ? manualOverride.kpValue : kpDataset.currentKp}
-                      onChange={(e) => handleManualKpValueChange(Number(e.target.value))}
+                      onValueChange={(_, parsed) => {
+                        if (parsed !== null) {
+                          handleManualKpValueChange(parsed);
+                        }
+                      }}
+                      onCommit={(committed) => {
+                        if (committed !== null) {
+                          handleManualKpValueChange(committed);
+                        }
+                      }}
                       className="w-full min-h-[44px] px-3 rounded-xl border border-slate-300 dark:border-sky-700 bg-white dark:bg-[#132a47] text-sm font-extrabold text-slate-900 dark:text-white"
                     />
                   </div>

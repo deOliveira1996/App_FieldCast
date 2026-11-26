@@ -26,10 +26,12 @@ import {
   MessageSquareShare,
   Navigation,
   Pause,
+  Pencil,
   Play,
   PlusCircle,
   RefreshCw,
   Route,
+  Save,
   Share2,
   Smartphone,
   Square,
@@ -37,7 +39,10 @@ import {
   Trash2,
   Waves,
   Wind,
+  X,
 } from 'lucide-react';
+import { useLocale } from '../../context/LocaleContext';
+import { useUnits } from '../../context/UnitsContext';
 import { CollapsibleModule } from '../common/CollapsibleModule';
 import { FullscreenViewer } from '../common/FullscreenViewer';
 import { ModuleErrorBoundary } from '../common/ModuleErrorBoundary';
@@ -68,6 +73,10 @@ import {
   TARGET_PHOTO_MAX_KB,
   WEB_WAKE_LOCK_WARNING_MESSAGE,
 } from '../../services/platform';
+import {
+  shareDeliveredPayload,
+  type ExportDeliveryResult,
+} from '../../services/platform/ShareService';
 import type {
   ActiveCoordinates,
   ConditionSnapshot,
@@ -92,6 +101,18 @@ import {
   computeMagnusRelativeHumidityPct,
 } from '../../utils/qualityScores';
 import { safeAction } from '../../utils/safeAction';
+import {
+  convertPrecipitation,
+  convertTemperature,
+  convertWindSpeed,
+  formatPressure,
+  formatTemp,
+  formatWave,
+  formatWind,
+  getPrecipUnitLabel,
+  getTempUnitLabel,
+  getWindUnitLabel,
+} from '../../utils/units';
 
 export type FieldSubViewSelection = FieldSubViewId | 'all';
 
@@ -735,6 +756,8 @@ export const FieldDataTab: React.FC<FieldDataTabProps> = ({
   onToast,
   onErrorLog,
 }) => {
+  const { tr } = useLocale();
+  const { units } = useUnits();
   // Navegação modular de sub-vistas para eliminar página monolítica
   const [internalSubView, setInternalSubView] = useState<FieldSubViewSelection>(initialSubView);
   const resolvedSubView: FieldSubViewSelection = controlledSubView ?? internalSubView;
@@ -765,11 +788,21 @@ export const FieldDataTab: React.FC<FieldDataTabProps> = ({
   const [wpNote, setWpNote] = useState<string>('');
   const [wpPhoto, setWpPhoto] = useState<CompressedPhotoResult | null>(null);
   const [isCompressingPhoto, setIsCompressingPhoto] = useState<boolean>(false);
+  const [editingWaypointId, setEditingWaypointId] = useState<string | null>(null);
+  const [editWpName, setEditWpName] = useState<string>('');
+  const [editWpNote, setEditWpNote] = useState<string>('');
   const fileInputRef = useRef<HTMLInputElement | null>(null);
 
   // Estado da Central de Exportação e Armazenamento Offline
   const [selectedDataset, setSelectedDataset] = useState<ExportDatasetKind>('mission_bundle');
   const [offlineTilesCount, setOfflineTilesCount] = useState<number>(0);
+  const [lastFieldExportDelivery, setLastFieldExportDelivery] = useState<{
+    result: ExportDeliveryResult;
+    data: string | Uint8Array;
+    format: ExportFormat;
+    title: string;
+    origin: 'hub' | 'history';
+  } | null>(null);
 
   useEffect(() => {
     let active = true;
@@ -803,6 +836,9 @@ export const FieldDataTab: React.FC<FieldDataTabProps> = ({
 
   // Estado de Recorrência Automática (Logs Periódicos)
   const [recurrenceIntervalDays, setRecurrenceIntervalDays] = useState<7 | 14 | 30>(7);
+  const [editingRecurrenceId, setEditingRecurrenceId] = useState<string | null>(null);
+  const [editRecurrenceIntervalDays, setEditRecurrenceIntervalDays] = useState<7 | 14 | 30>(7);
+  const [editRecurrenceFormat, setEditRecurrenceFormat] = useState<ExportFormat>('csv');
   const [storedRecurrenceRules, setStoredRecurrenceRules] = useState<
     HistoricalRecurrenceRule[]
   >(externalRecurrenceRules ?? []);
@@ -1102,21 +1138,63 @@ export const FieldDataTab: React.FC<FieldDataTabProps> = ({
     );
   };
 
+  const handleStartEditWaypoint = (wp: Waypoint): void => {
+    setEditingWaypointId(wp.id);
+    setEditWpName(wp.name);
+    setEditWpNote(wp.note);
+  };
+
+  const handleCancelEditWaypoint = (): void => {
+    setEditingWaypointId(null);
+    setEditWpName('');
+    setEditWpNote('');
+  };
+
+  const handleSaveWaypointEdit = (wp: Waypoint): void => {
+    void safeAction(
+      async () => {
+        const updated: Waypoint = {
+          ...wp,
+          name: editWpName.trim() || wp.name,
+          note: editWpNote.trim(),
+        };
+        await saveWaypoint(updated);
+        setEditingWaypointId(null);
+        await refreshStoredFieldData();
+        onToast?.({
+          type: 'success',
+          title: tr('Waypoint atualizado', 'Waypoint updated'),
+          message: updated.name,
+        });
+      },
+      {
+        actionKey: `update_waypoint_${wp.id}`,
+        moduleName: 'FieldDataTab/Waypoints',
+        errorTitle: tr('Erro ao atualizar Waypoint', 'Failed to update Waypoint'),
+        onToast,
+        onErrorLog,
+      },
+    );
+  };
+
   const handleDeleteWaypoint = (waypointId: string, waypointName: string): void => {
     void safeAction(
       async () => {
         await deleteWaypoint(waypointId);
+        if (editingWaypointId === waypointId) {
+          setEditingWaypointId(null);
+        }
         await refreshStoredFieldData();
         onToast?.({
           type: 'info',
-          title: 'Waypoint excluído',
+          title: tr('Waypoint excluído', 'Waypoint deleted'),
           message: waypointName,
         });
       },
       {
         actionKey: `delete_waypoint_${waypointId}`,
         moduleName: 'FieldDataTab/Waypoints',
-        errorTitle: 'Erro ao excluir Waypoint',
+        errorTitle: tr('Erro ao excluir Waypoint', 'Failed to delete Waypoint'),
         onToast,
         onErrorLog,
       },
@@ -1203,25 +1281,65 @@ export const FieldDataTab: React.FC<FieldDataTabProps> = ({
                 };
         }
 
+        const title = `FieldCast — ${artifact.filename}`;
         const delivery = await exportAndDeliverFile({
           filename: artifact.filename,
-          content: artifact.content as unknown as string,
+          content: artifact.content,
           format: artifact.format,
-          title: `FieldCast — ${artifact.filename}`,
+          title,
           text: `Exportação ${format.toUpperCase()} gerada pelo FieldCast (${activeLocation.name})`,
           preferNativeShare: false,
         });
 
+        setLastFieldExportDelivery({
+          result: delivery,
+          data: artifact.content,
+          format: artifact.format,
+          title,
+          origin: 'hub',
+        });
+
         onToast?.({
           type: 'success',
-          title: `Exportado em ${format.toUpperCase()}`,
-          message: `${delivery.filename} (${(delivery.byteLength / 1024).toFixed(1)} KB)`,
+          title: tr(`Exportado em ${format.toUpperCase()}`, `Exported as ${format.toUpperCase()}`),
+          message: `${delivery.savedPathDisplay} (${(delivery.byteLength / 1024).toFixed(1)} KB)`,
         });
       },
       {
         actionKey: `export_${dataset}_${format}`,
         moduleName: 'FieldDataTab/ExportHub',
         errorTitle: `Falha ao exportar ${format.toUpperCase()}`,
+        onToast,
+        onErrorLog,
+      },
+    );
+  };
+
+  const handleShareFieldExport = (): void => {
+    if (!lastFieldExportDelivery) {
+      return;
+    }
+    void safeAction(
+      async () => {
+        const shared = await shareDeliveredPayload({
+          filename: lastFieldExportDelivery.result.filename,
+          format: lastFieldExportDelivery.format,
+          data: lastFieldExportDelivery.data,
+          title: lastFieldExportDelivery.title,
+          uri: lastFieldExportDelivery.result.uri,
+        });
+        onToast?.({
+          type: shared ? 'success' : 'info',
+          title: shared
+            ? tr('Folha de compartilhamento aberta', 'Share sheet opened')
+            : tr('Arquivo salvo localmente', 'File saved locally'),
+          message: lastFieldExportDelivery.result.savedPathDisplay,
+        });
+      },
+      {
+        actionKey: 'share_field_export_payload',
+        moduleName: 'FieldDataTab/ExportHub',
+        errorTitle: tr('Falha ao compartilhar arquivo', 'Failed to share file'),
         onToast,
         onErrorLog,
       },
@@ -1350,19 +1468,28 @@ export const FieldDataTab: React.FC<FieldDataTabProps> = ({
     void safeAction(
       async () => {
         const artifact = buildHistoricalArtifactContent(result, format);
+        const title = `FieldCast Histórico — ${result.locationName}`;
         const delivery = await exportAndDeliverFile({
           filename: artifact.filename,
-          content: artifact.content as unknown as string,
+          content: artifact.content,
           format: artifact.format,
-          title: `FieldCast Histórico — ${result.locationName}`,
+          title,
           text: `Série histórica ${result.locationName} (${result.startDateIso} a ${result.endDateIso}) — ${result.hours.length} registros.`,
           preferNativeShare: true,
         });
 
+        setLastFieldExportDelivery({
+          result: delivery,
+          data: artifact.content,
+          format: artifact.format,
+          title,
+          origin: 'history',
+        });
+
         onToast?.({
           type: 'success',
-          title: `Série histórica exportada (${format.toUpperCase()})`,
-          message: `${delivery.filename} (${(delivery.byteLength / 1024).toFixed(1)} KB)`,
+          title: tr(`Série histórica exportada (${format.toUpperCase()})`, `Historical series exported (${format.toUpperCase()})`),
+          message: `${delivery.savedPathDisplay} (${(delivery.byteLength / 1024).toFixed(1)} KB)`,
         });
       },
       {
@@ -1427,6 +1554,56 @@ export const FieldDataTab: React.FC<FieldDataTabProps> = ({
     );
   };
 
+  const handleStartEditRecurrence = (rule: HistoricalRecurrenceRule): void => {
+    setEditingRecurrenceId(rule.id);
+    setEditRecurrenceIntervalDays(rule.intervalDays);
+    setEditRecurrenceFormat(rule.format);
+  };
+
+  const handleCancelEditRecurrence = (): void => {
+    setEditingRecurrenceId(null);
+  };
+
+  const handleSaveRecurrenceEdit = (rule: HistoricalRecurrenceRule): void => {
+    void safeAction(
+      async () => {
+        const nextDue = new Date(
+          Date.now() + editRecurrenceIntervalDays * 86400 * 1000,
+        ).toISOString();
+        const updatedRule: HistoricalRecurrenceRule = {
+          ...rule,
+          intervalDays: editRecurrenceIntervalDays,
+          format: editRecurrenceFormat,
+          nextDueIso: nextDue,
+        };
+
+        if (onSaveRecurrenceRule) {
+          await onSaveRecurrenceRule(updatedRule);
+        } else if (typeof extendedDb.saveHistoricalRecurrenceRule === 'function') {
+          await extendedDb.saveHistoricalRecurrenceRule(updatedRule);
+        }
+
+        setStoredRecurrenceRules((prev) =>
+          prev.map((r) => (r.id === updatedRule.id ? updatedRule : r)),
+        );
+        setEditingRecurrenceId(null);
+
+        onToast?.({
+          type: 'success',
+          title: tr('Regra de recorrência atualizada', 'Recurrence rule updated'),
+          message: `${updatedRule.locationName} (${updatedRule.intervalDays}d · ${updatedRule.format.toUpperCase()})`,
+        });
+      },
+      {
+        actionKey: `update_recurrence_rule_${rule.id}`,
+        moduleName: 'FieldDataTab/HistoricalSeries',
+        errorTitle: tr('Erro ao atualizar regra de recorrência', 'Failed to update recurrence rule'),
+        onToast,
+        onErrorLog,
+      },
+    );
+  };
+
   const handleDeleteRecurrenceRuleClick = (ruleId: string): void => {
     void safeAction(
       async () => {
@@ -1436,9 +1613,12 @@ export const FieldDataTab: React.FC<FieldDataTabProps> = ({
           await extendedDb.deleteHistoricalRecurrenceRule(ruleId);
         }
         setStoredRecurrenceRules((prev) => prev.filter((r) => r.id !== ruleId));
+        if (editingRecurrenceId === ruleId) {
+          setEditingRecurrenceId(null);
+        }
         onToast?.({
           type: 'info',
-          title: 'Regra de recorrência removida',
+          title: tr('Regra de recorrência removida', 'Recurrence rule removed'),
         });
       },
       {
@@ -1459,18 +1639,26 @@ export const FieldDataTab: React.FC<FieldDataTabProps> = ({
           return;
         }
         const artifact = buildHistoricalArtifactContent(log.result, log.format);
-        await exportAndDeliverFile({
+        const title = `FieldCast Log Periódico — ${log.locationName}`;
+        const delivery = await exportAndDeliverFile({
           filename: artifact.filename,
-          content: artifact.content as unknown as string,
+          content: artifact.content,
           format: artifact.format,
-          title: `FieldCast Log Periódico — ${log.locationName}`,
+          title,
           text: `Log histórico periódico ${log.locationName} (${log.startDateIso} a ${log.endDateIso})`,
           preferNativeShare: true,
         });
+        setLastFieldExportDelivery({
+          result: delivery,
+          data: artifact.content,
+          format: artifact.format,
+          title,
+          origin: 'history',
+        });
         onToast?.({
           type: 'success',
-          title: 'Log histórico pronto para envio/download',
-          message: `${artifact.filename} (${log.recordCount} registros)`,
+          title: tr('Log histórico salvo', 'Historical log saved'),
+          message: `${delivery.savedPathDisplay} (${log.recordCount} registros)`,
         });
       },
       {
@@ -1538,6 +1726,10 @@ export const FieldDataTab: React.FC<FieldDataTabProps> = ({
       }
     });
 
+    const tempLabel = getTempUnitLabel(units.temperature);
+    const windLabel = getWindUnitLabel(units.wind);
+    const precipLabel = getPrecipUnitLabel(units.precipitation);
+
     return {
       backgroundColor: 'transparent',
       tooltip: {
@@ -1567,14 +1759,14 @@ export const FieldDataTab: React.FC<FieldDataTabProps> = ({
       yAxis: [
         {
           type: 'value',
-          name: '°C / km/h',
+          name: `${tempLabel} / ${windLabel}`,
           nameTextStyle: { color: textColor, fontSize: 10 },
           axisLabel: { color: textColor, fontSize: 10 },
           splitLine: { lineStyle: { color: gridColor } },
         },
         {
           type: 'value',
-          name: 'mm/h',
+          name: `${precipLabel}/h`,
           nameTextStyle: { color: textColor, fontSize: 10 },
           axisLabel: { color: textColor, fontSize: 10 },
           splitLine: { show: false },
@@ -1582,35 +1774,44 @@ export const FieldDataTab: React.FC<FieldDataTabProps> = ({
       ],
       series: [
         {
-          name: 'Temp 2m (°C)',
+          name: `${tr('Temp 2m', '2m Temp')} (${tempLabel})`,
           type: 'line',
           yAxisIndex: 0,
           smooth: true,
           symbol: 'none',
           lineStyle: { width: 2.3, color: '#f97316' },
           itemStyle: { color: '#f97316' },
-          data: chartTargetSeries.hours.map((h) => h.temperature2mC),
+          data: chartTargetSeries.hours.map((h) => {
+            const v = convertTemperature(h.temperature2mC, units.temperature);
+            return v !== null ? Number(v.toFixed(1)) : null;
+          }),
         },
         {
-          name: 'Vento 10m (km/h)',
+          name: `${tr('Vento 10m', '10m Wind')} (${windLabel})`,
           type: 'line',
           yAxisIndex: 0,
           smooth: true,
           symbol: 'none',
           lineStyle: { width: 1.9, type: 'dashed', color: '#0284c7' },
           itemStyle: { color: '#0284c7' },
-          data: chartTargetSeries.hours.map((h) => h.windSpeed10mKmh),
+          data: chartTargetSeries.hours.map((h) => {
+            const v = convertWindSpeed(h.windSpeed10mKmh, units.wind);
+            return v !== null ? Number(v.toFixed(1)) : null;
+          }),
         },
         {
-          name: 'Precipitação (mm)',
+          name: `${tr('Precipitação', 'Precipitation')} (${precipLabel})`,
           type: 'bar',
           yAxisIndex: 1,
           itemStyle: { color: 'rgba(14, 165, 233, 0.72)' },
-          data: chartTargetSeries.hours.map((h) => h.precipitationMm),
+          data: chartTargetSeries.hours.map((h) => {
+            const v = convertPrecipitation(h.precipitationMm, units.precipitation);
+            return v !== null ? Number(v.toFixed(units.precipitation === 'in' ? 3 : 2)) : null;
+          }),
         },
       ],
     };
-  }, [chartTargetSeries, isDark]);
+  }, [chartTargetSeries, isDark, tr, units.precipitation, units.temperature, units.wind]);
 
   const histEchartsRefProps = CAN_ATTACH_ECHARTS_REF
     ? {
@@ -1710,10 +1911,13 @@ export const FieldDataTab: React.FC<FieldDataTabProps> = ({
               </div>
               <div>
                 <h2 className="text-base md:text-lg font-bold text-slate-900 dark:text-white">
-                  Armazenamento Local & Missões (IndexedDB)
+                  {tr('Armazenamento Local & Missões (Offline)', 'Local Storage & Missions (Offline)')}
                 </h2>
                 <p className="text-xs text-slate-600 dark:text-slate-400">
-                  Persistência offline privada no dispositivo &bull; Zero envio para nuvem
+                  {tr(
+                    'Dados salvos com privacidade no aparelho • Sem envio para nuvem',
+                    'Data saved privately on device • No cloud upload',
+                  )}
                 </p>
               </div>
             </div>
@@ -2086,35 +2290,35 @@ export const FieldDataTab: React.FC<FieldDataTabProps> = ({
               <div className="flex items-center gap-1.5">
                 <Wind className="w-3.5 h-3.5 text-sky-500 shrink-0" />
                 <span>
-                  Vento:{' '}
+                  {tr('Vento:', 'Wind:')}{' '}
                   {currentSnapshot.windSpeed10mKmh !== null
-                    ? `${currentSnapshot.windSpeed10mKmh.toFixed(1)} km/h`
+                    ? formatWind(currentSnapshot.windSpeed10mKmh, units.wind, 1)
                     : 'N/D'}
                 </span>
               </div>
               <div>
-                Rajada 10m:{' '}
+                {tr('Rajada 10m:', '10m Gust:')}{' '}
                 {currentSnapshot.windGusts10mKmh !== null
-                  ? `${currentSnapshot.windGusts10mKmh.toFixed(1)} km/h`
+                  ? formatWind(currentSnapshot.windGusts10mKmh, units.wind, 1)
                   : 'N/D'}
               </div>
               <div>
-                Temp / Pressão:{' '}
+                {tr('Temp / Pressão:', 'Temp / Press:')}{' '}
                 {currentSnapshot.temperature2mC !== null
-                  ? `${currentSnapshot.temperature2mC.toFixed(1)}°C`
+                  ? formatTemp(currentSnapshot.temperature2mC, units.temperature, 1)
                   : 'N/D'}{' '}
                 /{' '}
                 {currentSnapshot.surfacePressureHpa !== null
-                  ? `${currentSnapshot.surfacePressureHpa.toFixed(0)} hPa`
+                  ? formatPressure(currentSnapshot.surfacePressureHpa, units.pressure)
                   : 'N/D'}
               </div>
               <div className="flex items-center gap-1.5">
                 <Waves className="w-3.5 h-3.5 text-teal-500 shrink-0" />
                 <span>
-                  Onda:{' '}
+                  {tr('Onda:', 'Wave:')}{' '}
                   {currentSnapshot.waveHeightM !== null
-                    ? `${currentSnapshot.waveHeightM.toFixed(2)} m`
-                    : 'Continental'}
+                    ? formatWave(currentSnapshot.waveHeightM, units.wave, 2)
+                    : tr('Continental', 'Inland')}
                 </span>
               </div>
             </div>
@@ -2217,17 +2421,22 @@ export const FieldDataTab: React.FC<FieldDataTabProps> = ({
 
             {savedWaypoints.length === 0 ? (
               <div className="rounded-xl border border-dashed border-slate-300 dark:border-slate-800 p-6 text-center text-xs sm:text-sm text-slate-500">
-                Nenhum waypoint registrado ainda. Crie pontos acima para salvar coordenadas, foto
-                comprimida e condições meteorológicas no IndexedDB.
+                {tr(
+                  'Nenhum waypoint registrado ainda. Crie pontos acima para salvar coordenadas, foto comprimida e condições do momento localmente no dispositivo.',
+                  'No waypoints recorded yet. Create points above to save coordinates, compressed photo, and current weather locally on your device.',
+                )}
               </div>
             ) : (
               <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-                {savedWaypoints.map((wp) => (
+                {savedWaypoints.map((wp) => {
+                  const isEditingWp = editingWaypointId === wp.id;
+                  return (
                   <article
                     key={wp.id}
+                    data-testid={`waypoint-card-${wp.id}`}
                     className="rounded-xl border border-slate-200 dark:border-slate-800 bg-slate-50/70 dark:bg-slate-950/50 p-3.5 flex gap-3.5 justify-between"
                   >
-                    <div className="flex gap-3 min-w-0">
+                    <div className="flex gap-3 min-w-0 flex-1">
                       {wp.photoDataUrl && (
                         <img
                           src={wp.photoDataUrl}
@@ -2235,54 +2444,111 @@ export const FieldDataTab: React.FC<FieldDataTabProps> = ({
                           className="w-16 h-16 rounded-lg object-cover border border-slate-300 dark:border-slate-700 shrink-0"
                         />
                       )}
-                      <div className="space-y-1 min-w-0">
-                        <div className="flex flex-wrap items-center gap-2">
-                          <h4 className="text-sm font-bold text-slate-900 dark:text-white truncate">
-                            {wp.name}
-                          </h4>
-                          <span className="text-[11px] font-mono text-slate-500">
-                            {wp.timestampUtcIso.slice(0, 16).replace('T', ' ')} UTC
-                          </span>
-                        </div>
-                        <div className="text-xs font-mono text-slate-600 dark:text-slate-400">
-                          {wp.latitude.toFixed(5)}, {wp.longitude.toFixed(5)}
-                          {wp.photoSizeKb ? ` • Foto ${wp.photoSizeKb.toFixed(0)} KB` : ''}
-                        </div>
-                        {wp.note && (
-                          <p className="text-xs text-slate-700 dark:text-slate-300 break-words">
-                            {wp.note}
-                          </p>
+                      <div className="space-y-1 min-w-0 flex-1">
+                        {isEditingWp ? (
+                          <div className="space-y-2">
+                            <input
+                              type="text"
+                              data-testid={`edit-waypoint-name-${wp.id}`}
+                              value={editWpName}
+                              onChange={(e) => setEditWpName(e.target.value)}
+                              placeholder={tr('Título do Waypoint', 'Waypoint title')}
+                              aria-label={tr('Editar título do Waypoint', 'Edit waypoint title')}
+                              className="w-full min-h-[40px] rounded-lg border border-sky-400 bg-white dark:bg-slate-900 px-2.5 py-1.5 text-xs font-bold text-slate-900 dark:text-white"
+                            />
+                            <input
+                              type="text"
+                              data-testid={`edit-waypoint-note-${wp.id}`}
+                              value={editWpNote}
+                              onChange={(e) => setEditWpNote(e.target.value)}
+                              placeholder={tr('Observação de campo', 'Field note')}
+                              aria-label={tr('Editar observação do Waypoint', 'Edit waypoint note')}
+                              className="w-full min-h-[40px] rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900 px-2.5 py-1.5 text-xs text-slate-900 dark:text-white"
+                            />
+                            <div className="flex flex-wrap items-center gap-1.5">
+                              <button
+                                type="button"
+                                data-testid={`save-waypoint-edit-${wp.id}`}
+                                onClick={() => handleSaveWaypointEdit(wp)}
+                                className="min-h-[38px] px-3 py-1 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-bold inline-flex items-center gap-1"
+                              >
+                                <Save className="w-3.5 h-3.5" aria-hidden="true" />
+                                {tr('Salvar', 'Save')}
+                              </button>
+                              <button
+                                type="button"
+                                data-testid={`cancel-waypoint-edit-${wp.id}`}
+                                onClick={handleCancelEditWaypoint}
+                                className="min-h-[38px] px-3 py-1 rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900 text-slate-700 dark:text-slate-200 text-xs font-semibold inline-flex items-center gap-1"
+                              >
+                                <X className="w-3.5 h-3.5" aria-hidden="true" />
+                                {tr('Cancelar', 'Cancel')}
+                              </button>
+                            </div>
+                          </div>
+                        ) : (
+                          <>
+                            <div className="flex flex-wrap items-center gap-2">
+                              <h4 className="text-sm font-bold text-slate-900 dark:text-white truncate">
+                                {wp.name}
+                              </h4>
+                              <span className="text-[11px] font-mono text-slate-500">
+                                {wp.timestampUtcIso.slice(0, 16).replace('T', ' ')} UTC
+                              </span>
+                            </div>
+                            <div className="text-xs font-mono text-slate-600 dark:text-slate-400">
+                              {wp.latitude.toFixed(5)}, {wp.longitude.toFixed(5)}
+                              {wp.photoSizeKb ? ` • Foto ${wp.photoSizeKb.toFixed(0)} KB` : ''}
+                            </div>
+                            {wp.note && (
+                              <p className="text-xs text-slate-700 dark:text-slate-300 break-words">
+                                {wp.note}
+                              </p>
+                            )}
+                          </>
                         )}
                         <div className="flex flex-wrap items-center gap-1.5 pt-1 text-[11px] font-mono text-slate-600 dark:text-slate-400">
                           {wp.conditions.windSpeed10mKmh !== null && (
                             <span className="px-2 py-0.5 rounded bg-sky-500/10 text-sky-700 dark:text-sky-300">
-                              Vento {wp.conditions.windSpeed10mKmh.toFixed(1)} km/h
+                              {tr('Vento', 'Wind')} {formatWind(wp.conditions.windSpeed10mKmh, units.wind, 1)}
                             </span>
                           )}
                           {wp.conditions.waveHeightM !== null && (
                             <span className="px-2 py-0.5 rounded bg-teal-500/10 text-teal-700 dark:text-teal-300">
-                              Onda {wp.conditions.waveHeightM.toFixed(2)} m
+                              {tr('Onda', 'Wave')} {formatWave(wp.conditions.waveHeightM, units.wave, 2)}
                             </span>
                           )}
                           {wp.conditions.temperature2mC !== null && (
                             <span className="px-2 py-0.5 rounded bg-slate-200 dark:bg-slate-800">
-                              {wp.conditions.temperature2mC.toFixed(1)}°C
+                              {formatTemp(wp.conditions.temperature2mC, units.temperature, 1)}
                             </span>
                           )}
                         </div>
                       </div>
                     </div>
 
-                    <button
-                      type="button"
-                      onClick={() => handleDeleteWaypoint(wp.id, wp.name)}
-                      aria-label={`Excluir waypoint ${wp.name}`}
-                      className="min-h-[44px] min-w-[44px] p-2.5 rounded-xl text-rose-600 dark:text-rose-400 hover:bg-rose-500/10 inline-flex items-center justify-center shrink-0 self-start"
-                    >
-                      <Trash2 className="w-4 h-4" aria-hidden="true" />
-                    </button>
+                    <div className="flex flex-col gap-1 shrink-0 self-start">
+                      <button
+                        type="button"
+                        data-testid={`edit-waypoint-${wp.id}`}
+                        onClick={() => handleStartEditWaypoint(wp)}
+                        aria-label={tr(`Editar waypoint ${wp.name}`, `Edit waypoint ${wp.name}`)}
+                        className="min-h-[44px] min-w-[44px] p-2.5 rounded-xl text-sky-600 dark:text-sky-400 hover:bg-sky-500/10 inline-flex items-center justify-center"
+                      >
+                        <Pencil className="w-4 h-4" aria-hidden="true" />
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => handleDeleteWaypoint(wp.id, wp.name)}
+                        aria-label={tr(`Excluir waypoint ${wp.name}`, `Delete waypoint ${wp.name}`)}
+                        className="min-h-[44px] min-w-[44px] p-2.5 rounded-xl text-rose-600 dark:text-rose-400 hover:bg-rose-500/10 inline-flex items-center justify-center"
+                      >
+                        <Trash2 className="w-4 h-4" aria-hidden="true" />
+                      </button>
+                    </div>
                   </article>
-                ))}
+                  );
+                })}
               </div>
             )}
           </div>
@@ -2359,7 +2625,7 @@ export const FieldDataTab: React.FC<FieldDataTabProps> = ({
                   <div className="text-sm font-bold text-slate-900 dark:text-white">
                     Exportar CSV
                   </div>
-                  <div className="text-[11px] text-slate-500">Excel / BOM UTF-8 (\uFEFF)</div>
+                  <div className="text-[11px] text-slate-500">Excel / Planilha UTF-8</div>
                 </div>
               </div>
               <Download className="w-4 h-4 text-slate-400" aria-hidden="true" />
@@ -2453,10 +2719,41 @@ export const FieldDataTab: React.FC<FieldDataTabProps> = ({
             </button>
           </div>
 
+          {lastFieldExportDelivery && lastFieldExportDelivery.origin === 'hub' && (
+            <div
+              role="status"
+              data-testid="report-export-saved-banner"
+              className="rounded-xl border border-emerald-300 dark:border-emerald-700/70 bg-emerald-50/90 dark:bg-emerald-950/40 px-4 py-3 flex flex-wrap items-center justify-between gap-3"
+            >
+              <div className="flex items-center gap-2.5 text-xs text-emerald-950 dark:text-emerald-100 min-w-0">
+                <CheckCircle2 className="w-4 h-4 text-emerald-600 dark:text-emerald-400 shrink-0" />
+                <div className="min-w-0">
+                  <div className="font-bold truncate">
+                    {tr('Arquivo salvo com sucesso:', 'File saved successfully:')}{' '}
+                    <span className="font-mono">{lastFieldExportDelivery.result.savedPathDisplay}</span>
+                  </div>
+                  <div className="text-[11px] opacity-85">
+                    {lastFieldExportDelivery.format.toUpperCase()} •{' '}
+                    {(lastFieldExportDelivery.result.byteLength / 1024).toFixed(1)} KB
+                  </div>
+                </div>
+              </div>
+              <button
+                type="button"
+                data-testid="share-exported-report-btn"
+                onClick={handleShareFieldExport}
+                className="min-h-[44px] px-4 py-2 rounded-xl text-xs font-bold inline-flex items-center gap-1.5 bg-emerald-600 hover:bg-emerald-500 text-white shadow-sm transition-colors"
+              >
+                <Share2 className="w-4 h-4" aria-hidden="true" />
+                <span>{tr('Compartilhar / Enviar', 'Share / Send')}</span>
+              </button>
+            </div>
+          )}
+
           <div className="flex flex-wrap items-center gap-2 text-xs text-slate-500 pt-1">
             <CheckCircle2 className="w-4 h-4 text-emerald-500 shrink-0" />
             <span>
-              Operação 100% local e offline. No Android nativo aciona o menu Capacitor Share; no
+              Operação 100% local e offline. No Android nativo aciona o menu de compartilhamento; no
               Desktop realiza download imediato do arquivo.
             </span>
           </div>
@@ -2546,6 +2843,37 @@ export const FieldDataTab: React.FC<FieldDataTabProps> = ({
               >
                 <Download className="w-4 h-4" aria-hidden="true" />
                 <span>Baixar / Compartilhar ({histExportFormat.toUpperCase()})</span>
+              </button>
+            </div>
+          )}
+
+          {lastFieldExportDelivery && lastFieldExportDelivery.origin === 'history' && (
+            <div
+              role="status"
+              data-testid="report-export-saved-banner"
+              className="rounded-xl border border-emerald-300 dark:border-emerald-700/70 bg-emerald-50/90 dark:bg-emerald-950/40 px-4 py-3 flex flex-wrap items-center justify-between gap-3"
+            >
+              <div className="flex items-center gap-2.5 text-xs text-emerald-950 dark:text-emerald-100 min-w-0">
+                <CheckCircle2 className="w-4 h-4 text-emerald-600 dark:text-emerald-400 shrink-0" />
+                <div className="min-w-0">
+                  <div className="font-bold truncate">
+                    {tr('Arquivo salvo com sucesso:', 'File saved successfully:')}{' '}
+                    <span className="font-mono">{lastFieldExportDelivery.result.savedPathDisplay}</span>
+                  </div>
+                  <div className="text-[11px] opacity-85">
+                    {lastFieldExportDelivery.format.toUpperCase()} •{' '}
+                    {(lastFieldExportDelivery.result.byteLength / 1024).toFixed(1)} KB
+                  </div>
+                </div>
+              </div>
+              <button
+                type="button"
+                data-testid="share-exported-report-btn"
+                onClick={handleShareFieldExport}
+                className="min-h-[44px] px-4 py-2 rounded-xl text-xs font-bold inline-flex items-center gap-1.5 bg-emerald-600 hover:bg-emerald-500 text-white shadow-sm transition-colors"
+              >
+                <Share2 className="w-4 h-4" aria-hidden="true" />
+                <span>{tr('Compartilhar / Enviar', 'Share / Send')}</span>
               </button>
             </div>
           )}
@@ -2881,33 +3209,104 @@ export const FieldDataTab: React.FC<FieldDataTabProps> = ({
                 {activeRecurrenceRules.length > 0 && (
                   <div className="space-y-1.5">
                     <div className="text-[11px] font-bold uppercase tracking-wider text-slate-500">
-                      Regras Configuradas ({activeRecurrenceRules.length})
+                      {tr('Regras Configuradas', 'Configured Rules')} ({activeRecurrenceRules.length})
                     </div>
                     <div className="divide-y divide-slate-200 dark:divide-slate-800 rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900">
-                      {activeRecurrenceRules.map((rule) => (
+                      {activeRecurrenceRules.map((rule) => {
+                        const isEditingRule = editingRecurrenceId === rule.id;
+                        return (
                         <div
                           key={rule.id}
+                          data-testid={`recurrence-rule-${rule.id}`}
                           className="p-2.5 flex flex-wrap items-center justify-between gap-2 text-xs"
                         >
-                          <div>
-                            <span className="font-bold text-slate-900 dark:text-white">
-                              {rule.locationName}
-                            </span>{' '}
-                            <span className="text-slate-500">
-                              • A cada {rule.intervalDays} dias • Formato{' '}
-                              {rule.format.toUpperCase()} • Modelos: {rule.models.join(', ')}
-                            </span>
-                          </div>
-                          <button
-                            type="button"
-                            onClick={() => handleDeleteRecurrenceRuleClick(rule.id)}
-                            aria-label={`Remover regra ${rule.locationName}`}
-                            className="min-h-[38px] min-w-[38px] p-1.5 rounded-lg text-rose-600 hover:bg-rose-500/10 inline-flex items-center justify-center"
-                          >
-                            <Trash2 className="w-4 h-4" aria-hidden="true" />
-                          </button>
+                          {isEditingRule ? (
+                            <div className="flex flex-wrap items-center gap-2 flex-1">
+                              <span className="font-bold text-slate-900 dark:text-white">
+                                {rule.locationName}
+                              </span>
+                              <select
+                                aria-label={tr('Intervalo da recorrência', 'Recurrence interval')}
+                                data-testid={`edit-recurrence-interval-${rule.id}`}
+                                value={editRecurrenceIntervalDays}
+                                onChange={(e) =>
+                                  setEditRecurrenceIntervalDays(Number(e.target.value) as 7 | 14 | 30)
+                                }
+                                className="min-h-[38px] rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-950 px-2 py-1 text-xs font-semibold"
+                              >
+                                <option value={7}>{tr('7 dias', '7 days')}</option>
+                                <option value={14}>{tr('14 dias', '14 days')}</option>
+                                <option value={30}>{tr('30 dias', '30 days')}</option>
+                              </select>
+                              <select
+                                aria-label={tr('Formato da recorrência', 'Recurrence format')}
+                                data-testid={`edit-recurrence-format-${rule.id}`}
+                                value={editRecurrenceFormat}
+                                onChange={(e) =>
+                                  setEditRecurrenceFormat(e.target.value as ExportFormat)
+                                }
+                                className="min-h-[38px] rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-950 px-2 py-1 text-xs font-semibold"
+                              >
+                                {HISTORICAL_EXPORT_FORMATS.map((fmt) => (
+                                  <option key={fmt.id} value={fmt.id}>
+                                    {fmt.label}
+                                  </option>
+                                ))}
+                              </select>
+                              <button
+                                type="button"
+                                data-testid={`save-recurrence-edit-${rule.id}`}
+                                onClick={() => handleSaveRecurrenceEdit(rule)}
+                                className="min-h-[38px] px-3 py-1 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white font-bold inline-flex items-center gap-1"
+                              >
+                                <Save className="w-3.5 h-3.5" aria-hidden="true" />
+                                {tr('Salvar', 'Save')}
+                              </button>
+                              <button
+                                type="button"
+                                data-testid={`cancel-recurrence-edit-${rule.id}`}
+                                onClick={handleCancelEditRecurrence}
+                                className="min-h-[38px] px-3 py-1 rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-950 text-slate-700 dark:text-slate-200 font-semibold inline-flex items-center gap-1"
+                              >
+                                <X className="w-3.5 h-3.5" aria-hidden="true" />
+                                {tr('Cancelar', 'Cancel')}
+                              </button>
+                            </div>
+                          ) : (
+                            <>
+                              <div>
+                                <span className="font-bold text-slate-900 dark:text-white">
+                                  {rule.locationName}
+                                </span>{' '}
+                                <span className="text-slate-500">
+                                  • {tr(`A cada ${rule.intervalDays} dias`, `Every ${rule.intervalDays} days`)} • {tr('Formato', 'Format')}{' '}
+                                  {rule.format.toUpperCase()} • {tr('Modelos:', 'Models:')} {rule.models.join(', ')}
+                                </span>
+                              </div>
+                              <div className="flex items-center gap-1">
+                                <button
+                                  type="button"
+                                  data-testid={`edit-recurrence-${rule.id}`}
+                                  onClick={() => handleStartEditRecurrence(rule)}
+                                  aria-label={tr(`Editar regra ${rule.locationName}`, `Edit rule ${rule.locationName}`)}
+                                  className="min-h-[38px] min-w-[38px] p-1.5 rounded-lg text-sky-600 hover:bg-sky-500/10 inline-flex items-center justify-center"
+                                >
+                                  <Pencil className="w-4 h-4" aria-hidden="true" />
+                                </button>
+                                <button
+                                  type="button"
+                                  onClick={() => handleDeleteRecurrenceRuleClick(rule.id)}
+                                  aria-label={tr(`Remover regra ${rule.locationName}`, `Remove rule ${rule.locationName}`)}
+                                  className="min-h-[38px] min-w-[38px] p-1.5 rounded-lg text-rose-600 hover:bg-rose-500/10 inline-flex items-center justify-center"
+                                >
+                                  <Trash2 className="w-4 h-4" aria-hidden="true" />
+                                </button>
+                              </div>
+                            </>
+                          )}
                         </div>
-                      ))}
+                        );
+                      })}
                     </div>
                   </div>
                 )}
