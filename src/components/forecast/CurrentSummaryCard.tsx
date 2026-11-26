@@ -20,6 +20,8 @@ import {
   Waves,
   Wind,
 } from 'lucide-react';
+import { useLocale } from '../../context/LocaleContext';
+import { useUnits } from '../../context/UnitsContext';
 import type { ActiveCoordinates } from '../../types/field';
 import type {
   ConfidenceBadgeColor,
@@ -35,10 +37,12 @@ import {
 import { safeAction } from '../../utils/safeAction';
 import {
   convertTemperature,
+  convertWaveHeight,
   convertWindSpeed,
   getTempUnitLabel,
+  getWaveUnitLabel,
+  type WaveHeightUnit,
 } from '../../utils/units';
-import { useUnits } from '../../context/UnitsContext';
 import { HelpPopover } from '../common/HelpPopover';
 import {
   COMPLETE_VISIBLE_PARAMS,
@@ -69,26 +73,30 @@ const CONFIDENCE_COLOR_STYLES: Record<
   {
     badge: string;
     dot: string;
-    label: string;
+    labelPt: string;
+    labelEn: string;
   }
 > = {
   green: {
     badge:
       'border-emerald-200 bg-emerald-50 text-emerald-800 dark:border-emerald-700/60 dark:bg-emerald-950/60 dark:text-emerald-200',
     dot: 'bg-emerald-500',
-    label: 'Alta Confiabilidade',
+    labelPt: 'Alta Confiabilidade',
+    labelEn: 'High Confidence',
   },
   amber: {
     badge:
       'border-amber-200 bg-amber-50 text-amber-900 dark:border-amber-700/60 dark:bg-amber-950/60 dark:text-amber-200',
     dot: 'bg-amber-500',
-    label: 'Confiabilidade Moderada',
+    labelPt: 'Confiabilidade Moderada',
+    labelEn: 'Moderate Confidence',
   },
   red: {
     badge:
       'border-rose-200 bg-rose-50 text-rose-900 dark:border-rose-700/60 dark:bg-rose-950/60 dark:text-rose-200',
     dot: 'bg-rose-500',
-    label: 'Divergência entre Modelos',
+    labelPt: 'Divergência entre Modelos',
+    labelEn: 'Model Divergence',
   },
 };
 
@@ -97,26 +105,30 @@ const SAFE_WINDOW_STYLES: Record<
   {
     container: string;
     dot: string;
-    title: string;
+    titlePt: string;
+    titleEn: string;
   }
 > = {
   green: {
     container:
       'border-emerald-200 bg-emerald-50/80 text-emerald-900 dark:border-emerald-700/60 dark:bg-emerald-950/50 dark:text-emerald-100',
     dot: 'bg-emerald-500',
-    title: 'Janela Favorável',
+    titlePt: 'Janela Favorável',
+    titleEn: 'Favorable Window',
   },
   amber: {
     container:
       'border-amber-200 bg-amber-50/80 text-amber-900 dark:border-amber-700/60 dark:bg-amber-950/50 dark:text-amber-100',
     dot: 'bg-amber-500',
-    title: 'Atenção Moderada',
+    titlePt: 'Atenção Moderada',
+    titleEn: 'Moderate Caution',
   },
   red: {
     container:
       'border-rose-200 bg-rose-50/80 text-rose-900 dark:border-rose-700/60 dark:bg-rose-950/50 dark:text-rose-100',
     dot: 'bg-rose-500',
-    title: 'Acima dos Limites',
+    titlePt: 'Acima dos Limites',
+    titleEn: 'Above Limits',
   },
 };
 
@@ -129,7 +141,19 @@ export function degreesToCardinalShort(deg: number | null | undefined): string {
   return directions[index] ?? 'N';
 }
 
-function formatTimeHHMM(isoString: string | null | undefined, timezone?: string): string {
+function formatAltLabel(meters: number, waveUnit: WaveHeightUnit): string {
+  if (waveUnit === 'ft') {
+    const converted = convertWaveHeight(meters, 'ft');
+    return `${converted !== null ? Math.round(converted) : Math.round(meters * 3.28084)}ft`;
+  }
+  return `${meters}m`;
+}
+
+function formatTimeHHMM(
+  isoString: string | null | undefined,
+  timezone?: string,
+  intlLocale = 'pt-BR',
+): string {
   if (!isoString) {
     return '—';
   }
@@ -138,9 +162,10 @@ function formatTimeHHMM(isoString: string | null | undefined, timezone?: string)
     if (Number.isNaN(d.getTime())) {
       return isoString.slice(11, 16) || '00:00';
     }
-    return d.toLocaleTimeString('pt-BR', {
+    return d.toLocaleTimeString(intlLocale, {
       hour: '2-digit',
       minute: '2-digit',
+      hour12: false,
       timeZone: timezone || undefined,
     });
   } catch {
@@ -148,18 +173,24 @@ function formatTimeHHMM(isoString: string | null | undefined, timezone?: string)
   }
 }
 
-function formatHourDateTimeLabel(hour: EnsembleHour | undefined, timezone?: string): string {
+function formatHourDateTimeLabel(
+  hour: EnsembleHour | undefined,
+  timezone?: string,
+  intlLocale = 'pt-BR',
+  nowLabel = 'Agora',
+): string {
   if (!hour) {
-    return 'Agora';
+    return nowLabel;
   }
   try {
     const d = new Date(hour.timestampUnix * 1000);
-    return d.toLocaleString('pt-BR', {
+    return d.toLocaleString(intlLocale, {
       weekday: 'long',
       day: '2-digit',
       month: '2-digit',
       hour: '2-digit',
       minute: '2-digit',
+      hour12: false,
       timeZone: timezone || undefined,
     });
   } catch {
@@ -188,6 +219,8 @@ export const CurrentSummaryCard: React.FC<CurrentSummaryCardProps> = ({
     formatPressureValue,
     formatPrecipValue,
   } = useUnits();
+  const { locale, tr } = useLocale();
+  const intlLocale = locale === 'en' ? 'en-US' : 'pt-BR';
   const [showConfidenceDetails, setShowConfidenceDetails] = useState(false);
   const [isSettingPrimary, setIsSettingPrimary] = useState(false);
 
@@ -214,7 +247,7 @@ export const CurrentSummaryCard: React.FC<CurrentSummaryCardProps> = ({
   const safeWindowStatus: SafeWindowStatus = currentHour?.safeWindow ?? 'green';
   const safeStyle = SAFE_WINDOW_STYLES[safeWindowStatus] ?? SAFE_WINDOW_STYLES.green;
 
-  const updatedAtHHMM = formatTimeHHMM(forecast.fetchedAtIso, forecast.timezone);
+  const updatedAtHHMM = formatTimeHHMM(forecast.fetchedAtIso, forecast.timezone, intlLocale);
 
   // Compute Day Min & Max Temperature across 24h window around selected hour
   const dayTempStats = useMemo(() => {
@@ -265,29 +298,34 @@ export const CurrentSummaryCard: React.FC<CurrentSummaryCardProps> = ({
     dayTempStats.max !== null
       ? Math.round(convertTemperature(dayTempStats.max, units.temperature) ?? dayTempStats.max)
       : null;
+  const demElevationConverted = convertWaveHeight(forecast.elevationDemM, units.wave);
+  const demElevationLabel = `${Math.round(demElevationConverted ?? forecast.elevationDemM)}${getWaveUnitLabel(units.wave)}`;
 
   return (
     <section
-      aria-label="Resumo Atual, Confiabilidade e Semáforo Operacional"
-      className="rounded-2xl border border-slate-200/90 dark:border-sky-800/70 bg-white dark:bg-[#132a47] shadow-sm p-5 sm:p-6 space-y-5"
+      aria-label={tr(
+        'Resumo Atual, Confiabilidade e Semáforo Operacional',
+        'Current Summary, Confidence and Safe Window',
+      )}
+      className="rounded-2xl border border-slate-200/90 dark:border-sky-800/70 bg-white dark:bg-[#132a47] shadow-sm p-3.5 sm:p-5 space-y-4"
     >
-      {/* Top Header Row: Climatempo Clean Title + Map Pin Button + Confidence & Semaphore Pills */}
-      <div className="flex flex-col xl:flex-row xl:items-start justify-between gap-4">
-        <div className="min-w-0 flex-1 space-y-2">
-          <div className="flex flex-wrap items-center gap-2.5">
+      {/* Top Header Row: Compact Mobile Fit + Map Pin Button + Confidence & Semaphore Pills */}
+      <div className="flex flex-col xl:flex-row xl:items-start justify-between gap-3">
+        <div className="min-w-0 flex-1 space-y-1.5">
+          <div className="flex flex-wrap items-center gap-2">
             {onOpenLocationsModal ? (
               <button
                 type="button"
                 onClick={onOpenLocationsModal}
-                className="group inline-flex items-center gap-2 text-left rounded-xl hover:text-[#0080cd] transition-colors focus:outline-none focus:ring-2 focus:ring-sky-500 min-w-0"
+                className="group inline-flex items-center gap-1.5 text-left rounded-xl hover:text-[#0080cd] transition-colors focus:outline-none focus:ring-2 focus:ring-sky-500 min-w-0"
               >
-                <h1 className="text-lg sm:text-xl font-extrabold text-slate-900 dark:text-white group-hover:text-[#0080cd] dark:group-hover:text-sky-300 leading-tight">
-                  Previsão para {activeLocation.name}
+                <h1 className="text-base sm:text-xl font-extrabold text-slate-900 dark:text-white group-hover:text-[#0080cd] dark:group-hover:text-sky-300 leading-tight">
+                  {tr(`Previsão para ${activeLocation.name}`, `Forecast for ${activeLocation.name}`)}
                 </h1>
               </button>
             ) : (
-              <h1 className="text-lg sm:text-xl font-extrabold text-slate-900 dark:text-white leading-tight">
-                Previsão para {activeLocation.name}
+              <h1 className="text-base sm:text-xl font-extrabold text-slate-900 dark:text-white leading-tight">
+                {tr(`Previsão para ${activeLocation.name}`, `Forecast for ${activeLocation.name}`)}
               </h1>
             )}
 
@@ -296,27 +334,31 @@ export const CurrentSummaryCard: React.FC<CurrentSummaryCardProps> = ({
                 type="button"
                 onClick={onToggleMiniMap}
                 aria-expanded={isMiniMapOpen}
-                className={`min-h-[34px] px-3 py-1 rounded-full text-xs font-bold inline-flex items-center gap-1.5 border shrink-0 transition-all ${
+                className={`min-h-[36px] px-2.5 py-1 rounded-full text-[11px] sm:text-xs font-bold inline-flex items-center gap-1 border shrink-0 transition-all ${
                   isMiniMapOpen
                     ? 'bg-[#0080cd] text-white border-[#0080cd] shadow-sm'
                     : 'bg-sky-50 dark:bg-sky-900/50 hover:bg-sky-100 text-[#0070b8] dark:text-sky-200 border-sky-200 dark:border-sky-700'
                 }`}
               >
                 <MapIcon className="w-3.5 h-3.5" aria-hidden="true" />
-                <span>{isMiniMapOpen ? 'Ocultar Mapa Pin' : 'Dar Pin no Mapa'}</span>
+                <span>
+                  {isMiniMapOpen
+                    ? tr('Ocultar Mapa Pin', 'Hide Pin Map')
+                    : tr('Dar Pin no Mapa', 'Pin on Map')}
+                </span>
               </button>
             )}
 
             {isPrimaryLocation ? (
               <span
                 data-testid="primary-location-badge"
-                className="min-h-[44px] px-3.5 py-1.5 rounded-full text-xs font-bold inline-flex items-center gap-1.5 border bg-emerald-50 dark:bg-emerald-950/60 text-emerald-800 dark:text-emerald-200 border-emerald-200 dark:border-emerald-700/70 shrink-0"
+                className="min-h-[44px] px-3 py-1 rounded-full text-[11px] sm:text-xs font-bold inline-flex items-center gap-1 border bg-emerald-50 dark:bg-emerald-950/60 text-emerald-800 dark:text-emerald-200 border-emerald-200 dark:border-emerald-700/70 shrink-0"
               >
                 <Star
                   className="w-3.5 h-3.5 fill-emerald-500 text-emerald-600 dark:text-emerald-300"
                   aria-hidden="true"
                 />
-                <span>Área Principal Salva</span>
+                <span>{tr('Área Principal Salva', 'Primary Area Saved')}</span>
               </span>
             ) : onSetPrimaryLocation ? (
               <button
@@ -336,20 +378,23 @@ export const CurrentSummaryCard: React.FC<CurrentSummaryCardProps> = ({
                     {
                       actionKey: 'set_primary_location_summary_card',
                       moduleName: 'CurrentSummaryCard',
-                      errorTitle: 'Não foi possível definir a área principal',
+                      errorTitle: tr(
+                        'Não foi possível definir a área principal',
+                        'Could not set primary area',
+                      ),
                       onLoadingChange: setIsSettingPrimary,
                     },
                   );
                 }}
-                className="min-h-[44px] min-w-[44px] px-3.5 py-1.5 rounded-full text-xs font-bold inline-flex items-center gap-1.5 border shrink-0 transition-all bg-white dark:bg-[#0d1f36] hover:bg-sky-50 dark:hover:bg-sky-900/50 text-[#0070b8] dark:text-sky-200 border-sky-200 dark:border-sky-700 disabled:opacity-60 focus:outline-none focus:ring-2 focus:ring-sky-500"
+                className="min-h-[44px] min-w-[44px] px-3 py-1 rounded-full text-[11px] sm:text-xs font-bold inline-flex items-center gap-1 border shrink-0 transition-all bg-white dark:bg-[#0d1f36] hover:bg-sky-50 dark:hover:bg-sky-900/50 text-[#0070b8] dark:text-sky-200 border-sky-200 dark:border-sky-700 disabled:opacity-60 focus:outline-none focus:ring-2 focus:ring-sky-500"
               >
                 <Star className="w-3.5 h-3.5 text-[#0080cd] dark:text-sky-400" aria-hidden="true" />
-                <span>Definir como Área Principal</span>
+                <span>{tr('Definir como Área Principal', 'Set as Primary Area')}</span>
               </button>
             ) : null}
           </div>
 
-          <div className="flex flex-wrap items-center gap-2 text-xs">
+          <div className="flex flex-wrap items-center gap-1.5 text-xs">
             <span
               data-testid="current-hour-badge"
               className={`inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full text-xs font-bold border ${
@@ -366,8 +411,8 @@ export const CurrentSummaryCard: React.FC<CurrentSummaryCardProps> = ({
               />
               <span>
                 {isCurrentLocalHour
-                  ? `Agora • ${displayedHourHHMM}`
-                  : `Visualizando ${displayedHourHHMM}`}
+                  ? `${tr('Agora', 'Now')} • ${displayedHourHHMM}`
+                  : `${tr('Visualizando', 'Viewing')} ${displayedHourHHMM}`}
               </span>
             </span>
 
@@ -378,46 +423,53 @@ export const CurrentSummaryCard: React.FC<CurrentSummaryCardProps> = ({
                 data-testid="reset-current-hour-btn"
                 className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-xs font-bold bg-amber-500 hover:bg-amber-600 text-slate-950 transition-colors"
               >
-                Voltar para Agora ({currentLocalHHMM})
+                {tr(`Voltar para Agora (${currentLocalHHMM})`, `Back to Now (${currentLocalHHMM})`)}
               </button>
             )}
 
-            <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-xs font-medium bg-slate-100 dark:bg-[#0d1f36] text-slate-600 dark:text-sky-200">
+            <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[11px] font-medium bg-slate-100 dark:bg-[#0d1f36] text-slate-600 dark:text-sky-200">
               <Mountain className="w-3.5 h-3.5 text-[#0080cd] dark:text-sky-400" aria-hidden="true" />
-              <span>Alt. {Math.round(forecast.elevationDemM)}m</span>
+              <span>Alt. {demElevationLabel}</span>
             </span>
 
-            <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-xs font-medium bg-slate-100 dark:bg-[#0d1f36] text-slate-500 dark:text-sky-200/80">
+            <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[11px] font-medium bg-slate-100 dark:bg-[#0d1f36] text-slate-500 dark:text-sky-200/80">
               <Clock className="w-3.5 h-3.5" aria-hidden="true" />
-              <span>Atualizado {updatedAtHHMM}</span>
+              <span>{tr('Atualizado', 'Updated')} {updatedAtHHMM}</span>
             </span>
           </div>
 
           <p className="text-xs text-slate-500 dark:text-sky-200/80 capitalize">
-            {formatHourDateTimeLabel(currentHour, forecast.timezone)} •{' '}
+            {formatHourDateTimeLabel(
+              currentHour,
+              forecast.timezone,
+              intlLocale,
+              tr('Agora', 'Now'),
+            )}{' '}
+            •{' '}
             <span className="normal-case">
               Lat {forecast.latitude.toFixed(3)}°, Lon {forecast.longitude.toFixed(3)}°
             </span>
           </p>
         </div>
 
-        {/* Right Status Pills: Unified-Height Single-Border Confidence + Safe Window + Limits */}
+        {/* Right Status Pills: Compact Unified-Height Confidence + Safe Window + Limits */}
         <div
           data-testid="summary-header-badges"
-          className="flex flex-wrap items-center gap-2.5 shrink-0"
+          className="flex flex-wrap items-center gap-2 shrink-0"
         >
           <div
-            className={`min-h-[42px] max-w-full inline-flex items-center rounded-xl border px-2 py-1 gap-1.5 ${confStyle.badge}`}
+            className={`min-h-[42px] max-w-full inline-flex items-center rounded-xl border px-1.5 py-0.5 gap-1 ${confStyle.badge}`}
           >
             <button
               type="button"
               onClick={() => setShowConfidenceDetails((prev) => !prev)}
               aria-expanded={showConfidenceDetails}
-              className="min-h-[34px] px-1.5 py-0.5 rounded-lg text-xs font-bold inline-flex items-center gap-2 transition-colors focus:outline-none focus:ring-2 focus:ring-sky-500 min-w-0"
+              className="min-h-[34px] px-1.5 py-0.5 rounded-lg text-xs font-bold inline-flex items-center gap-1.5 transition-colors focus:outline-none focus:ring-2 focus:ring-sky-500 min-w-0"
             >
               <span className={`w-2.5 h-2.5 rounded-full shrink-0 ${confStyle.dot}`} />
               <span className="sm:whitespace-nowrap text-left">
-                Confiança {Math.round(confidence.total)}% • {confStyle.label}
+                {tr('Confiança', 'Confidence')} {Math.round(confidence.total)}% •{' '}
+                {tr(confStyle.labelPt, confStyle.labelEn)}
               </span>
               {showConfidenceDetails ? (
                 <ChevronUp className="w-3.5 h-3.5 shrink-0" aria-hidden="true" />
@@ -429,71 +481,107 @@ export const CurrentSummaryCard: React.FC<CurrentSummaryCardProps> = ({
           </div>
 
           <div
-            className={`min-h-[42px] max-w-full inline-flex items-center rounded-xl border px-2 py-1 gap-1.5 ${safeStyle.container}`}
+            className={`min-h-[42px] max-w-full inline-flex items-center rounded-xl border px-1.5 py-0.5 gap-1 ${safeStyle.container}`}
           >
-            <div className="px-1.5 py-0.5 flex items-center gap-2 min-w-0">
+            <div className="px-1.5 py-0.5 flex items-center gap-1.5 min-w-0">
               <span className={`w-2.5 h-2.5 rounded-full shrink-0 ${safeStyle.dot}`} />
-              <span className="text-xs font-bold sm:whitespace-nowrap">{safeStyle.title}</span>
+              <span className="text-xs font-bold sm:whitespace-nowrap">
+                {tr(safeStyle.titlePt, safeStyle.titleEn)}
+              </span>
             </div>
 
             <button
               type="button"
               onClick={onOpenThresholdModal}
-              aria-label="Configurar limites do Semáforo de Janela Segura"
-              className="min-h-[34px] px-2.5 py-1 rounded-lg bg-white dark:bg-[#132a47] hover:bg-sky-50 text-slate-700 dark:text-sky-100 border border-slate-200 dark:border-sky-700 text-xs font-semibold inline-flex items-center gap-1 transition-colors shrink-0"
+              aria-label={tr(
+                'Configurar limites do Semáforo de Janela Segura',
+                'Configure Safe Window Thresholds',
+              )}
+              className="min-h-[34px] px-2 py-1 rounded-lg bg-white dark:bg-[#132a47] hover:bg-sky-50 text-slate-700 dark:text-sky-100 border border-slate-200 dark:border-sky-700 text-xs font-semibold inline-flex items-center gap-1 transition-colors shrink-0"
             >
               <Sliders className="w-3.5 h-3.5 text-[#0080cd] dark:text-sky-400" aria-hidden="true" />
-              <span>Limites</span>
+              <span>{tr('Limites', 'Limits')}</span>
             </button>
             <HelpPopover topic="safe_window" />
           </div>
         </div>
       </div>
 
-      {/* Expandable Confidence Score Breakdown */}
+      {/* Expandable Confidence Score Breakdown with Contextual HelpPopovers */}
       {showConfidenceDetails && (
         <div
           role="region"
-          aria-label="Detalhamento do Índice de Confiabilidade"
-          className="rounded-xl border border-sky-100 dark:border-sky-800 bg-[#f4f8fb] dark:bg-[#0d1f36] p-4 space-y-3"
+          aria-label={tr(
+            'Detalhamento do Índice de Confiabilidade',
+            'Confidence Index Breakdown',
+          )}
+          className="rounded-xl border border-sky-100 dark:border-sky-800 bg-[#f4f8fb] dark:bg-[#0d1f36] p-3.5 space-y-2.5"
         >
           <div className="flex flex-wrap items-center justify-between gap-2">
             <h3 className="text-xs font-bold text-slate-800 dark:text-sky-100 flex items-center gap-1.5">
               <ShieldCheck className="w-4 h-4 text-[#0080cd]" />
-              <span>Composição da Confiabilidade ({Math.round(confidence.total)}/100 pontos)</span>
+              <span>
+                {tr(
+                  `Composição da Confiabilidade (${Math.round(confidence.total)}/100 pontos)`,
+                  `Confidence Breakdown (${Math.round(confidence.total)}/100 pts)`,
+                )}
+              </span>
             </h3>
             {confidence.isContinental && (
               <span className="px-2.5 py-0.5 rounded-full text-[11px] font-semibold bg-sky-100 dark:bg-sky-900 text-[#0070b8] dark:text-sky-200">
-                Ponto Continental (pesos adaptados para terra firme)
+                {tr(
+                  'Ponto Continental (pesos adaptados para terra firme)',
+                  'Inland Point (land-adapted weights)',
+                )}
               </span>
             )}
           </div>
 
-          <div className="grid grid-cols-2 lg:grid-cols-4 gap-3 text-xs">
-            <div className="rounded-xl bg-white dark:bg-[#132a47] p-3 border border-slate-200/70 dark:border-sky-800">
-              <span className="text-slate-500 dark:text-sky-200/75 block">Acordo entre Modelos</span>
+          <div className="grid grid-cols-2 lg:grid-cols-4 gap-2.5 text-xs">
+            <div className="rounded-xl bg-white dark:bg-[#132a47] p-2.5 border border-slate-200/70 dark:border-sky-800">
+              <div className="flex items-center justify-between gap-1">
+                <span className="text-slate-500 dark:text-sky-200/75 text-[11px]">
+                  {tr('Concordância', 'Agreement')}
+                </span>
+                <HelpPopover topic="confidence_agreement" align="left" />
+              </div>
               <span className="text-sm font-extrabold text-slate-900 dark:text-white">
                 {confidence.breakdown.modelAgreement.toFixed(1)} / 50 pts
               </span>
             </div>
-            <div className="rounded-xl bg-white dark:bg-[#132a47] p-3 border border-slate-200/70 dark:border-sky-800">
-              <span className="text-slate-500 dark:text-sky-200/75 block">Qualidade das Fontes</span>
+            <div className="rounded-xl bg-white dark:bg-[#132a47] p-2.5 border border-slate-200/70 dark:border-sky-800">
+              <div className="flex items-center justify-between gap-1">
+                <span className="text-slate-500 dark:text-sky-200/75 text-[11px]">
+                  {tr('Integridade', 'Integrity')}
+                </span>
+                <HelpPopover topic="confidence_integrity" />
+              </div>
               <span className="text-sm font-extrabold text-slate-900 dark:text-white">
                 {confidence.breakdown.sourceIntegrity.toFixed(1)} / 30 pts
               </span>
             </div>
-            <div className="rounded-xl bg-white dark:bg-[#132a47] p-3 border border-slate-200/70 dark:border-sky-800">
-              <span className="text-slate-500 dark:text-sky-200/75 block">Proximidade Temporal</span>
+            <div className="rounded-xl bg-white dark:bg-[#132a47] p-2.5 border border-slate-200/70 dark:border-sky-800">
+              <div className="flex items-center justify-between gap-1">
+                <span className="text-slate-500 dark:text-sky-200/75 text-[11px]">
+                  {tr('Proximidade', 'Proximity')}
+                </span>
+                <HelpPopover topic="confidence_proximity" align="left" />
+              </div>
               <span className="text-sm font-extrabold text-slate-900 dark:text-white">
                 {confidence.breakdown.timeHorizon.toFixed(1)} / 20 pts
               </span>
             </div>
-            <div className="rounded-xl bg-white dark:bg-[#132a47] p-3 border border-slate-200/70 dark:border-sky-800">
-              <span className="text-slate-500 dark:text-sky-200/75 block">Gradiente Vertical</span>
+            <div className="rounded-xl bg-white dark:bg-[#132a47] p-2.5 border border-slate-200/70 dark:border-sky-800">
+              <div className="flex items-center justify-between gap-1">
+                <span className="text-slate-500 dark:text-sky-200/75 text-[11px]">
+                  {tr('Gradiente Vertical', 'Vertical Shear')}
+                </span>
+                <HelpPopover topic="confidence_vertical" />
+              </div>
               <span className="text-sm font-extrabold text-emerald-600 dark:text-emerald-400">
                 {confidence.breakdown.shearPenalty > 0
                   ? `-${confidence.breakdown.shearPenalty.toFixed(1)} pts`
-                  : 'Estável'}
+                  : tr('Estável', 'Stable')}
               </span>
             </div>
           </div>
@@ -502,10 +590,10 @@ export const CurrentSummaryCard: React.FC<CurrentSummaryCardProps> = ({
 
       {/* Climatempo-Style Clean Ice-Blue Summary Grid (#f4f8fb) with Padded Responsive Cards */}
       {currentHour && (
-        <div className="rounded-2xl bg-[#f4f8fb] dark:bg-[#0d1f36]/85 border border-sky-100/80 dark:border-sky-800/60 p-3.5 sm:p-4">
+        <div className="rounded-2xl bg-[#f4f8fb] dark:bg-[#0d1f36]/85 border border-sky-100/80 dark:border-sky-800/60 p-3 sm:p-4">
           <div
             data-testid="summary-metrics-grid"
-            className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-3 gap-3.5"
+            className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-3 gap-3"
           >
             {/* Block 1: Temperatura (Min in Blue, Max in Orange) + Sensação/Orvalho */}
             {visibleParams.tempVisibility && (
@@ -517,14 +605,14 @@ export const CurrentSummaryCard: React.FC<CurrentSummaryCardProps> = ({
                   <Thermometer className="w-5 h-5 text-[#0080cd] dark:text-sky-400 shrink-0" />
                   <div className="min-w-0">
                     <span className="text-xs font-semibold text-slate-600 dark:text-sky-200 block">
-                      Temperatura
+                      {tr('Temperatura', 'Temperature')}
                     </span>
                     <span className="text-[11px] text-slate-500 dark:text-sky-300/75 block">
-                      Agora:{' '}
+                      {tr('Agora:', 'Now:')}{' '}
                       <strong className="text-slate-800 dark:text-white">
                         {formatTempValue(currentHour.temperature2mC.mean, 1)}
                       </strong>{' '}
-                      • Orvalho{' '}
+                      • {tr('Orvalho', 'Dew')}{' '}
                       {formatTempValue(currentHour.dewPoint2mC.mean, 0)}
                     </span>
                   </div>
@@ -532,14 +620,20 @@ export const CurrentSummaryCard: React.FC<CurrentSummaryCardProps> = ({
 
                 <div className="flex items-center gap-3 text-base font-extrabold shrink-0">
                   <span
-                    title={`Mínima do dia (${getTempUnitLabel(units.temperature)})`}
+                    title={tr(
+                      `Mínima do dia (${getTempUnitLabel(units.temperature)})`,
+                      `Day low (${getTempUnitLabel(units.temperature)})`,
+                    )}
                     className="inline-flex items-center gap-0.5 text-[#0080cd] dark:text-sky-400"
                   >
                     <ArrowDown className="w-3.5 h-3.5" />
                     {dayTempMinDisplay !== null ? `${dayTempMinDisplay}°` : '—'}
                   </span>
                   <span
-                    title={`Máxima do dia (${getTempUnitLabel(units.temperature)})`}
+                    title={tr(
+                      `Máxima do dia (${getTempUnitLabel(units.temperature)})`,
+                      `Day high (${getTempUnitLabel(units.temperature)})`,
+                    )}
                     className="inline-flex items-center gap-0.5 text-orange-500 dark:text-orange-400"
                   >
                     <ArrowUp className="w-3.5 h-3.5" />
@@ -549,7 +643,7 @@ export const CurrentSummaryCard: React.FC<CurrentSummaryCardProps> = ({
               </div>
             )}
 
-            {/* Block 2: Chuva (mm + % de chance) */}
+            {/* Block 2: Chuva (mm/in + % de chance) */}
             {visibleParams.rainPressure && (
               <div
                 data-testid="summary-card-rain"
@@ -559,7 +653,7 @@ export const CurrentSummaryCard: React.FC<CurrentSummaryCardProps> = ({
                   <CloudRain className="w-5 h-5 text-[#0080cd] dark:text-sky-400 shrink-0" />
                   <div className="min-w-0">
                     <span className="text-xs font-semibold text-slate-600 dark:text-sky-200 block">
-                      Chuva
+                      {tr('Chuva', 'Rain')}
                     </span>
                     <div className="flex items-center gap-1.5 mt-1">
                       <Droplets className="w-3 h-3 text-sky-500 shrink-0" />
@@ -604,12 +698,14 @@ export const CurrentSummaryCard: React.FC<CurrentSummaryCardProps> = ({
                   <Wind className="w-5 h-5 text-[#0080cd] dark:text-sky-400 shrink-0" />
                   <div className="min-w-0">
                     <span className="text-xs font-semibold text-slate-600 dark:text-sky-200 block">
-                      Vento &amp; Rajada
+                      {tr('Vento & Rajada', 'Wind & Gusts')}
                     </span>
                     <span className="text-[11px] text-slate-500 dark:text-sky-300/75 block">
-                      Rajada de vento:{' '}
+                      {tr('Rajada de vento:', 'Wind gust:')}{' '}
                       <strong className="text-slate-800 dark:text-sky-100">
-                        {gustSpd !== null ? `${windCardDir} - ${gustSpd} ${windLabel}` : '—'}
+                        {gustSpd !== null
+                          ? `${windCardDir} - ${units.wind === 'ms' ? gustSpdRaw!.toFixed(1) : gustSpd} ${windLabel}`
+                          : '—'}
                       </strong>
                     </span>
                   </div>
@@ -617,7 +713,9 @@ export const CurrentSummaryCard: React.FC<CurrentSummaryCardProps> = ({
 
                 <div className="text-right shrink-0">
                   <span className="text-sm font-extrabold text-slate-900 dark:text-white whitespace-nowrap">
-                    {windSpd !== null ? `← ${windCardDir} - ${windSpd} ${windLabel}` : '—'}
+                    {windSpd !== null
+                      ? `← ${windCardDir} - ${units.wind === 'ms' ? windSpdRaw!.toFixed(1) : windSpd} ${windLabel}`
+                      : '—'}
                   </span>
                 </div>
               </div>
@@ -632,9 +730,12 @@ export const CurrentSummaryCard: React.FC<CurrentSummaryCardProps> = ({
                 <div className="flex items-center gap-2.5 min-w-0">
                   <Waves className="w-5 h-5 text-[#0080cd] dark:text-sky-400 shrink-0" />
                   <div className="min-w-0">
-                    <span className="text-xs font-semibold text-slate-600 dark:text-sky-200 block">
-                      Ondas &amp; Swell
-                    </span>
+                    <div className="flex items-center gap-1">
+                      <span className="text-xs font-semibold text-slate-600 dark:text-sky-200">
+                        {tr('Ondas & Swell', 'Waves & Swell')}
+                      </span>
+                      <HelpPopover topic="waves_swell" align="left" />
+                    </div>
                     <span className="text-[11px] text-slate-500 dark:text-sky-300/75 block">
                       {forecast.marineAvailable && currentHour.marine
                         ? `Swell: ${
@@ -647,7 +748,7 @@ export const CurrentSummaryCard: React.FC<CurrentSummaryCardProps> = ({
                                 }s)`
                               : '—'
                           }`
-                        : 'Interior / Terra Firme'}
+                        : tr('Interior / Terra Firme', 'Inland / Landlocked')}
                     </span>
                   </div>
                 </div>
@@ -667,7 +768,7 @@ export const CurrentSummaryCard: React.FC<CurrentSummaryCardProps> = ({
                     </span>
                   ) : (
                     <span className="px-2 py-0.5 rounded-full text-[11px] font-semibold bg-sky-100 dark:bg-sky-900 text-[#0070b8] dark:text-sky-200">
-                      Continental
+                      {tr('Continental', 'Inland')}
                     </span>
                   )}
                 </div>
@@ -684,14 +785,14 @@ export const CurrentSummaryCard: React.FC<CurrentSummaryCardProps> = ({
                   <Gauge className="w-5 h-5 text-[#0080cd] dark:text-sky-400 shrink-0" />
                   <div className="min-w-0">
                     <span className="text-xs font-semibold text-slate-600 dark:text-sky-200 block">
-                      Pressão &amp; Visibilidade
+                      {tr('Pressão & Visibilidade', 'Pressure & Visibility')}
                     </span>
                     <span className="text-[11px] text-slate-500 dark:text-sky-300/75 block">
-                      Visibilidade:{' '}
+                      {tr('Visibilidade:', 'Visibility:')}{' '}
                       <strong className="text-slate-700 dark:text-sky-100">
                         {currentHour.visibilityM.mean !== null
                           ? `${(currentHour.visibilityM.mean / 1000).toFixed(1)} km`
-                          : 'Boa'}
+                          : tr('Boa', 'Good')}
                       </strong>
                     </span>
                   </div>
@@ -705,7 +806,7 @@ export const CurrentSummaryCard: React.FC<CurrentSummaryCardProps> = ({
               </div>
             )}
 
-            {/* Block 6: Sol & Lua (Climatempo style) */}
+            {/* Block 6: Sol & Lua */}
             {visibleParams.ephemeris && activeEphemeris && (
               <div
                 data-testid="summary-card-ephemeris"
@@ -715,7 +816,7 @@ export const CurrentSummaryCard: React.FC<CurrentSummaryCardProps> = ({
                   <Sun className="w-5 h-5 text-amber-500 shrink-0" />
                   <div className="min-w-0">
                     <span className="text-xs font-semibold text-slate-600 dark:text-sky-200 block">
-                      Sol &amp; Lua
+                      {tr('Sol & Lua', 'Sun & Moon')}
                     </span>
                     <span className="text-[11px] text-slate-500 dark:text-sky-300/75 inline-flex items-center gap-1 flex-wrap">
                       <Moon className="w-3 h-3 text-sky-500 shrink-0" />
@@ -729,8 +830,9 @@ export const CurrentSummaryCard: React.FC<CurrentSummaryCardProps> = ({
 
                 <div className="text-right shrink-0">
                   <span className="text-xs sm:text-sm font-extrabold text-slate-900 dark:text-white whitespace-nowrap">
-                    {formatTimeHHMM(activeEphemeris.sunriseIso, forecast.timezone)}h às{' '}
-                    {formatTimeHHMM(activeEphemeris.sunsetIso, forecast.timezone)}h
+                    {formatTimeHHMM(activeEphemeris.sunriseIso, forecast.timezone, intlLocale)}h{' '}
+                    {tr('às', 'to')}{' '}
+                    {formatTimeHHMM(activeEphemeris.sunsetIso, forecast.timezone, intlLocale)}h
                   </span>
                 </div>
               </div>
@@ -746,42 +848,48 @@ export const CurrentSummaryCard: React.FC<CurrentSummaryCardProps> = ({
                   <Compass className="w-5 h-5 text-[#0080cd] dark:text-sky-400 shrink-0" />
                   <div className="min-w-0">
                     <span className="text-xs font-semibold text-slate-600 dark:text-sky-200 block">
-                      Perfil Vertical de Vento (80m / 100m / 120m)
+                      {tr(
+                        `Perfil Vertical de Vento (${formatAltLabel(80, units.wave)} / ${formatAltLabel(100, units.wave)} / ${formatAltLabel(120, units.wave)})`,
+                        `Vertical Wind Profile (${formatAltLabel(80, units.wave)} / ${formatAltLabel(100, units.wave)} / ${formatAltLabel(120, units.wave)})`,
+                      )}
                     </span>
                     <span className="text-[11px] text-slate-500 dark:text-sky-300/75 block">
-                      Expoente de cisalhamento α ={' '}
+                      {tr('Expoente de cisalhamento α =', 'Wind shear exponent α =')}{' '}
                       {currentHour.verticalProfile.alpha !== null
                         ? currentHour.verticalProfile.alpha.toFixed(3)
-                        : 'Normal'}
+                        : tr('Normal', 'Normal')}
                     </span>
                   </div>
                 </div>
 
                 <div className="flex flex-wrap items-center gap-4 text-xs font-bold text-slate-800 dark:text-white shrink-0">
                   <span>
-                    80m:{' '}
+                    {formatAltLabel(80, units.wave)}:{' '}
                     <strong className="text-[#0080cd] dark:text-sky-300">
                       {(() => {
                         const v = convertWindSpeed(currentHour.windSpeed80m.mean, units.wind);
-                        return v !== null ? `${Math.round(v)} ${windLabel}` : '—';
+                        if (v === null) return '—';
+                        return `${units.wind === 'ms' ? v.toFixed(1) : Math.round(v)} ${windLabel}`;
                       })()}
                     </strong>
                   </span>
                   <span>
-                    100m:{' '}
+                    {formatAltLabel(100, units.wave)}:{' '}
                     <strong className="text-[#0080cd] dark:text-sky-300">
                       {(() => {
                         const v = convertWindSpeed(currentHour.windSpeed100m.mean, units.wind);
-                        return v !== null ? `${Math.round(v)} ${windLabel}` : '—';
+                        if (v === null) return '—';
+                        return `${units.wind === 'ms' ? v.toFixed(1) : Math.round(v)} ${windLabel}`;
                       })()}
                     </strong>
                   </span>
                   <span>
-                    120m:{' '}
+                    {formatAltLabel(120, units.wave)}:{' '}
                     <strong className="text-[#0080cd] dark:text-sky-300">
                       {(() => {
                         const v = convertWindSpeed(currentHour.windSpeed120m.mean, units.wind);
-                        return v !== null ? `${Math.round(v)} ${windLabel}` : '—';
+                        if (v === null) return '—';
+                        return `${units.wind === 'ms' ? v.toFixed(1) : Math.round(v)} ${windLabel}`;
                       })()}
                     </strong>
                   </span>
