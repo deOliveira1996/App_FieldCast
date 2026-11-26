@@ -14,9 +14,11 @@ export interface WeatherModelOverlayLayerProps {
   modelMode: MapModelMode;
   points: ReadonlyArray<WeatherGridPoint>;
   hourTimestamp?: number | null;
+  selectedHourIdx?: number;
   opacity?: number;
   animateFlow?: boolean;
   showWindStreamlines?: boolean;
+  temperatureUnit?: 'c' | 'f';
   onLayerError?: (error: Error) => void;
 }
 
@@ -97,9 +99,11 @@ export const WeatherModelOverlayLayer: React.FC<WeatherModelOverlayLayerProps> =
   modelMode,
   points,
   hourTimestamp = null,
+  selectedHourIdx,
   opacity = 0.72,
   animateFlow = true,
   showWindStreamlines,
+  temperatureUnit = 'c',
   onLayerError,
 }) => {
   const map = useMap();
@@ -110,15 +114,33 @@ export const WeatherModelOverlayLayer: React.FC<WeatherModelOverlayLayerProps> =
 
   const shouldRenderStreamlines =
     showWindStreamlines ?? (layerId === 'wind' || layerId === 'waves');
+  const isVisibleLayer = layerId !== 'none' || shouldRenderStreamlines;
+
+  const layerIdRef = useRef(layerId);
+  layerIdRef.current = layerId;
+  const modelModeRef = useRef(modelMode);
+  modelModeRef.current = modelMode;
+  const pointsRef = useRef(points);
+  pointsRef.current = points;
+  const opacityRef = useRef(opacity);
+  opacityRef.current = opacity;
+  const animateFlowRef = useRef(animateFlow);
+  animateFlowRef.current = animateFlow;
+  const shouldRenderStreamlinesRef = useRef(shouldRenderStreamlines);
+  shouldRenderStreamlinesRef.current = shouldRenderStreamlines;
+  const temperatureUnitRef = useRef(temperatureUnit);
+  temperatureUnitRef.current = temperatureUnit;
+
+  const syncAndRedrawRef = useRef<(() => void) | null>(null);
 
   useEffect(() => {
-    const isVisibleLayer = layerId !== 'none' || shouldRenderStreamlines;
     if (!isVisibleLayer) {
       if (canvasRef.current && canvasRef.current.parentNode) {
         canvasRef.current.parentNode.removeChild(canvasRef.current);
         canvasRef.current = null;
       }
       offscreenCanvasRef.current = null;
+      syncAndRedrawRef.current = null;
       return;
     }
 
@@ -132,21 +154,39 @@ export const WeatherModelOverlayLayer: React.FC<WeatherModelOverlayLayerProps> =
       return;
     }
 
+    const mapAny = map as unknown as {
+      getPane?: (name: string) => HTMLElement | undefined;
+      createPane?: (name: string) => HTMLElement;
+      containerPointToLayerPoint?: (point: L.PointExpression) => L.Point;
+    };
+
+    const pane =
+      typeof mapAny.getPane === 'function'
+        ? (mapAny.getPane('weatherGridPane') ?? mapAny.createPane?.('weatherGridPane') ?? null)
+        : null;
+
+    if (pane) {
+      pane.style.zIndex = '465';
+      pane.style.pointerEvents = 'none';
+    }
+
+    const mountTarget = pane ?? container;
+
     const canvas = document.createElement('canvas');
     canvas.dataset.testid = 'weather-model-canvas';
-    canvas.dataset.weatherModel = modelMode;
-    canvas.dataset.weatherLayer = layerId;
+    canvas.dataset.weatherModel = modelModeRef.current;
+    canvas.dataset.weatherLayer = layerIdRef.current;
     canvas.dataset.offscreenCached = 'true';
     canvas.dataset.staticRenderCount = '0';
+    canvas.dataset.paneZindex = '465';
     canvas.style.position = 'absolute';
-    canvas.style.inset = '0';
-    canvas.style.width = '100%';
-    canvas.style.height = '100%';
+    canvas.style.left = '0px';
+    canvas.style.top = '0px';
     canvas.style.pointerEvents = 'none';
-    canvas.style.zIndex = '220';
+    canvas.style.zIndex = '465';
     canvas.style.transition = 'opacity 220ms ease-out';
     canvasRef.current = canvas;
-    container.appendChild(canvas);
+    mountTarget.appendChild(canvas);
 
     const offscreenCanvas = document.createElement('canvas');
     offscreenCanvasRef.current = offscreenCanvas;
@@ -193,14 +233,42 @@ export const WeatherModelOverlayLayer: React.FC<WeatherModelOverlayLayerProps> =
       }
     };
 
+    const syncCanvasPosition = () => {
+      if (pane && typeof mapAny.containerPointToLayerPoint === 'function') {
+        try {
+          const topLeft = mapAny.containerPointToLayerPoint([0, 0]);
+          if (L.DomUtil && typeof L.DomUtil.setPosition === 'function') {
+            L.DomUtil.setPosition(canvas, topLeft);
+          } else {
+            canvas.style.transform = `translate3d(${topLeft.x}px, ${topLeft.y}px, 0)`;
+          }
+        } catch {
+          // Safe fallback when mocked in unit tests
+        }
+      }
+    };
+
     const rebuildOffscreenStaticField = (): { width: number; height: number } => {
       try {
+        syncCanvasPosition();
+
+        const currentLayerId = layerIdRef.current;
+        const currentPoints = pointsRef.current;
+        const currentOpacity = opacityRef.current;
+        const currentTempUnit = temperatureUnitRef.current;
+
+        canvas.dataset.weatherModel = modelModeRef.current;
+        canvas.dataset.weatherLayer = currentLayerId;
+
         const size =
           typeof map.getSize === 'function'
             ? map.getSize()
             : L.point(container.clientWidth || 640, container.clientHeight || 360);
         const width = Math.max(1, size.x || container.clientWidth || 640);
         const height = Math.max(1, size.y || container.clientHeight || 360);
+
+        canvas.style.width = `${width}px`;
+        canvas.style.height = `${height}px`;
 
         if (canvas.width !== width || canvas.height !== height) {
           canvas.width = width;
@@ -217,7 +285,7 @@ export const WeatherModelOverlayLayer: React.FC<WeatherModelOverlayLayerProps> =
         staticRenderCount += 1;
         canvas.dataset.staticRenderCount = String(staticRenderCount);
 
-        if (!ctx || !offscreenCtx || points.length === 0) {
+        if (!ctx || !offscreenCtx || currentPoints.length === 0) {
           if (ctx) {
             ctx.clearRect(0, 0, width, height);
           }
@@ -250,25 +318,25 @@ export const WeatherModelOverlayLayer: React.FC<WeatherModelOverlayLayerProps> =
               continue;
             }
 
-            if (layerId !== 'none') {
+            if (currentLayerId !== 'none') {
               const sample = interpolateGridValueAtPoint(
-                points,
+                currentPoints,
                 latLng.lat,
                 latLng.lng,
-                layerId,
+                currentLayerId,
               );
-              const [r, g, b, a] = getWeatherOverlayRgba(layerId, sample.value);
+              const [r, g, b, a] = getWeatherOverlayRgba(currentLayerId, sample.value);
               if (a > 0) {
-                const finalAlpha = Math.max(0.03, Math.min(0.68, (a / 255) * opacity));
+                const finalAlpha = Math.max(0.03, Math.min(0.68, (a / 255) * currentOpacity));
                 offscreenCtx.fillStyle = `rgba(${r}, ${g}, ${b}, ${finalAlpha.toFixed(3)})`;
                 offscreenCtx.fillRect(x, y, cellSize + 1, cellSize + 1);
               }
             }
 
             const vectorSample =
-              layerId === 'waves'
-                ? interpolateGridValueAtPoint(points, latLng.lat, latLng.lng, 'waves')
-                : interpolateGridValueAtPoint(points, latLng.lat, latLng.lng, 'wind');
+              currentLayerId === 'waves'
+                ? interpolateGridValueAtPoint(currentPoints, latLng.lat, latLng.lng, 'waves')
+                : interpolateGridValueAtPoint(currentPoints, latLng.lat, latLng.lng, 'wind');
 
             if (vectorSample.windDirectionDeg !== null) {
               const speed = vectorSample.value ?? 10;
@@ -286,7 +354,7 @@ export const WeatherModelOverlayLayer: React.FC<WeatherModelOverlayLayerProps> =
         }
 
         // 2. Vector arrows (for wind / waves) or grid numerical badges (for temp / rain) on offscreenCanvas
-        if (layerId !== 'none') {
+        if (currentLayerId !== 'none') {
           const stepX = Math.max(64, Math.floor(width / 8));
           const stepY = Math.max(60, Math.floor(height / 5));
 
@@ -299,13 +367,13 @@ export const WeatherModelOverlayLayer: React.FC<WeatherModelOverlayLayerProps> =
                 continue;
               }
               const sample = interpolateGridValueAtPoint(
-                points,
+                currentPoints,
                 latLng.lat,
                 latLng.lng,
-                layerId,
+                currentLayerId,
               );
 
-              if (layerId === 'wind' || layerId === 'waves') {
+              if (currentLayerId === 'wind' || currentLayerId === 'waves') {
                 if (sample.windDirectionDeg !== null) {
                   const speed = sample.value ?? 8;
                   drawArrowVector(
@@ -313,14 +381,18 @@ export const WeatherModelOverlayLayer: React.FC<WeatherModelOverlayLayerProps> =
                     x,
                     y,
                     sample.windDirectionDeg,
-                    layerId === 'waves' ? speed * 8 : speed,
+                    currentLayerId === 'waves' ? speed * 8 : speed,
                     'rgba(15, 23, 42, 0.54)',
                   );
                 }
               } else if (sample.value !== null) {
+                const tempDisplay =
+                  currentTempUnit === 'f'
+                    ? `${Math.round((sample.value * 9) / 5 + 32)}°`
+                    : `${Math.round(sample.value)}°`;
                 const text =
-                  layerId === 'temperature'
-                    ? `${Math.round(sample.value)}°`
+                  currentLayerId === 'temperature'
+                    ? tempDisplay
                     : `${sample.value.toFixed(1)}`;
                 offscreenCtx.save();
                 offscreenCtx.font = '700 10px system-ui, -apple-system, sans-serif';
@@ -355,25 +427,34 @@ export const WeatherModelOverlayLayer: React.FC<WeatherModelOverlayLayerProps> =
       initParticles(initialW, initialH);
     }
 
-    const canAnimate =
-      animateFlow &&
-      (shouldRenderStreamlines || layerId === 'wind' || layerId === 'waves') &&
-      Boolean(ctx) &&
-      Boolean(offscreenCtx) &&
-      points.length > 0 &&
-      typeof window !== 'undefined' &&
-      typeof window.requestAnimationFrame === 'function';
+    const shouldAnimate = () =>
+      Boolean(
+        animateFlowRef.current &&
+          (shouldRenderStreamlinesRef.current ||
+            layerIdRef.current === 'wind' ||
+            layerIdRef.current === 'waves') &&
+          ctx &&
+          offscreenCtx &&
+          pointsRef.current.length > 0 &&
+          typeof window !== 'undefined' &&
+          typeof window.requestAnimationFrame === 'function',
+      );
 
     let lastFrameMs = 0;
     const FRAME_INTERVAL_MS = 45;
 
     const renderLoop = (nowMs: number) => {
-      if (isDisposed || !ctx || !offscreenCanvasRef.current) return;
+      if (isDisposed || !ctx || !offscreenCanvasRef.current) {
+        rafId = null;
+        return;
+      }
 
+      const currentPoints = pointsRef.current;
+      const currentLayerId = layerIdRef.current;
       const isHidden =
         typeof document !== 'undefined' && Boolean(document.hidden);
 
-      if (!isHidden && points.length > 0 && nowMs - lastFrameMs >= FRAME_INTERVAL_MS) {
+      if (!isHidden && currentPoints.length > 0 && nowMs - lastFrameMs >= FRAME_INTERVAL_MS) {
         lastFrameMs = nowMs;
         try {
           const width = cachedWidth || canvas.width || 640;
@@ -387,7 +468,7 @@ export const WeatherModelOverlayLayer: React.FC<WeatherModelOverlayLayerProps> =
             ctx.save();
             ctx.lineCap = 'round';
             ctx.lineJoin = 'round';
-            const streakRgb = layerId === 'waves' ? '224, 242, 254' : '255, 255, 255';
+            const streakRgb = currentLayerId === 'waves' ? '224, 242, 254' : '255, 255, 255';
 
             for (const p of particles) {
               const col = Math.max(0, Math.min(flowCols - 1, Math.floor(p.x / cellSize)));
@@ -446,32 +527,53 @@ export const WeatherModelOverlayLayer: React.FC<WeatherModelOverlayLayerProps> =
           onLayerErrorRef.current?.(
             err instanceof Error ? err : new Error('Weather overlay animation frame error'),
           );
+          rafId = null;
           return;
         }
       }
 
-      rafId = window.requestAnimationFrame(renderLoop);
+      if (shouldAnimate()) {
+        rafId = window.requestAnimationFrame(renderLoop);
+      } else {
+        rafId = null;
+      }
     };
 
-    if (canAnimate) {
-      rafId = window.requestAnimationFrame(renderLoop);
-    }
+    const syncAnimationLoop = () => {
+      if (shouldAnimate()) {
+        if (rafId === null) {
+          rafId = window.requestAnimationFrame(renderLoop);
+        }
+      } else if (rafId !== null && typeof window !== 'undefined') {
+        window.cancelAnimationFrame(rafId);
+        rafId = null;
+      }
+    };
+
+    syncAndRedrawRef.current = () => {
+      rebuildOffscreenStaticField();
+      syncAnimationLoop();
+    };
+
+    syncAnimationLoop();
 
     const handleMapTransform = () => {
+      syncCanvasPosition();
       rebuildOffscreenStaticField();
     };
 
     if (typeof map.on === 'function') {
-      map.on('moveend zoomend resize', handleMapTransform);
+      map.on('move moveend zoom zoomend viewreset resize', handleMapTransform);
     }
 
     return () => {
       isDisposed = true;
+      syncAndRedrawRef.current = null;
       if (rafId !== null && typeof window !== 'undefined') {
         window.cancelAnimationFrame(rafId);
       }
       if (typeof map.off === 'function') {
-        map.off('moveend zoomend resize', handleMapTransform);
+        map.off('move moveend zoom zoomend viewreset resize', handleMapTransform);
       }
       if (canvas.parentNode) {
         canvas.parentNode.removeChild(canvas);
@@ -479,7 +581,23 @@ export const WeatherModelOverlayLayer: React.FC<WeatherModelOverlayLayerProps> =
       canvasRef.current = null;
       offscreenCanvasRef.current = null;
     };
-  }, [animateFlow, hourTimestamp, layerId, map, modelMode, opacity, points, shouldRenderStreamlines]);
+  }, [isVisibleLayer, map]);
+
+  useEffect(() => {
+    if (!isVisibleLayer) return;
+    syncAndRedrawRef.current?.();
+  }, [
+    animateFlow,
+    hourTimestamp,
+    isVisibleLayer,
+    layerId,
+    modelMode,
+    opacity,
+    points,
+    selectedHourIdx,
+    shouldRenderStreamlines,
+    temperatureUnit,
+  ]);
 
   return null;
 };

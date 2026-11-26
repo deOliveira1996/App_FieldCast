@@ -58,6 +58,7 @@ import {
   XCircle,
 } from 'lucide-react';
 import { ModuleErrorBoundary } from '../common';
+import { useLocale, type AppLocale } from '../../context/LocaleContext';
 import { useUnits } from '../../context/UnitsContext';
 import {
   convertPrecipitation,
@@ -78,8 +79,12 @@ import {
   getSavedLocations,
   getTrackSessions,
   getWaypoints,
+  loadPrimaryLocationPreference,
   logErrorToDb,
+  savePrimaryLocationPreference,
+  upsertSavedLocation,
 } from '../../db/database';
+import { reverseGeocodeNominatim } from '../../services/geocodingService';
 import {
   createMissionBoundsAroundPoint,
   createOfflineCartoTileLayer,
@@ -153,6 +158,14 @@ export interface MapRadarTabProps {
     region?: string;
     isFavorite?: boolean;
   }) => void | Promise<void>;
+  onSetPrimaryLocation?: (location: {
+    savedLocationId?: string;
+    name: string;
+    latitude: number;
+    longitude: number;
+    region?: string;
+    origin?: ActiveCoordinates['origin'];
+  }) => void | Promise<void>;
   onRadarStateChange?: (state: RainViewerRadarState) => void;
   onToast?: (toast: Omit<ToastMessage, 'id'>) => void;
   onErrorLog?: (record: ErrorLogRecord) => void | Promise<void>;
@@ -177,17 +190,43 @@ const FORECAST_AREA_RADIUS_OPTIONS_KM = [0, 2, 5, 10, 25] as const;
 
 const BASE_MAP_STYLES: ReadonlyArray<{
   id: MapBaseStyle;
-  label: string;
-  shortLabel: string;
+  labelPt: string;
+  labelEn: string;
+  shortLabelPt: string;
+  shortLabelEn: string;
 }> = [
-  { id: 'osm', label: 'Mapa Padrão (OSM)', shortLabel: 'Padrão OSM' },
+  {
+    id: 'osm',
+    labelPt: 'Mapa Padrão (OSM)',
+    labelEn: 'Standard Map (OSM)',
+    shortLabelPt: 'Padrão OSM',
+    shortLabelEn: 'Standard OSM',
+  },
   {
     id: 'esri_street',
-    label: 'Costeiro & Ruas (Esri)',
-    shortLabel: 'Costeiro Esri',
+    labelPt: 'Costeiro & Ruas (Esri)',
+    labelEn: 'Coastal & Streets (Esri)',
+    shortLabelPt: 'Costeiro Esri',
+    shortLabelEn: 'Coastal Esri',
   },
-  { id: 'esri_satellite', label: 'Satélite (Esri)', shortLabel: 'Satélite' },
+  {
+    id: 'esri_satellite',
+    labelPt: 'Satélite (Esri)',
+    labelEn: 'Satellite (Esri)',
+    shortLabelPt: 'Satélite',
+    shortLabelEn: 'Satellite',
+  },
 ];
+
+function isCoordinateLikeLocationName(name: string | null | undefined): boolean {
+  if (!name) return true;
+  const trimmed = name.trim();
+  if (!trimmed) return true;
+  if (/^Pin(\s+no\s+Mapa|\s+de\s+Previsão)?\s*\(/i.test(trimmed)) return true;
+  if (/^(Local|Área)\s+Selecionad[oa]/i.test(trimmed)) return true;
+  if (/^-?\d+\.\d+\s*°?\s*,\s*-?\d+\.\d+/.test(trimmed)) return true;
+  return false;
+}
 
 function formatBytes(bytes: number): string {
   if (bytes <= 0) return '0 KB';
@@ -198,10 +237,10 @@ function formatBytes(bytes: number): string {
   return `${(kb / 1024).toFixed(2)} MB`;
 }
 
-function formatFrameTimestamp(timeUnix: number): string {
+function formatFrameTimestamp(timeUnix: number, locale: AppLocale = 'pt'): string {
   try {
     const date = new Date(timeUnix * 1000);
-    return date.toLocaleTimeString('pt-BR', {
+    return date.toLocaleTimeString(locale === 'en' ? 'en-US' : 'pt-BR', {
       hour: '2-digit',
       minute: '2-digit',
       day: '2-digit',
@@ -212,26 +251,29 @@ function formatFrameTimestamp(timeUnix: number): string {
   }
 }
 
-function formatSafeWindowLabel(status: SafeWindowStatus | null | undefined): {
+function formatSafeWindowLabel(
+  status: SafeWindowStatus | null | undefined,
+  tr: (pt: string, en: string) => string,
+): {
   label: string;
   badgeClass: string;
 } {
   if (status === 'green') {
     return {
-      label: 'Condição Favorável (Verde)',
+      label: tr('Condição Favorável (Verde)', 'Favorable Condition (Green)'),
       badgeClass:
         'bg-emerald-50 text-emerald-800 dark:bg-emerald-950/60 dark:text-emerald-300 border-emerald-200 dark:border-emerald-700',
     };
   }
   if (status === 'red') {
     return {
-      label: 'Acima do Limite (Vermelho)',
+      label: tr('Acima do Limite (Vermelho)', 'Above Limit (Red)'),
       badgeClass:
         'bg-rose-50 text-rose-800 dark:bg-rose-950/60 dark:text-rose-300 border-rose-200 dark:border-rose-700',
     };
   }
   return {
-    label: 'Atenção Moderada (Amarelo)',
+    label: tr('Atenção Moderada (Amarelo)', 'Moderate Caution (Amber)'),
     badgeClass:
       'bg-amber-50 text-amber-800 dark:bg-amber-950/60 dark:text-amber-300 border-amber-200 dark:border-amber-700',
   };
@@ -314,6 +356,7 @@ function MapViewportBridge({
   centerLat,
   centerLon,
   recenterTrigger,
+  suppressAutoCenterCoords,
   layoutKey,
   onViewportChange,
   onMapClick,
@@ -321,6 +364,7 @@ function MapViewportBridge({
   centerLat: number;
   centerLon: number;
   recenterTrigger: number;
+  suppressAutoCenterCoords?: { lat: number; lon: number } | null;
   layoutKey: string;
   onViewportChange: (viewport: ViewportSnapshot) => void;
   onMapClick: (lat: number, lon: number) => void;
@@ -333,6 +377,18 @@ function MapViewportBridge({
     lon: centerLon,
     trigger: recenterTrigger,
   });
+
+  useEffect(() => {
+    try {
+      const container = mapRef.current.getContainer();
+      if (container) {
+        container.style.touchAction = 'none';
+        container.style.overscrollBehavior = 'contain';
+      }
+    } catch {
+      // Ignora em ambiente headless de teste
+    }
+  }, [map]);
 
   const emitViewport = useCallback(() => {
     try {
@@ -414,22 +470,31 @@ function MapViewportBridge({
         lon: centerLon,
         trigger: recenterTrigger,
       };
-      const currentCenter =
-        typeof mapRef.current.getCenter === 'function'
-          ? mapRef.current.getCenter()
-          : null;
-      const alreadyNearCenter =
-        currentCenter &&
-        Math.abs(currentCenter.lat - centerLat) < 0.0002 &&
-        Math.abs(currentCenter.lng - centerLon) < 0.0002;
-      if (!alreadyNearCenter || triggerChanged) {
-        mapRef.current.setView([centerLat, centerLon], mapRef.current.getZoom(), {
-          animate: triggerChanged,
-        });
+      const isClickSuppressed =
+        !triggerChanged &&
+        suppressAutoCenterCoords !== null &&
+        suppressAutoCenterCoords !== undefined &&
+        Math.abs(suppressAutoCenterCoords.lat - centerLat) < 0.0005 &&
+        Math.abs(suppressAutoCenterCoords.lon - centerLon) < 0.0005;
+
+      if (!isClickSuppressed) {
+        const currentCenter =
+          typeof mapRef.current.getCenter === 'function'
+            ? mapRef.current.getCenter()
+            : null;
+        const alreadyNearCenter =
+          currentCenter &&
+          Math.abs(currentCenter.lat - centerLat) < 0.0002 &&
+          Math.abs(currentCenter.lng - centerLon) < 0.0002;
+        if (!alreadyNearCenter || triggerChanged) {
+          mapRef.current.setView([centerLat, centerLon], mapRef.current.getZoom(), {
+            animate: triggerChanged,
+          });
+        }
       }
       emitViewportRef.current();
     }
-  }, [centerLat, centerLon, recenterTrigger]);
+  }, [centerLat, centerLon, recenterTrigger, suppressAutoCenterCoords]);
 
   useMapEvents({
     moveend() {
@@ -459,14 +524,15 @@ const MAP_MODEL_OPTIONS: ReadonlyArray<{
 
 const WEATHER_LAYER_OPTIONS: ReadonlyArray<{
   id: WeatherMapLayerId;
-  label: string;
+  labelPt: string;
+  labelEn: string;
   Icon: React.ComponentType<{ className?: string }>;
 }> = [
-  { id: 'wind', label: 'Vento + Vetores', Icon: Wind },
-  { id: 'rain', label: 'Chuva (Modelo)', Icon: CloudRain },
-  { id: 'temperature', label: 'Temperatura', Icon: Thermometer },
-  { id: 'waves', label: 'Ondas (Mar)', Icon: Waves },
-  { id: 'none', label: 'Só Radar/Mapa', Icon: Layers },
+  { id: 'wind', labelPt: 'Vento + Vetores', labelEn: 'Wind + Vectors', Icon: Wind },
+  { id: 'rain', labelPt: 'Chuva (Modelo)', labelEn: 'Rain (Model)', Icon: CloudRain },
+  { id: 'temperature', labelPt: 'Temperatura', labelEn: 'Temperature', Icon: Thermometer },
+  { id: 'waves', labelPt: 'Ondas (Mar)', labelEn: 'Waves (Sea)', Icon: Waves },
+  { id: 'none', labelPt: 'Só Radar/Mapa', labelEn: 'Radar/Map Only', Icon: Layers },
 ];
 
 function MapRadarTabContent({
@@ -480,10 +546,12 @@ function MapRadarTabContent({
   onViewModeChange,
   onSelectLocation,
   onSaveLocation,
+  onSetPrimaryLocation,
   onRadarStateChange,
   onToast,
   onErrorLog,
 }: MapRadarTabProps): React.ReactElement {
+  const { tr, locale } = useLocale();
   const tileTheme: MapTileTheme = isDark ? 'dark' : 'light';
 
   // Estilo de Mapa Base (100% gratuito, sem API Key)
@@ -517,7 +585,13 @@ function MapRadarTabContent({
   const [radarTileErrorCount, setRadarTileErrorCount] = useState<number>(0);
 
   // Modo Pin estilo Windy, Trava Reativa de Marcador (Pin-Lock), Tela Cheia e Gaveta Windy
-  const { units, formatWindValue, formatTempValue, formatPrecipValue } = useUnits();
+  const {
+    units,
+    formatWindValue,
+    formatTempValue,
+    formatWaveValue,
+    formatPrecipValue,
+  } = useUnits();
   const [instantWindyPin, setInstantWindyPin] = useState<boolean>(true);
   const [isPinLocked, setIsPinLocked] = useState<boolean>(false);
   const [isFullscreen, setIsFullscreen] = useState<boolean>(false);
@@ -526,6 +600,20 @@ function MapRadarTabContent({
   const [showWindStreamlines, setShowWindStreamlines] = useState<boolean>(true);
   const [forecastAreaRadiusKm, setForecastAreaRadiusKm] = useState<number>(5);
   const [customPinName, setCustomPinName] = useState<string>('');
+  const [resolvedPinGeo, setResolvedPinGeo] = useState<{
+    lat: number;
+    lon: number;
+    friendlyLabel: string;
+  } | null>(null);
+  const [isResolvingPinGeo, setIsResolvingPinGeo] = useState<boolean>(false);
+  const geocodeSeqRef = useRef<number>(0);
+  const [suppressAutoCenterCoords, setSuppressAutoCenterCoords] = useState<{
+    lat: number;
+    lon: number;
+  } | null>(null);
+  const [primaryPreference, setPrimaryPreference] = useState(() =>
+    loadPrimaryLocationPreference(),
+  );
 
   useEffect(() => {
     if (!isFullscreen) return;
@@ -846,14 +934,66 @@ function MapRadarTabContent({
   const activeModelDisplayName = getModelModeDisplayName(mapModelMode);
   const activeLegendSpec = getLayerLegendSpec(activeWeatherLayer);
 
+  const getFriendlyPlaceLabel = useCallback(
+    (lat: number, lon: number, rawName?: string | null): string => {
+      const trimmedCustom = customPinName.trim();
+      if (
+        trimmedCustom.length > 0 &&
+        inspectedPoint &&
+        Math.abs(inspectedPoint.latitude - lat) < 0.0015 &&
+        Math.abs(inspectedPoint.longitude - lon) < 0.0015
+      ) {
+        return trimmedCustom;
+      }
+      if (
+        resolvedPinGeo &&
+        Math.abs(resolvedPinGeo.lat - lat) < 0.0015 &&
+        Math.abs(resolvedPinGeo.lon - lon) < 0.0015
+      ) {
+        return resolvedPinGeo.friendlyLabel;
+      }
+      if (rawName && !isCoordinateLikeLocationName(rawName)) {
+        return rawName;
+      }
+      return tr('Local no Mapa', 'Map Location');
+    },
+    [customPinName, inspectedPoint, resolvedPinGeo, tr],
+  );
+
+  const resolvePlaceNameForCoords = useCallback(async (lat: number, lon: number) => {
+    const seq = ++geocodeSeqRef.current;
+    setIsResolvingPinGeo(true);
+    try {
+      const res = await reverseGeocodeNominatim(lat, lon);
+      if (seq !== geocodeSeqRef.current) return;
+      if (res?.friendlyLabel) {
+        setResolvedPinGeo({
+          lat,
+          lon,
+          friendlyLabel: res.friendlyLabel,
+        });
+      }
+    } finally {
+      if (seq === geocodeSeqRef.current) {
+        setIsResolvingPinGeo(false);
+      }
+    }
+  }, []);
+
   const handleSelectMapCoordinate = useCallback(
     (
       latitude: number,
       longitude: number,
       name: string,
       origin: ActiveCoordinates['origin'] = 'search',
+      options?: { suppressRecenter?: boolean },
     ): void => {
       if (!onSelectLocation) return;
+      if (options?.suppressRecenter) {
+        setSuppressAutoCenterCoords({ lat: latitude, lon: longitude });
+      } else {
+        setSuppressAutoCenterCoords(null);
+      }
       void safeAction(
         async () => {
           await onSelectLocation({
@@ -866,14 +1006,20 @@ function MapRadarTabContent({
         {
           actionKey: 'select_map_coordinate',
           moduleName: 'MapRadarTab',
-          successTitle: `Pin de Previsão atualizado: ${name}`,
-          errorTitle: 'Não foi possível selecionar a coordenada no mapa',
+          successTitle: tr(
+            `Pin de Previsão atualizado: ${name}`,
+            `Forecast Pin updated: ${name}`,
+          ),
+          errorTitle: tr(
+            'Não foi possível selecionar a coordenada no mapa',
+            'Could not select map coordinate',
+          ),
           onToast,
           onErrorLog: handleLogError,
         },
       );
     },
-    [onSelectLocation, onToast, handleLogError],
+    [onSelectLocation, onToast, handleLogError, tr],
   );
 
   // Clique no mapa: ou desenha os 2 cantos da Área de Missão ou posiciona o Pin estilo Windy
@@ -884,8 +1030,11 @@ function MapRadarTabContent({
           setDrawFirstCorner({ latitude: lat, longitude: lon });
           onToast?.({
             type: 'info',
-            title: 'Canto 1 definido',
-            message: 'Toque no segundo canto do mapa para fechar o retângulo da missão.',
+            title: tr('Canto 1 definido', 'Corner 1 set'),
+            message: tr(
+              'Toque no segundo canto do mapa para fechar o retângulo da missão.',
+              'Tap the opposite corner on the map to close the mission rectangle.',
+            ),
           });
         } else {
           const nextBounds = normalizeMissionBounds({
@@ -903,8 +1052,14 @@ function MapRadarTabContent({
           setShowMissionOverlay(true);
           onToast?.({
             type: 'success',
-            title: 'Retângulo da Área de Missão atualizado',
-            message: 'Verifique a estimativa de tiles abaixo antes de iniciar o download.',
+            title: tr(
+              'Retângulo da Área de Missão atualizado',
+              'Offline Mission Rectangle updated',
+            ),
+            message: tr(
+              'Verifique a estimativa de tiles abaixo antes de iniciar o download.',
+              'Check the tile estimate below before starting the download.',
+            ),
           });
         }
         return;
@@ -917,19 +1072,21 @@ function MapRadarTabContent({
         longitude: roundedLon,
       });
 
+      void resolvePlaceNameForCoords(roundedLat, roundedLon);
+
       if (isPinLocked) {
         return;
       }
 
       if (instantWindyPin && onSelectLocation) {
         const trimmed = customPinName.trim();
-        const areaLabel =
-          forecastAreaRadiusKm > 0 ? ` • Área ${forecastAreaRadiusKm}km` : '';
         const pinLabel =
           trimmed.length > 0
-            ? `${trimmed}${areaLabel}`
-            : `Pin no Mapa (${roundedLat.toFixed(3)}, ${roundedLon.toFixed(3)}${areaLabel})`;
-        handleSelectMapCoordinate(roundedLat, roundedLon, pinLabel, 'search');
+            ? trimmed
+            : getFriendlyPlaceLabel(roundedLat, roundedLon, null);
+        handleSelectMapCoordinate(roundedLat, roundedLon, pinLabel, 'search', {
+          suppressRecenter: true,
+        });
       }
     },
     [
@@ -938,14 +1095,44 @@ function MapRadarTabContent({
       missionBounds.minZoom,
       missionBounds.maxZoom,
       onToast,
+      tr,
+      resolvePlaceNameForCoords,
       isPinLocked,
       instantWindyPin,
       onSelectLocation,
       customPinName,
-      forecastAreaRadiusKm,
+      getFriendlyPlaceLabel,
       handleSelectMapCoordinate,
     ],
   );
+
+  const handleCenterOnPrimaryArea = useCallback(() => {
+    const primary = primaryPreference ?? loadPrimaryLocationPreference();
+    setSuppressAutoCenterCoords(null);
+    if (
+      primary &&
+      (Math.abs(primary.latitude - activeLocation.latitude) > 0.0005 ||
+        Math.abs(primary.longitude - activeLocation.longitude) > 0.0005) &&
+      onSelectLocation &&
+      !isPinLocked
+    ) {
+      handleSelectMapCoordinate(
+        primary.latitude,
+        primary.longitude,
+        primary.name,
+        primary.origin ?? 'saved',
+        { suppressRecenter: false },
+      );
+    }
+    setRecenterTrigger((prev) => prev + 1);
+  }, [
+    primaryPreference,
+    activeLocation.latitude,
+    activeLocation.longitude,
+    onSelectLocation,
+    isPinLocked,
+    handleSelectMapCoordinate,
+  ]);
 
   // Aplica a visão atual do mapa como retângulo de missão (com margem interna de 10%)
   const handleUseCurrentViewportForMission = (): void => {
@@ -1055,28 +1242,42 @@ function MapRadarTabContent({
 
         await refreshCacheStats();
 
-        const styleName =
-          BASE_MAP_STYLES.find((s) => s.id === baseStyle)?.label ?? 'OpenStreetMap';
+        const styleObj = BASE_MAP_STYLES.find((s) => s.id === baseStyle);
+        const styleName = styleObj
+          ? tr(styleObj.labelPt, styleObj.labelEn)
+          : 'OpenStreetMap';
 
         if (result.status === 'completed') {
           onToast?.({
             type: result.failedTiles > 0 ? 'warning' : 'success',
             title:
               result.failedTiles > 0
-                ? `Cache concluído (${result.completedTiles} salvos, ${result.failedTiles} falhas)`
-                : `Área de Missão salva offline (${result.completedTiles} tiles)`,
-            message: `Tiles (${styleName}) armazenados no IndexedDB para uso sem internet.`,
+                ? tr(
+                    `Cache concluído (${result.completedTiles} salvos, ${result.failedTiles} falhas)`,
+                    `Cache complete (${result.completedTiles} saved, ${result.failedTiles} failed)`,
+                  )
+                : tr(
+                    `Área de Missão salva offline (${result.completedTiles} tiles)`,
+                    `Mission Area saved offline (${result.completedTiles} tiles)`,
+                  ),
+            message: tr(
+              `Mapa (${styleName}) salvo no dispositivo para consulta sem internet.`,
+              `Map (${styleName}) saved on device for offline field use.`,
+            ),
           });
         } else if (result.status === 'cancelled') {
           onToast?.({
             type: 'info',
-            title: 'Download de tiles cancelado',
-            message: `${result.completedTiles} tiles foram mantidos no cache antes do cancelamento.`,
+            title: tr('Download de tiles cancelado', 'Tile download cancelled'),
+            message: tr(
+              `${result.completedTiles} tiles foram mantidos no cache antes do cancelamento.`,
+              `${result.completedTiles} tiles were kept in offline cache before cancellation.`,
+            ),
           });
         } else if (result.status === 'error') {
           onToast?.({
             type: 'error',
-            title: 'Falha ao baixar tiles da missão',
+            title: tr('Falha ao baixar tiles da missão', 'Failed to download mission tiles'),
             message: result.errorMessage,
           });
         }
@@ -1086,7 +1287,10 @@ function MapRadarTabContent({
       {
         actionKey: 'download_offline_mission_tiles',
         moduleName: 'MapRadarTab',
-        errorTitle: 'Erro durante download da Área de Missão Offline',
+        errorTitle: tr(
+          'Erro durante download da Área de Missão Offline',
+          'Error downloading Offline Mission Area',
+        ),
         onLoadingChange: setIsDownloadingTiles,
         onToast,
         onErrorLog: handleLogError,
@@ -1117,44 +1321,183 @@ function MapRadarTabContent({
       {
         actionKey: 'clear_offline_tile_cache',
         moduleName: 'MapRadarTab',
-        successTitle: 'Cache de tiles offline limpo com sucesso',
-        errorTitle: 'Falha ao limpar cache de tiles offline',
+        successTitle: tr(
+          'Mapas salvos offline removidos com sucesso',
+          'Saved offline maps cleared successfully',
+        ),
+        errorTitle: tr(
+          'Falha ao limpar cache de tiles offline',
+          'Failed to clear offline tile cache',
+        ),
         onToast,
         onErrorLog: handleLogError,
       },
     );
   };
 
+  const resolvePersistablePinName = useCallback(
+    (latitude: number, longitude: number): string => {
+      const trimmed = customPinName.trim();
+      if (trimmed.length > 0) return trimmed;
+      if (
+        resolvedPinGeo &&
+        Math.abs(resolvedPinGeo.lat - latitude) < 0.0015 &&
+        Math.abs(resolvedPinGeo.lon - longitude) < 0.0015
+      ) {
+        return resolvedPinGeo.friendlyLabel;
+      }
+      if (
+        Math.abs(activeLocation.latitude - latitude) < 0.0015 &&
+        Math.abs(activeLocation.longitude - longitude) < 0.0015 &&
+        !isCoordinateLikeLocationName(activeLocation.name)
+      ) {
+        return activeLocation.name;
+      }
+      return tr('Pin de Previsão no Mapa', 'Map Forecast Pin');
+    },
+    [customPinName, resolvedPinGeo, activeLocation.latitude, activeLocation.longitude, activeLocation.name, tr],
+  );
+
   const handleSaveInspectedCoordinate = (
     latitude: number,
     longitude: number,
   ): void => {
-    if (!onSaveLocation) return;
-    const trimmed = customPinName.trim();
-    const defaultName =
-      trimmed.length > 0
-        ? trimmed
-        : `Pin de Previsão (${latitude.toFixed(3)}, ${longitude.toFixed(3)})`;
+    const resolvedName = resolvePersistablePinName(latitude, longitude);
+    const regionLabel =
+      forecastAreaRadiusKm > 0
+        ? tr(
+            `Pin no Mapa (Área ${forecastAreaRadiusKm} km)`,
+            `Map Pin (${forecastAreaRadiusKm} km Area)`,
+          )
+        : tr('Marcado via Pin Interativo', 'Pinned on Interactive Map');
+
     void safeAction(
       async () => {
-        await onSaveLocation({
-          name: defaultName,
-          latitude,
-          longitude,
-          region:
-            forecastAreaRadiusKm > 0
-              ? `Pin no Mapa (Área ${forecastAreaRadiusKm} km)`
-              : 'Marcado via Pin Interativo',
-          isFavorite: true,
-        });
+        if (onSaveLocation) {
+          await onSaveLocation({
+            name: resolvedName,
+            latitude,
+            longitude,
+            region: regionLabel,
+            isFavorite: true,
+          });
+        } else {
+          const nowIso = new Date().toISOString();
+          await upsertSavedLocation({
+            id: `loc-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+            name: resolvedName,
+            latitude,
+            longitude,
+            elevationM: forecast?.elevationDemM,
+            region: regionLabel,
+            isFavorite: true,
+            createdAtIso: nowIso,
+            lastUsedAtIso: nowIso,
+          });
+        }
         const locs = await getSavedLocations();
         setDbSavedLocations(locs);
       },
       {
         actionKey: 'save_inspected_map_coordinate',
         moduleName: 'MapRadarTab',
-        successTitle: 'Pin salvo nos Locais Favoritos',
-        errorTitle: 'Não foi possível salvar a coordenada',
+        successTitle: tr(
+          `Local "${resolvedName}" salvo nos Favoritos`,
+          `Location "${resolvedName}" saved to Favorites`,
+        ),
+        errorTitle: tr(
+          'Não foi possível salvar a coordenada',
+          'Could not save coordinate',
+        ),
+        onToast,
+        onErrorLog: handleLogError,
+      },
+    );
+  };
+
+  const handleSetPrimaryCoordinate = (
+    latitude: number,
+    longitude: number,
+  ): void => {
+    const resolvedName = resolvePersistablePinName(latitude, longitude);
+    const regionLabel =
+      forecastAreaRadiusKm > 0
+        ? tr(
+            `Área Principal (${forecastAreaRadiusKm} km)`,
+            `Primary Area (${forecastAreaRadiusKm} km)`,
+          )
+        : tr('Área Principal Operacional', 'Primary Operational Area');
+
+    void safeAction(
+      async () => {
+        if (onSetPrimaryLocation) {
+          await onSetPrimaryLocation({
+            name: resolvedName,
+            latitude,
+            longitude,
+            region: regionLabel,
+            origin: 'saved',
+          });
+        } else {
+          if (onSaveLocation) {
+            await onSaveLocation({
+              name: resolvedName,
+              latitude,
+              longitude,
+              region: regionLabel,
+              isFavorite: true,
+            });
+          } else {
+            const nowIso = new Date().toISOString();
+            await upsertSavedLocation({
+              id: `loc-primary-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+              name: resolvedName,
+              latitude,
+              longitude,
+              elevationM: forecast?.elevationDemM,
+              region: regionLabel,
+              isFavorite: true,
+              createdAtIso: nowIso,
+              lastUsedAtIso: nowIso,
+            });
+          }
+          const persisted = savePrimaryLocationPreference({
+            name: resolvedName,
+            latitude,
+            longitude,
+            region: regionLabel,
+            origin: 'saved',
+            updatedAtIso: new Date().toISOString(),
+          });
+          setPrimaryPreference(persisted);
+          if (
+            onSelectLocation &&
+            (Math.abs(activeLocation.latitude - latitude) > 0.0005 ||
+              Math.abs(activeLocation.longitude - longitude) > 0.0005)
+          ) {
+            await onSelectLocation({
+              latitude,
+              longitude,
+              name: resolvedName,
+              origin: 'saved',
+            });
+          }
+        }
+        setPrimaryPreference(loadPrimaryLocationPreference());
+        const locs = await getSavedLocations();
+        setDbSavedLocations(locs);
+      },
+      {
+        actionKey: 'set_primary_map_coordinate',
+        moduleName: 'MapRadarTab',
+        successTitle: tr(
+          `Área Principal definida: ${resolvedName}`,
+          `Primary Area set: ${resolvedName}`,
+        ),
+        errorTitle: tr(
+          'Não foi possível definir Área Principal',
+          'Could not set Primary Area',
+        ),
         onToast,
         onErrorLog: handleLogError,
       },
@@ -1178,45 +1521,72 @@ function MapRadarTabContent({
       ? currentForecastHour?.precipitationMm.mean ?? null
       : activeNativeModelHour?.precipitation ?? currentForecastHour?.precipitationMm.mean ?? null;
 
+  const displayActivePlaceName = useMemo(
+    () =>
+      getFriendlyPlaceLabel(
+        activeLocation.latitude,
+        activeLocation.longitude,
+        activeLocation.name,
+      ),
+    [activeLocation.latitude, activeLocation.longitude, activeLocation.name, getFriendlyPlaceLabel],
+  );
+
   // Ícone de Bandeirinha Estilo Windy para o Ponto Ativo (sincronizado com modelo & hora selecionados)
   const activeWindyFlagIcon = useMemo(() => {
     const cardinal = degreesToCardinal(activeWindDir);
 
     const titleText =
       activeWindSpeed !== null && activeWindSpeed !== undefined
-        ? `${Math.round(activeWindSpeed)} km/h ${cardinal ? `◄ ${cardinal}` : ''}${
-            activeTempC !== null && activeTempC !== undefined ? ` • ${Math.round(activeTempC)}°C` : ''
+        ? `${formatWindValue(activeWindSpeed, 0)} ${cardinal ? `◄ ${cardinal}` : ''}${
+            activeTempC !== null && activeTempC !== undefined
+              ? ` • ${formatTempValue(activeTempC, 0)}`
+              : ''
           }`
-        : `${activeLocation.latitude.toFixed(3)}°, ${activeLocation.longitude.toFixed(3)}°`;
+        : displayActivePlaceName.slice(0, 26);
 
     return createWindyFlagPinIcon({
       titleText,
-      subtitleText: activeLocation.name.slice(0, 26),
+      subtitleText: displayActivePlaceName.slice(0, 26),
       ctaText:
         forecastAreaRadiusKm > 0
-          ? `${activeModelDisplayName} • Área ${forecastAreaRadiusKm} km`
-          : `${activeModelDisplayName} • Pin Ativo`,
+          ? `${activeModelDisplayName} • ${tr('Área', 'Area')} ${forecastAreaRadiusKm} km`
+          : `${activeModelDisplayName} • ${tr('Pin Ativo', 'Active Pin')}`,
       isPending: false,
     });
   }, [
     activeWindSpeed,
     activeWindDir,
     activeTempC,
-    activeLocation,
+    formatWindValue,
+    formatTempValue,
+    displayActivePlaceName,
     forecastAreaRadiusKm,
     activeModelDisplayName,
+    tr,
   ]);
 
   // Ícone de Bandeirinha Estilo Windy quando o usuário inspeciona outro ponto sem aplicar automaticamente
+  const inspectedPlaceLabel = useMemo(() => {
+    if (!inspectedPoint) return '';
+    return getFriendlyPlaceLabel(
+      inspectedPoint.latitude,
+      inspectedPoint.longitude,
+      null,
+    );
+  }, [inspectedPoint, getFriendlyPlaceLabel]);
+
   const inspectedWindyFlagIcon = useMemo(() => {
     if (!inspectedPoint) return null;
     return createWindyFlagPinIcon({
-      titleText: `${inspectedPoint.latitude.toFixed(3)}°, ${inspectedPoint.longitude.toFixed(3)}°`,
-      subtitleText: customPinName.trim() || 'Novo Pin no Mapa',
-      ctaText: isPinLocked ? 'Pin Fixado (Consulta)' : 'Previsão para este local',
+      titleText:
+        inspectedPlaceLabel || tr('Novo Pin no Mapa', 'New Map Pin'),
+      subtitleText: `${inspectedPoint.latitude.toFixed(3)}°, ${inspectedPoint.longitude.toFixed(3)}°`,
+      ctaText: isPinLocked
+        ? tr('Pin Fixado (Consulta)', 'Pin Locked (Inspect)')
+        : tr('Previsão para este local', 'Forecast for this spot'),
       isPending: true,
     });
-  }, [inspectedPoint, customPinName, isPinLocked]);
+  }, [inspectedPoint, inspectedPlaceLabel, isPinLocked, tr]);
 
   // Valores interpolados da grade 3x3 no ponto consultado quando o Pin está fixado
   const lockedGridSample = useMemo(() => {
@@ -1261,12 +1631,22 @@ function MapRadarTabContent({
         )
       : 0;
 
-  const activeBaseStyleLabel =
-    BASE_MAP_STYLES.find((s) => s.id === baseStyle)?.label ??
-    'Mapa Padrão (OSM)';
+  const activeStyleItem = BASE_MAP_STYLES.find((s) => s.id === baseStyle);
+  const activeBaseStyleLabel = activeStyleItem
+    ? tr(activeStyleItem.labelPt, activeStyleItem.labelEn)
+    : tr('Mapa Padrão (OSM)', 'Standard Map (OSM)');
+
+  const activePinTargetLat = inspectedPoint?.latitude ?? activeLocation.latitude;
+  const activePinTargetLon = inspectedPoint?.longitude ?? activeLocation.longitude;
 
   return (
-    <div className="space-y-4 pb-8 min-w-0">
+    <div
+      className={
+        isFullscreen
+          ? 'fixed inset-0 z-[80] flex flex-col lg:flex-row bg-slate-950 overflow-hidden'
+          : 'space-y-4 pb-8 min-w-0'
+      }
+    >
       {/* Aviso Suave Não-Bloqueante quando RainViewer estiver degradado ou indisponível */}
       {!isFullscreen && radarState && (radarState.degraded || !radarState.available) && (
         <div
@@ -1280,11 +1660,17 @@ function MapRadarTabContent({
             />
             <div className="text-xs sm:text-sm min-w-0">
               <p className="font-bold text-slate-800 dark:text-amber-200">
-                Radar RainViewer temporariamente indisponível
+                {tr(
+                  'Radar RainViewer temporariamente indisponível',
+                  'RainViewer radar temporarily unavailable',
+                )}
               </p>
               <p className="text-slate-600 dark:text-slate-300">
-                {radarState.statusMessage}. O mapa interativo ({activeBaseStyleLabel}),
-                o Pin de previsão estilo Windy e o cache offline funcionam normalmente.
+                {radarState.statusMessage}.{' '}
+                {tr(
+                  `O mapa interativo (${activeBaseStyleLabel}), o Pin de previsão e o modo offline funcionam normalmente.`,
+                  `The interactive map (${activeBaseStyleLabel}), forecast pin, and offline mode continue working normally.`,
+                )}
               </p>
             </div>
           </div>
@@ -1298,7 +1684,7 @@ function MapRadarTabContent({
               className={`w-4 h-4 ${isLoadingRadar ? 'animate-spin' : ''}`}
               aria-hidden="true"
             />
-            <span>Recarregar Radar</span>
+            <span>{tr('Recarregar Radar', 'Reload Radar')}</span>
           </button>
         </div>
       )}
@@ -1312,10 +1698,21 @@ function MapRadarTabContent({
           <div className="flex items-center gap-2.5 text-xs sm:text-sm text-sky-900 dark:text-sky-200 min-w-0">
             <Maximize2 className="w-5 h-5 text-sky-600 shrink-0" aria-hidden="true" />
             <span>
-              <strong>Modo Seleção de Área Offline (2 Cliques):</strong>{' '}
+              <strong>
+                {tr(
+                  'Modo Seleção de Área Offline (2 Cliques):',
+                  'Offline Area Selection Mode (2 Taps):',
+                )}
+              </strong>{' '}
               {!drawFirstCorner
-                ? 'Clique no Canto 1 do mapa para iniciar o retângulo.'
-                : `Canto 1 marcado (${drawFirstCorner.latitude.toFixed(3)}°, ${drawFirstCorner.longitude.toFixed(3)}°). Agora clique no Canto 2 oposto.`}
+                ? tr(
+                    'Clique no Canto 1 do mapa para iniciar o retângulo.',
+                    'Tap Corner 1 on the map to start the rectangle.',
+                  )
+                : tr(
+                    `Canto 1 marcado (${drawFirstCorner.latitude.toFixed(3)}°, ${drawFirstCorner.longitude.toFixed(3)}°). Agora clique no Canto 2 oposto.`,
+                    `Corner 1 marked (${drawFirstCorner.latitude.toFixed(3)}°, ${drawFirstCorner.longitude.toFixed(3)}°). Now tap the opposite Corner 2.`,
+                  )}
             </span>
           </div>
           <button
@@ -1327,7 +1724,7 @@ function MapRadarTabContent({
             className="min-h-[44px] min-w-[44px] px-3.5 py-2 rounded-xl text-xs font-semibold inline-flex items-center justify-center gap-1.5 bg-white hover:bg-slate-50 text-slate-700 border border-sky-200 shrink-0"
           >
             <XCircle className="w-4 h-4" aria-hidden="true" />
-            <span>Cancelar Desenho</span>
+            <span>{tr('Cancelar Desenho', 'Cancel Drawing')}</span>
           </button>
         </div>
       )}
@@ -1337,24 +1734,24 @@ function MapRadarTabContent({
         data-testid="map-main-section"
         className={
           isFullscreen
-            ? 'fixed inset-0 z-[80] flex flex-col bg-slate-950 overflow-hidden'
+            ? 'flex-1 min-w-0 min-h-0 flex flex-col bg-slate-950 overflow-hidden'
             : 'rounded-2xl border border-sky-200/80 dark:border-sky-900/60 bg-white dark:bg-slate-900/90 overflow-hidden shadow-sm min-w-0'
         }
       >
-        {/* Barra Tática Superior (Normal e Tela Cheia sempre em fluxo flex não-sobreposto) */}
+        {/* Barra Tática Superior Compacta (Mobile 390x844 & Desktop) */}
         <div
           className={
             isFullscreen
-              ? 'shrink-0 border-b border-slate-800 bg-slate-900/95 backdrop-blur-md px-3 py-2 space-y-1.5 min-w-0'
-              : 'border-b border-sky-100 dark:border-slate-800 bg-white dark:bg-slate-900/95 p-3 sm:p-3.5 space-y-2 min-w-0'
+              ? 'shrink-0 border-b border-slate-800 bg-slate-900/95 backdrop-blur-md px-2.5 py-1.5 space-y-1 min-w-0'
+              : 'border-b border-sky-100 dark:border-slate-800 bg-white dark:bg-slate-900/95 px-2.5 py-2 sm:p-3 space-y-1.5 min-w-0'
           }
         >
-          <div className="flex flex-wrap items-center justify-between gap-2 min-w-0">
-            <div className="space-y-0.5 min-w-0">
+          <div className="flex flex-wrap items-center justify-between gap-1.5 min-w-0">
+            <div className="space-y-0.5 min-w-0 flex-1">
               <div className="flex flex-wrap items-center gap-1.5 min-w-0">
                 <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[11px] font-bold bg-sky-600 text-white shadow-sm">
                   <MapPin className="w-3 h-3 shrink-0" aria-hidden="true" />
-                  <span>Mapa &amp; Radar</span>
+                  <span>{tr('Mapa & Radar', 'Map & Radar')}</span>
                 </span>
                 {!isFullscreen && (
                   <>
@@ -1376,27 +1773,39 @@ function MapRadarTabContent({
                 }`}
               >
                 <strong className={isFullscreen ? 'text-white' : 'text-sky-900 dark:text-white'}>
-                  {activeLocation.name}
+                  {displayActivePlaceName}
                 </strong>{' '}
-                ({activeLocation.latitude.toFixed(3)}°, {activeLocation.longitude.toFixed(3)}°)
+                <span className="font-mono text-[10px] opacity-80">
+                  ({activeLocation.latitude.toFixed(3)}°, {activeLocation.longitude.toFixed(3)}°)
+                </span>
                 {forecast ? ` • DEM ${Math.round(forecast.elevationDemM)}m` : ''}
               </p>
             </div>
 
-            {/* Botões Compactos Icon-Only: Pin-Lock, Vento Streamlines, HUD Hide/Show, Gaveta, Centralizar e Tela Cheia */}
-            <div className="flex flex-wrap items-center gap-1.5 min-w-0">
+            {/* Botões Compactos: Pin-Lock, Centralizar Área Principal, Vento, HUD, Gaveta e Tela Cheia */}
+            <div className="flex items-center gap-1 sm:gap-1.5 shrink-0">
               <button
                 type="button"
                 data-testid="map-pin-lock-btn"
                 onClick={() => setIsPinLocked((prev) => !prev)}
                 aria-pressed={isPinLocked}
-                aria-label={isPinLocked ? 'Pin Fixado (clique para liberar)' : 'Pin Livre (clique para fixar)'}
+                aria-label={
+                  isPinLocked
+                    ? tr('Pin Fixado (clique para liberar)', 'Pin Locked (tap to unlock)')
+                    : tr('Pin Livre (clique para fixar)', 'Free Pin (tap to lock)')
+                }
                 title={
                   isPinLocked
-                    ? 'Pin Fixado: navegue por oceanos/continentes e inspecione a grade 3x3 sem alterar a previsão ativa'
-                    : 'Pin Livre: clicar ou arrastar no mapa atualiza o marcador de previsão'
+                    ? tr(
+                        'Pin Fixado: navegue e inspecione a grade 3x3 sem alterar a previsão ativa',
+                        'Pin Locked: pan and inspect the 3x3 grid without changing the active forecast',
+                      )
+                    : tr(
+                        'Pin Livre: clicar ou arrastar no mapa atualiza o marcador de previsão',
+                        'Free Pin: tapping or dragging on the map updates the forecast marker',
+                      )
                 }
-                className={`min-h-[44px] min-w-[44px] p-2 rounded-xl text-xs font-bold inline-flex items-center justify-center gap-1 border transition-colors ${
+                className={`min-h-[44px] min-w-[44px] px-2 sm:px-2.5 py-1.5 rounded-xl text-xs font-bold inline-flex items-center justify-center gap-1 border transition-colors ${
                   isPinLocked
                     ? 'bg-amber-500 text-slate-950 border-amber-500 shadow-sm'
                     : isFullscreen
@@ -1410,7 +1819,21 @@ function MapRadarTabContent({
                   <Unlock className="w-4 h-4 shrink-0" aria-hidden="true" />
                 )}
                 <span className="hidden md:inline text-[11px]">
-                  {isPinLocked ? 'Fixo' : 'Livre'}
+                  {isPinLocked ? tr('Fixo', 'Locked') : tr('Livre', 'Free')}
+                </span>
+              </button>
+
+              <button
+                type="button"
+                data-testid="center-primary-area-btn"
+                onClick={handleCenterOnPrimaryArea}
+                className="min-h-[44px] min-w-[44px] px-2 sm:px-2.5 py-1.5 rounded-xl text-xs font-semibold inline-flex items-center justify-center gap-1 bg-sky-600 hover:bg-sky-500 text-white shadow-sm transition-colors"
+                aria-label={tr('Centralizar na Área Principal', 'Center on Primary Area')}
+                title={tr('Centralizar na Área Principal', 'Center on Primary Area')}
+              >
+                <Crosshair className="w-4 h-4 shrink-0" aria-hidden="true" />
+                <span className="hidden lg:inline text-[11px]">
+                  {tr('Centralizar na Área Principal', 'Center on Primary')}
                 </span>
               </button>
 
@@ -1419,8 +1842,16 @@ function MapRadarTabContent({
                 data-testid="map-wind-flow-toggle"
                 onClick={() => setShowWindStreamlines((prev) => !prev)}
                 aria-pressed={showWindStreamlines}
-                aria-label={showWindStreamlines ? 'Ocultar linhas de vento animadas' : 'Mostrar linhas de vento animadas'}
-                title={showWindStreamlines ? 'Fluxo de vento animado ativo' : 'Ativar fluxo de vento animado'}
+                aria-label={
+                  showWindStreamlines
+                    ? tr('Ocultar linhas de vento animadas', 'Hide animated wind streamlines')
+                    : tr('Mostrar linhas de vento animadas', 'Show animated wind streamlines')
+                }
+                title={
+                  showWindStreamlines
+                    ? tr('Fluxo de vento animado ativo', 'Animated wind flow active')
+                    : tr('Ativar fluxo de vento animado', 'Enable animated wind flow')
+                }
                 className={`min-h-[44px] min-w-[44px] p-2 rounded-xl text-xs font-bold inline-flex items-center justify-center border transition-colors ${
                   showWindStreamlines
                     ? 'bg-sky-600 text-white border-sky-600 shadow-sm'
@@ -1437,8 +1868,12 @@ function MapRadarTabContent({
                 data-testid="map-hud-toggle-btn"
                 onClick={() => setIsHudHidden((prev) => !prev)}
                 aria-pressed={isHudHidden}
-                aria-label={isHudHidden ? 'Mostrar HUD flutuante do mapa' : 'Ocultar HUD flutuante do mapa'}
-                title={isHudHidden ? 'Mostrar HUD' : 'Ocultar HUD'}
+                aria-label={
+                  isHudHidden
+                    ? tr('Mostrar HUD flutuante do mapa', 'Show floating map HUD')
+                    : tr('Ocultar HUD flutuante do mapa', 'Hide floating map HUD')
+                }
+                title={isHudHidden ? tr('Mostrar HUD', 'Show HUD') : tr('Ocultar HUD', 'Hide HUD')}
                 className={`min-h-[44px] min-w-[44px] p-2 rounded-xl text-xs font-bold inline-flex items-center justify-center border transition-colors ${
                   isHudHidden
                     ? 'bg-amber-500 text-slate-950 border-amber-500 shadow-sm'
@@ -1460,8 +1895,16 @@ function MapRadarTabContent({
                 onClick={() => setIsSidebarOpen((prev) => !prev)}
                 aria-expanded={isSidebarOpen}
                 aria-controls="map-windy-controls-drawer"
-                aria-label={isSidebarOpen ? 'Ocultar gaveta de camadas e offline' : 'Abrir gaveta de camadas e offline'}
-                title={isSidebarOpen ? 'Ocultar Gaveta' : 'Camadas & Offline'}
+                aria-label={
+                  isSidebarOpen
+                    ? tr('Ocultar gaveta de camadas e offline', 'Hide layers and offline drawer')
+                    : tr('Abrir gaveta de camadas e offline', 'Open layers and offline drawer')
+                }
+                title={
+                  isSidebarOpen
+                    ? tr('Ocultar Gaveta', 'Hide Drawer')
+                    : tr('Camadas & Offline', 'Layers & Offline')
+                }
                 className={`min-h-[44px] min-w-[44px] p-2 rounded-xl text-xs font-bold inline-flex items-center justify-center border transition-colors ${
                   isSidebarOpen
                     ? 'bg-sky-600 text-white border-sky-600 shadow-sm'
@@ -1479,21 +1922,15 @@ function MapRadarTabContent({
 
               <button
                 type="button"
-                onClick={() => setRecenterTrigger((prev) => prev + 1)}
-                className="min-h-[44px] min-w-[44px] p-2 rounded-xl text-xs font-semibold inline-flex items-center justify-center bg-sky-600 hover:bg-sky-500 text-white shadow-sm transition-colors"
-                aria-label="Centralizar mapa no Pin ativo"
-                title="Centralizar mapa no Pin ativo"
-              >
-                <Crosshair className="w-4 h-4 shrink-0" aria-hidden="true" />
-              </button>
-
-              <button
-                type="button"
                 data-testid="map-fullscreen-btn"
                 onClick={() => setIsFullscreen((prev) => !prev)}
                 aria-pressed={isFullscreen}
-                aria-label={isFullscreen ? 'Reduzir mapa da tela cheia' : 'Expandir mapa em tela cheia'}
-                title={isFullscreen ? 'Reduzir Mapa' : 'Tela Cheia'}
+                aria-label={
+                  isFullscreen
+                    ? tr('Reduzir mapa da tela cheia', 'Exit fullscreen map')
+                    : tr('Expandir mapa em tela cheia', 'Expand map fullscreen')
+                }
+                title={isFullscreen ? tr('Reduzir Mapa', 'Exit Fullscreen') : tr('Tela Cheia', 'Fullscreen')}
                 className={`min-h-[44px] min-w-[44px] p-2 rounded-xl text-xs font-bold inline-flex items-center justify-center border transition-colors ${
                   isFullscreen
                     ? 'bg-rose-600 hover:bg-rose-500 text-white border-rose-500 shadow-sm'
@@ -1509,18 +1946,18 @@ function MapRadarTabContent({
             </div>
           </div>
 
-          {/* Seletor Direto de Modelo Meteorológico no Mapa (FieldCast Ensemble + ECMWF + GFS + ICON + GEM) */}
+          {/* Seletor Direto de Modelo Meteorológico no Mapa (compacto em linha única no mobile) */}
           <div
-            className="flex flex-wrap items-center gap-1.5 pt-1.5 border-t border-sky-100/80 dark:border-slate-800 min-w-0"
+            className="flex items-center gap-1.5 pt-1.5 border-t border-sky-100/80 dark:border-slate-800 min-w-0 overflow-x-auto scrollbar-thin flex-nowrap sm:flex-wrap"
             role="group"
-            aria-label="Modelo meteorológico no mapa"
+            aria-label={tr('Modelo meteorológico no mapa', 'Weather model on map')}
           >
             <span
-              className={`text-[11px] font-bold mr-1 ${
+              className={`text-[11px] font-bold mr-0.5 shrink-0 ${
                 isFullscreen ? 'text-sky-300' : 'text-sky-800 dark:text-sky-300'
               }`}
             >
-              Modelo:
+              {tr('Modelo:', 'Model:')}
             </span>
             {MAP_MODEL_OPTIONS.map((opt) => {
               const active = mapModelMode === opt.id;
@@ -1530,7 +1967,7 @@ function MapRadarTabContent({
                   type="button"
                   onClick={() => handleMapModelSelect(opt.id)}
                   aria-pressed={active}
-                  className={`min-h-[36px] px-3 py-1 rounded-full text-xs font-bold border transition-all ${
+                  className={`min-h-[34px] px-2.5 py-1 rounded-full text-[11px] sm:text-xs font-bold border whitespace-nowrap shrink-0 transition-all ${
                     active
                       ? 'bg-[#0080cd] text-white border-[#0080cd] shadow-sm'
                       : isFullscreen
@@ -1545,211 +1982,264 @@ function MapRadarTabContent({
           </div>
         </div>
 
-        <div
-          className={
-            isFullscreen
-              ? 'relative flex-1 min-h-0 w-full z-0'
-              : 'relative w-full h-[430px] sm:h-[510px] lg:h-[550px] z-0'
-          }
-        >
-          <MapContainer
-            center={[activeLocation.latitude, activeLocation.longitude]}
-            zoom={12}
-            scrollWheelZoom={true}
-            className="w-full h-full z-0"
+        <div className="relative flex-1 min-h-0 flex flex-col">
+          <div
+            data-zoom-isolated="true"
+            onWheel={(e) => {
+              e.stopPropagation();
+            }}
+            style={{ touchAction: 'none', overscrollBehavior: 'contain' }}
+            className={
+              isFullscreen
+                ? 'relative flex-1 min-h-0 w-full touch-none overscroll-contain isolate'
+                : 'relative w-full h-[430px] sm:h-[510px] lg:h-[550px] touch-none overscroll-contain isolate'
+            }
           >
-            {/* Subclasse customizada de L.TileLayer com leitura prioritária do IndexedDB (Dexie) e servidores gratuitos OSM/Esri */}
-            <OfflineBaseTileLayer theme={tileTheme} baseStyle={baseStyle} />
+            <MapContainer
+              center={[activeLocation.latitude, activeLocation.longitude]}
+              zoom={12}
+              scrollWheelZoom={true}
+              touchZoom={true}
+              bounceAtZoomLimits={false}
+              className="w-full h-full"
+            >
+              {/* Subclasse customizada de L.TileLayer com leitura prioritária do cache offline e servidores gratuitos OSM/Esri */}
+              <OfflineBaseTileLayer theme={tileTheme} baseStyle={baseStyle} />
 
-            {/* Ponte de sincronização de viewport, centro e clique no mapa */}
-            <MapViewportBridge
-              centerLat={activeLocation.latitude}
-              centerLon={activeLocation.longitude}
-              recenterTrigger={recenterTrigger}
-              layoutKey={`${isFullscreen}_${isSidebarOpen}`}
-              onViewportChange={handleViewportChange}
-              onMapClick={handleMapClick}
-            />
+              {/* Ponte de sincronização de viewport, centro e clique no mapa */}
+              <MapViewportBridge
+                centerLat={activeLocation.latitude}
+                centerLon={activeLocation.longitude}
+                recenterTrigger={recenterTrigger}
+                suppressAutoCenterCoords={suppressAutoCenterCoords}
+                layoutKey={`${isFullscreen}_${isSidebarOpen}`}
+                onViewportChange={handleViewportChange}
+                onMapClick={handleMapClick}
+              />
 
-            {/* Overlay de Campo Meteorológico do Modelo (Vento, Chuva, Temp, Ondas) */}
-            <WeatherModelOverlayLayer
-              layerId={activeWeatherLayer}
-              modelMode={mapModelMode}
-              points={activeMapGridSlice?.points ?? []}
-              hourTimestamp={
-                activeMapGridSlice?.timestampUnix ??
-                currentForecastHour?.timestampUnix ??
-                null
-              }
-              opacity={radarOpacity}
-              animateFlow={true}
-              showWindStreamlines={showWindStreamlines && activeWeatherLayer !== 'none'}
-              onLayerError={() => {
-                setActiveWeatherLayer('none');
-                onToast?.({
-                  type: 'warning',
-                  title: 'Camada meteorológica ocultada por segurança',
-                  message: 'O mapa base continua operando normalmente.',
-                });
-              }}
-            />
-
-            {/* Overlay de Radar Animado RainViewer */}
-            {radarEnabled && activeFrame && (
-              <TileLayer
-                key={activeFrame.path}
-                url={activeFrame.tileUrlTemplate}
+              {/* Overlay de Campo Meteorológico do Modelo (Vento, Chuva, Temp, Ondas) */}
+              <WeatherModelOverlayLayer
+                layerId={activeWeatherLayer}
+                modelMode={mapModelMode}
+                points={activeMapGridSlice?.points ?? []}
+                hourTimestamp={
+                  activeMapGridSlice?.timestampUnix ??
+                  currentForecastHour?.timestampUnix ??
+                  null
+                }
+                selectedHourIdx={safeModelHourIdx}
                 opacity={radarOpacity}
-                maxNativeZoom={radarState?.maxNativeZoom ?? 7}
-                maxZoom={19}
-                zIndex={460}
-                attribution="RainViewer"
+                animateFlow={true}
+                showWindStreamlines={showWindStreamlines && activeWeatherLayer !== 'none'}
+                temperatureUnit={units.temperature}
+                onLayerError={() => {
+                  setActiveWeatherLayer('none');
+                  onToast?.({
+                    type: 'warning',
+                    title: tr(
+                      'Camada meteorológica ocultada por segurança',
+                      'Weather layer hidden for safety',
+                    ),
+                    message: tr(
+                      'O mapa base continua operando normalmente.',
+                      'Base map continues operating normally.',
+                    ),
+                  });
+                }}
+              />
+
+              {/* Overlay de Radar Animado RainViewer */}
+              {radarEnabled && activeFrame && (
+                <TileLayer
+                  key={activeFrame.path}
+                  url={activeFrame.tileUrlTemplate}
+                  opacity={radarOpacity}
+                  maxNativeZoom={radarState?.maxNativeZoom ?? 7}
+                  maxZoom={19}
+                  zIndex={460}
+                  attribution="RainViewer"
+                  eventHandlers={{
+                    tileerror: () => {
+                      setRadarTileErrorCount((c) => c + 1);
+                    },
+                  }}
+                />
+              )}
+
+              {/* Círculo de Área de Cobertura da Previsão ao redor do Pin Ativo */}
+              {forecastAreaRadiusKm > 0 && (
+                <Circle
+                  center={[activeLocation.latitude, activeLocation.longitude]}
+                  radius={forecastAreaRadiusKm * 1000}
+                  pathOptions={{
+                    color: '#0284c7',
+                    weight: 2,
+                    dashArray: '6 4',
+                    fillColor: '#38bdf8',
+                    fillOpacity: 0.12,
+                    interactive: false,
+                  }}
+                />
+              )}
+
+              {/* Retângulo da Área de Missão Offline */}
+              {showMissionOverlay && (
+                <Rectangle
+                  bounds={[
+                    [missionBounds.south, missionBounds.west],
+                    [missionBounds.north, missionBounds.east],
+                  ]}
+                  pathOptions={{
+                    color: tileEstimate.exceedsLimit ? '#f43f5e' : '#0ea5e9',
+                    weight: 2,
+                    dashArray: '6 4',
+                    fillColor: tileEstimate.exceedsLimit ? '#f43f5e' : '#38bdf8',
+                    fillOpacity: 0.08,
+                    interactive: false,
+                  }}
+                />
+              )}
+
+              {/* Marcador do Canto 1 durante desenho de retângulo */}
+              {isDrawingMissionBox && drawFirstCorner && (
+                <CircleMarker
+                  center={[drawFirstCorner.latitude, drawFirstCorner.longitude]}
+                  radius={8}
+                  pathOptions={{
+                    color: '#0284c7',
+                    fillColor: '#38bdf8',
+                    fillOpacity: 0.9,
+                    weight: 2,
+                  }}
+                />
+              )}
+
+              {/* Pin Principal Estilo Bandeirinha do Windy (Arrastável quando Pin Livre!) */}
+              <Marker
+                key={isPinLocked ? 'map-active-pin-locked' : 'map-active-pin-free'}
+                position={[activeLocation.latitude, activeLocation.longitude]}
+                icon={activeWindyFlagIcon}
+                draggable={!isPinLocked}
                 eventHandlers={{
-                  tileerror: () => {
-                    setRadarTileErrorCount((c) => c + 1);
+                  dragend(e) {
+                    if (isPinLocked) return;
+                    const marker = e.target as L.Marker;
+                    const pos = marker.getLatLng();
+                    handleMapClick(pos.lat, pos.lng);
                   },
                 }}
-              />
-            )}
-
-            {/* Círculo de Área de Cobertura da Previsão ao redor do Pin Ativo */}
-            {forecastAreaRadiusKm > 0 && (
-              <Circle
-                center={[activeLocation.latitude, activeLocation.longitude]}
-                radius={forecastAreaRadiusKm * 1000}
-                pathOptions={{
-                  color: '#0284c7',
-                  weight: 2,
-                  dashArray: '6 4',
-                  fillColor: '#38bdf8',
-                  fillOpacity: 0.12,
-                }}
-              />
-            )}
-
-            {/* Retângulo da Área de Missão Offline */}
-            {showMissionOverlay && (
-              <Rectangle
-                bounds={[
-                  [missionBounds.south, missionBounds.west],
-                  [missionBounds.north, missionBounds.east],
-                ]}
-                pathOptions={{
-                  color: tileEstimate.exceedsLimit ? '#f43f5e' : '#0ea5e9',
-                  weight: 2,
-                  dashArray: '6 4',
-                  fillColor: tileEstimate.exceedsLimit ? '#f43f5e' : '#38bdf8',
-                  fillOpacity: 0.08,
-                }}
-              />
-            )}
-
-            {/* Marcador do Canto 1 durante desenho de retângulo */}
-            {isDrawingMissionBox && drawFirstCorner && (
-              <CircleMarker
-                center={[drawFirstCorner.latitude, drawFirstCorner.longitude]}
-                radius={8}
-                pathOptions={{
-                  color: '#0284c7',
-                  fillColor: '#38bdf8',
-                  fillOpacity: 0.9,
-                  weight: 2,
-                }}
-              />
-            )}
-
-            {/* Pin Principal Estilo Bandeirinha do Windy (Arrastável quando Pin Livre!) */}
-            <Marker
-              key={isPinLocked ? 'map-active-pin-locked' : 'map-active-pin-free'}
-              position={[activeLocation.latitude, activeLocation.longitude]}
-              icon={activeWindyFlagIcon}
-              draggable={!isPinLocked}
-              eventHandlers={{
-                dragend(e) {
-                  if (isPinLocked) return;
-                  const marker = e.target as L.Marker;
-                  const pos = marker.getLatLng();
-                  handleMapClick(pos.lat, pos.lng);
-                },
-              }}
-            >
-              <Popup>
-                <div className="min-w-[230px] space-y-2 text-slate-800">
-                  <div className="border-b border-sky-100 pb-1.5">
-                    <span className="text-[10px] font-bold uppercase tracking-wider text-sky-600">
-                      Pin de Previsão Ativo
-                    </span>
-                    <h4 className="font-bold text-sm text-slate-900">
-                      {activeLocation.name}
-                    </h4>
-                    <p className="text-xs font-mono text-slate-500">
-                      {activeLocation.latitude.toFixed(4)}°,{' '}
-                      {activeLocation.longitude.toFixed(4)}°
-                      {forecastAreaRadiusKm > 0
-                        ? ` • Área ${forecastAreaRadiusKm} km`
-                        : ''}
-                    </p>
-                  </div>
-
-                  {currentForecastHour && forecast ? (
-                    <div className="space-y-1.5 text-xs">
-                      <div className="grid grid-cols-2 gap-1.5">
-                        <div className="bg-sky-50/80 p-2 rounded-lg border border-sky-100">
-                          <span className="text-[10px] text-slate-500 block">
-                            Vento 10m / Rajada
-                          </span>
-                          <strong className="font-bold text-sky-900">
-                            {currentForecastHour.windSpeed10m.mean?.toFixed(1) ?? '—'} /{' '}
-                            {currentForecastHour.windGusts10m.mean?.toFixed(1) ?? '—'}{' '}
-                            km/h
-                          </strong>
-                        </div>
-                        <div className="bg-sky-50/80 p-2 rounded-lg border border-sky-100">
-                          <span className="text-[10px] text-slate-500 block">
-                            Direção / Temp
-                          </span>
-                          <strong className="font-bold text-sky-900">
-                            {currentForecastHour.windDirection10m.degree !== null
-                              ? `${degreesToCardinal(currentForecastHour.windDirection10m.degree)} (${Math.round(currentForecastHour.windDirection10m.degree)}°)`
-                              : '—'}{' '}
-                            •{' '}
-                            {currentForecastHour.temperature2mC.mean?.toFixed(1) ?? '—'}
-                            °C
-                          </strong>
-                        </div>
-                      </div>
-
-                      <div className="bg-sky-50/80 p-2 rounded-lg border border-sky-100 flex items-center justify-between">
-                        <span className="text-[10px] text-slate-500">
-                          Mar / Ondas:
-                        </span>
-                        <strong className="font-bold text-sky-900">
-                          {forecast.marineAvailable && currentForecastHour.marine
-                            ? `${currentForecastHour.marine.waveHeight?.toFixed(1) ?? '—'}m (${currentForecastHour.marine.wavePeriod?.toFixed(0) ?? '—'}s)`
-                            : 'Ponto Continental'}
-                        </strong>
-                      </div>
-
-                      <div className="flex items-center justify-between pt-1 text-[11px] text-slate-600">
-                        <span>
-                          Confiança:{' '}
-                          <strong className="text-sky-700">
-                            {currentForecastHour.confidence.total}%
-                          </strong>
-                        </span>
-                        <span>
-                          Altitude: <strong>{Math.round(forecast.elevationDemM)}m</strong>
-                        </span>
-                      </div>
+              >
+                <Popup>
+                  <div className="min-w-[235px] space-y-2 text-slate-800">
+                    <div className="border-b border-sky-100 pb-1.5">
+                      <span className="text-[10px] font-bold uppercase tracking-wider text-sky-600">
+                        {tr('Pin de Previsão Ativo', 'Active Forecast Pin')}
+                      </span>
+                      <h4 className="font-bold text-sm text-slate-900">
+                        {displayActivePlaceName}
+                        {isResolvingPinGeo ? ' …' : ''}
+                      </h4>
+                      <p className="text-[11px] font-mono text-slate-500">
+                        {activeLocation.latitude.toFixed(4)}°,{' '}
+                        {activeLocation.longitude.toFixed(4)}°
+                        {forecastAreaRadiusKm > 0
+                          ? ` • ${tr('Área', 'Area')} ${forecastAreaRadiusKm} km`
+                          : ''}
+                      </p>
                     </div>
-                  ) : (
-                    <p className="text-xs text-slate-500">
-                      Sincronizando previsão horária para este Pin...
-                    </p>
-                  )}
-                </div>
-              </Popup>
-            </Marker>
+
+                    {currentForecastHour && forecast ? (
+                      <div className="space-y-1.5 text-xs">
+                        <div className="grid grid-cols-2 gap-1.5">
+                          <div className="bg-sky-50/80 p-2 rounded-lg border border-sky-100">
+                            <span className="text-[10px] text-slate-500 block">
+                              {tr('Vento 10m / Rajada', 'Wind 10m / Gust')}
+                            </span>
+                            <strong className="font-bold text-sky-900">
+                              {formatWindValue(currentForecastHour.windSpeed10m.mean, 1)} /{' '}
+                              {formatWindValue(currentForecastHour.windGusts10m.mean, 1)}
+                            </strong>
+                          </div>
+                          <div className="bg-sky-50/80 p-2 rounded-lg border border-sky-100">
+                            <span className="text-[10px] text-slate-500 block">
+                              {tr('Direção / Temp', 'Direction / Temp')}
+                            </span>
+                            <strong className="font-bold text-sky-900">
+                              {currentForecastHour.windDirection10m.degree !== null
+                                ? `${degreesToCardinal(currentForecastHour.windDirection10m.degree)} (${Math.round(currentForecastHour.windDirection10m.degree)}°)`
+                                : '—'}{' '}
+                              • {formatTempValue(currentForecastHour.temperature2mC.mean, 1)}
+                            </strong>
+                          </div>
+                        </div>
+
+                        <div className="bg-sky-50/80 p-2 rounded-lg border border-sky-100 flex items-center justify-between gap-2">
+                          <span className="text-[10px] text-slate-500">
+                            {tr('Chuva / Ondas:', 'Rain / Waves:')}
+                          </span>
+                          <strong className="font-bold text-sky-900">
+                            {formatPrecipValue(currentForecastHour.precipitationMm.mean, 1)} •{' '}
+                            {forecast.marineAvailable && currentForecastHour.marine
+                              ? `${formatWaveValue(currentForecastHour.marine.waveHeight, 1)} (${currentForecastHour.marine.wavePeriod?.toFixed(0) ?? '—'}s)`
+                              : tr('Ponto Continental', 'Inland Point')}
+                          </strong>
+                        </div>
+
+                        <div className="flex items-center justify-between pt-1 text-[11px] text-slate-600">
+                          <span>
+                            {tr('Confiança:', 'Confidence:')}{' '}
+                            <strong className="text-sky-700">
+                              {currentForecastHour.confidence.total}%
+                            </strong>
+                          </span>
+                          <span>
+                            {tr('Altitude:', 'Elevation:')}{' '}
+                            <strong>{Math.round(forecast.elevationDemM)}m</strong>
+                          </span>
+                        </div>
+                      </div>
+                    ) : (
+                      <p className="text-xs text-slate-500">
+                        {tr(
+                          'Sincronizando previsão horária para este Pin...',
+                          'Syncing hourly forecast for this Pin...',
+                        )}
+                      </p>
+                    )}
+
+                    <div className="grid grid-cols-2 gap-1.5 pt-1 border-t border-sky-100">
+                      <button
+                        type="button"
+                        data-testid="popup-save-location-btn"
+                        onClick={() =>
+                          handleSaveInspectedCoordinate(
+                            activeLocation.latitude,
+                            activeLocation.longitude,
+                          )
+                        }
+                        className="min-h-[40px] px-2.5 py-1.5 rounded-lg bg-sky-50 hover:bg-sky-100 text-sky-800 border border-sky-200 text-[11px] font-semibold inline-flex items-center justify-center gap-1"
+                      >
+                        <Bookmark className="w-3.5 h-3.5 text-sky-600 shrink-0" aria-hidden="true" />
+                        <span>{tr('Salvar Local', 'Save Location')}</span>
+                      </button>
+                      <button
+                        type="button"
+                        data-testid="popup-set-primary-btn"
+                        onClick={() =>
+                          handleSetPrimaryCoordinate(
+                            activeLocation.latitude,
+                            activeLocation.longitude,
+                          )
+                        }
+                        className="min-h-[40px] px-2.5 py-1.5 rounded-lg bg-sky-600 hover:bg-sky-500 text-white text-[11px] font-semibold inline-flex items-center justify-center gap-1"
+                      >
+                        <MapPin className="w-3.5 h-3.5 shrink-0" aria-hidden="true" />
+                        <span>{tr('Definir como Principal', 'Set as Primary')}</span>
+                      </button>
+                    </div>
+                  </div>
+                </Popup>
+              </Marker>
 
             {/* Marcadores de Locais Salvos */}
             {showSavedLocations &&
@@ -1769,7 +2259,9 @@ function MapRadarTabContent({
                       <div className="min-w-[200px] space-y-2 text-slate-900">
                         <div>
                           <span className="text-[10px] font-bold uppercase tracking-wider text-sky-600">
-                            {loc.isFavorite ? '★ Local Favorito' : 'Local Salvo'}
+                            {loc.isFavorite
+                              ? tr('★ Local Favorito', '★ Favorite Location')
+                              : tr('Local Salvo', 'Saved Location')}
                           </span>
                           <h4 className="font-bold text-sm">{loc.name}</h4>
                           <p className="text-xs font-mono text-slate-500">
@@ -1777,7 +2269,7 @@ function MapRadarTabContent({
                           </p>
                           {loc.elevationM !== undefined && loc.elevationM !== null && (
                             <p className="text-xs text-slate-500">
-                              Altitude: {Math.round(loc.elevationM)} m
+                              {tr('Altitude:', 'Elevation:')} {Math.round(loc.elevationM)} m
                             </p>
                           )}
                         </div>
@@ -1794,7 +2286,7 @@ function MapRadarTabContent({
                             }
                             className="w-full min-h-[40px] px-3 py-2 rounded-xl bg-sky-600 hover:bg-sky-500 text-white text-xs font-semibold"
                           >
-                            Previsão para este local
+                            {tr('Previsão para este local', 'Forecast for this spot')}
                           </button>
                         )}
                       </div>
@@ -1805,7 +2297,7 @@ function MapRadarTabContent({
             {/* Marcadores de Waypoints Georreferenciados com Foto e ConditionSnapshot */}
             {showWaypoints &&
               waypoints.map((wp) => {
-                const safeBadge = formatSafeWindowLabel(wp.conditions.safeWindow);
+                const safeBadge = formatSafeWindowLabel(wp.conditions.safeWindow, tr);
                 return (
                   <Marker
                     key={wp.id}
@@ -1816,7 +2308,7 @@ function MapRadarTabContent({
                       <div className="min-w-[230px] max-w-[260px] space-y-2 text-slate-900">
                         <div className="border-b border-sky-100 pb-1">
                           <span className="text-[10px] font-bold uppercase tracking-wider text-sky-600">
-                            Waypoint de Campo
+                            {tr('Waypoint de Campo', 'Field Waypoint')}
                           </span>
                           <h4 className="font-bold text-sm">{wp.name}</h4>
                           <p className="text-[11px] font-mono text-slate-500">
@@ -1829,7 +2321,10 @@ function MapRadarTabContent({
                           <div className="rounded-lg overflow-hidden border border-sky-100 bg-sky-50">
                             <img
                               src={wp.photoDataUrl}
-                              alt={`Foto do waypoint ${wp.name}`}
+                              alt={tr(
+                                `Foto do waypoint ${wp.name}`,
+                                `Photo of waypoint ${wp.name}`,
+                              )}
                               className="w-full h-28 object-cover"
                             />
                             {wp.photoSizeKb && (
@@ -1848,38 +2343,38 @@ function MapRadarTabContent({
 
                         <div className="text-[11px] bg-sky-50/50 border border-sky-100 rounded-lg p-2 space-y-1">
                           <div className="font-semibold text-sky-900">
-                            Condições no Momento:
+                            {tr('Condições no Momento:', 'Conditions at Capture:')}
                           </div>
                           <div className="grid grid-cols-2 gap-1">
                             <span>
-                              Vento:{' '}
+                              {tr('Vento:', 'Wind:')}{' '}
                               <strong>
-                                {wp.conditions.windSpeed10mKmh?.toFixed(1) ?? '—'} km/h
+                                {formatWindValue(wp.conditions.windSpeed10mKmh, 1)}
                               </strong>
                             </span>
                             <span>
-                              Rajada:{' '}
+                              {tr('Rajada:', 'Gust:')}{' '}
                               <strong>
-                                {wp.conditions.windGusts10mKmh?.toFixed(1) ?? '—'} km/h
+                                {formatWindValue(wp.conditions.windGusts10mKmh, 1)}
                               </strong>
                             </span>
                             <span>
-                              Temp:{' '}
+                              {tr('Temp:', 'Temp:')}{' '}
                               <strong>
-                                {wp.conditions.temperature2mC?.toFixed(1) ?? '—'}°C
+                                {formatTempValue(wp.conditions.temperature2mC, 1)}
                               </strong>
                             </span>
                             <span>
-                              Onda:{' '}
+                              {tr('Onda:', 'Wave:')}{' '}
                               <strong>
                                 {wp.conditions.waveHeightM !== null
-                                  ? `${wp.conditions.waveHeightM.toFixed(1)}m`
-                                  : 'Cont.'}
+                                  ? formatWaveValue(wp.conditions.waveHeightM, 1)
+                                  : tr('Cont.', 'Inland')}
                               </strong>
                             </span>
                           </div>
                           <div className="text-[10px] text-slate-600 pt-0.5">
-                            {safeBadge.label} • Confiança:{' '}
+                            {safeBadge.label} • {tr('Confiança:', 'Confidence:')}{' '}
                             {wp.conditions.confidenceTotal ?? '—'}%
                           </div>
                         </div>
@@ -1928,16 +2423,17 @@ function MapRadarTabContent({
                           <div className="text-xs space-y-1 text-slate-900">
                             <strong className="block text-sm">{track.name}</strong>
                             <p>
-                              Distância:{' '}
+                              {tr('Distância:', 'Distance:')}{' '}
                               <strong>{track.totalDistanceKm.toFixed(2)} km</strong>
                             </p>
                             <p>
-                              Pontos aceitos (&le;20m):{' '}
-                              <strong>{track.points.length}</strong> (descartados:{' '}
+                              {tr('Pontos aceitos (≤20m):', 'Accepted points (≤20m):')}{' '}
+                              <strong>{track.points.length}</strong> (
+                              {tr('descartados:', 'discarded:')}{' '}
                               {track.discardedLowAccuracyCount})
                             </p>
                             <p className="text-[11px] text-slate-500">
-                              Início:{' '}
+                              {tr('Início:', 'Start:')}{' '}
                               {track.startedAtIso.slice(0, 19).replace('T', ' ')}
                             </p>
                           </div>
@@ -1973,15 +2469,17 @@ function MapRadarTabContent({
                   eventHandlers={{
                     click() {
                       if (isPinLocked) return;
-                      const trimmed = customPinName.trim();
-                      const label =
-                        trimmed ||
-                        `Pin (${inspectedPoint.latitude.toFixed(3)}, ${inspectedPoint.longitude.toFixed(3)})`;
+                      const label = getFriendlyPlaceLabel(
+                        inspectedPoint.latitude,
+                        inspectedPoint.longitude,
+                        null,
+                      );
                       handleSelectMapCoordinate(
                         inspectedPoint.latitude,
                         inspectedPoint.longitude,
                         label,
                         'search',
+                        { suppressRecenter: true },
                       );
                     },
                   }}
@@ -1998,13 +2496,13 @@ function MapRadarTabContent({
               <div className="flex items-center gap-1.5 font-bold">
                 <Lock className="w-3.5 h-3.5 text-amber-600 dark:text-amber-400 shrink-0" aria-hidden="true" />
                 <span className="truncate">
-                  Grade 3x3 ({inspectedPoint.latitude.toFixed(3)}°, {inspectedPoint.longitude.toFixed(3)}°)
+                  {inspectedPlaceLabel || tr('Grade 3x3', '3x3 Grid')} ({inspectedPoint.latitude.toFixed(3)}°, {inspectedPoint.longitude.toFixed(3)}°)
                 </span>
               </div>
               {lockedGridSample && (
                 <div className="flex flex-wrap items-center gap-x-2 gap-y-0.5 text-[10px]">
                   <span>
-                    Vento:{' '}
+                    {tr('Vento:', 'Wind:')}{' '}
                     <strong>
                       {formatWindValue(lockedGridSample.windSpeedKmh, 0)}
                       {lockedGridSample.windDirectionDeg !== null
@@ -2013,13 +2511,13 @@ function MapRadarTabContent({
                     </strong>
                   </span>
                   <span>
-                    Chuva:{' '}
+                    {tr('Chuva:', 'Rain:')}{' '}
                     <strong>
                       {formatPrecipValue(lockedGridSample.precipMm, 1)}
                     </strong>
                   </span>
                   <span>
-                    Temp:{' '}
+                    {tr('Temp:', 'Temp:')}{' '}
                     <strong>
                       {formatTempValue(lockedGridSample.tempC, 1)}
                     </strong>
@@ -2028,18 +2526,31 @@ function MapRadarTabContent({
               )}
             </div>
           )}
+        </div>
 
-          {/* HUD Flutuante no Mapa: Informa Modelo Meteorológico, Radar RainViewer & Escala de Cores */}
+          {/* HUD Meteorológico: Flutuante compacto no modo normal e barra acoplada (zero sobreposição ao Popup) em Tela Cheia */}
           <div
             data-testid="map-weather-hud"
-            className={`absolute z-[500] max-w-[260px] sm:max-w-[300px] rounded-2xl border border-sky-200/90 dark:border-sky-800 bg-white/95 dark:bg-slate-900/95 backdrop-blur-md p-2 sm:p-2.5 shadow-md space-y-1.5 pointer-events-auto top-2 right-2 ${
-              isHudHidden ? 'hidden' : isSidebarOpen ? 'hidden sm:block' : 'block'
-            }`}
+            className={
+              isHudHidden
+                ? 'hidden'
+                : isFullscreen
+                  ? 'relative z-10 shrink-0 border-t border-slate-800 bg-slate-900/95 backdrop-blur-md px-3 py-1.5 flex flex-wrap items-center justify-between gap-x-4 gap-y-1 pointer-events-auto'
+                  : `absolute z-[490] max-w-[225px] sm:max-w-[280px] rounded-2xl border border-sky-200/90 dark:border-sky-800 bg-white/95 dark:bg-slate-900/95 backdrop-blur-md p-2 sm:p-2.5 shadow-md space-y-1.5 pointer-events-auto top-2 right-2 ${
+                      isSidebarOpen ? 'hidden sm:block' : 'block'
+                    }`
+            }
           >
             <div className="flex items-center justify-between gap-2">
-              <span className="inline-flex items-center gap-1.5 text-[11px] font-extrabold text-sky-900 dark:text-sky-100">
+              <span
+                className={`inline-flex items-center gap-1.5 text-[11px] font-extrabold ${
+                  isFullscreen
+                    ? 'text-sky-100'
+                    : 'text-sky-900 dark:text-sky-100'
+                }`}
+              >
                 <Radar className="w-3.5 h-3.5 text-[#0080cd]" aria-hidden="true" />
-                <span>Modelo: {activeModelDisplayName}</span>
+                <span>{tr('Modelo:', 'Model:')} {activeModelDisplayName}</span>
               </span>
               <span
                 className={`px-2 py-0.5 rounded-full text-[10px] font-bold ${
@@ -2049,35 +2560,47 @@ function MapRadarTabContent({
                 }`}
               >
                 {isLoadingSpatialGrid
-                  ? 'Atualizando...'
+                  ? tr('Atualizando...', 'Updating...')
                   : activeSpatialGrid.source === 'live_grid'
-                    ? 'Grade ao Vivo'
-                    : 'Campo do Ponto'}
+                    ? tr('Grade ao Vivo', 'Live Grid')
+                    : tr('Campo do Ponto', 'Point Field')}
               </span>
             </div>
 
-            <div className="text-[11px] text-slate-600 dark:text-slate-300 flex flex-wrap items-center gap-x-2 gap-y-0.5">
+            <div
+              className={`text-[11px] flex flex-wrap items-center gap-x-2 gap-y-0.5 ${
+                isFullscreen
+                  ? 'text-slate-300'
+                  : 'text-slate-600 dark:text-slate-300'
+              }`}
+            >
               <span>
-                Vento:{' '}
-                <strong className="text-slate-900 dark:text-white">
+                {tr('Vento:', 'Wind:')}{' '}
+                <strong className={isFullscreen ? 'text-white' : 'text-slate-900 dark:text-white'}>
                   {formatWindValue(activeWindSpeed, 0)}
                 </strong>
               </span>
               <span>
-                Chuva:{' '}
-                <strong className="text-slate-900 dark:text-white">
+                {tr('Chuva:', 'Rain:')}{' '}
+                <strong className={isFullscreen ? 'text-white' : 'text-slate-900 dark:text-white'}>
                   {formatPrecipValue(activePrecipMm, 1)}
                 </strong>
               </span>
               <span>
-                Temp:{' '}
-                <strong className="text-slate-900 dark:text-white">
+                {tr('Temp:', 'Temp:')}{' '}
+                <strong className={isFullscreen ? 'text-white' : 'text-slate-900 dark:text-white'}>
                   {formatTempValue(activeTempC, 0)}
                 </strong>
               </span>
             </div>
 
-            <div className="text-[10px] flex items-center gap-1.5 text-slate-600 dark:text-slate-300">
+            <div
+              className={`text-[10px] flex items-center gap-1.5 ${
+                isFullscreen
+                  ? 'text-slate-300'
+                  : 'text-slate-600 dark:text-slate-300'
+              }`}
+            >
               <span
                 className={`w-2 h-2 rounded-full shrink-0 ${
                   !radarEnabled
@@ -2090,21 +2613,52 @@ function MapRadarTabContent({
               />
               <span>
                 {!radarEnabled
-                  ? 'Radar RainViewer pausado pelo usuário'
+                  ? tr(
+                      'Radar RainViewer pausado pelo usuário',
+                      'RainViewer radar paused by user',
+                    )
                   : radarState?.available && activeFrame
-                    ? `RainViewer: ${frames.length} quadros • ${formatFrameTimestamp(activeFrame.timeUnix)} (só chuva ativa)${
-                        radarTileErrorCount > 0 ? ' (alguns tiles falharam)' : ''
-                      }`
+                    ? tr(
+                        `RainViewer: ${frames.length} quadros • ${formatFrameTimestamp(activeFrame.timeUnix, locale)} (só chuva ativa)${
+                          radarTileErrorCount > 0 ? ' (alguns tiles falharam)' : ''
+                        }`,
+                        `RainViewer: ${frames.length} frames • ${formatFrameTimestamp(activeFrame.timeUnix, locale)} (active rain only)${
+                          radarTileErrorCount > 0 ? ' (some tiles failed)' : ''
+                        }`,
+                      )
                     : isLoadingRadar
-                      ? 'Carregando Radar RainViewer...'
-                      : 'Radar RainViewer indisponível (usando camada do modelo)'}
+                      ? tr('Carregando Radar RainViewer...', 'Loading RainViewer Radar...')
+                      : tr(
+                          'Radar RainViewer indisponível (usando camada do modelo)',
+                          'RainViewer radar unavailable (using model layer)',
+                        )}
               </span>
             </div>
 
             {activeLegendSpec && (
-              <div className="pt-1 border-t border-sky-100 dark:border-slate-800">
-                <div className="flex items-center justify-between text-[10px] font-semibold text-slate-600 dark:text-slate-300 mb-1">
-                  <span>{activeLegendSpec.title}</span>
+              <div
+                className={
+                  isFullscreen
+                    ? 'min-w-[190px] sm:min-w-[230px]'
+                    : 'pt-1 border-t border-sky-100 dark:border-slate-800'
+                }
+              >
+                <div
+                  className={`flex items-center justify-between text-[10px] font-semibold mb-1 ${
+                    isFullscreen
+                      ? 'text-slate-200'
+                      : 'text-slate-600 dark:text-slate-300'
+                  }`}
+                >
+                  <span>
+                    {activeWeatherLayer === 'wind'
+                      ? tr('Vento 10m', 'Wind 10m')
+                      : activeWeatherLayer === 'rain'
+                        ? tr('Precipitação', 'Precipitation')
+                        : activeWeatherLayer === 'temperature'
+                          ? tr('Temperatura 2m', 'Temperature 2m')
+                          : tr('Altura de Onda', 'Wave Height')}
+                  </span>
                   <span>
                     {activeWeatherLayer === 'wind'
                       ? getWindUnitLabel(units.wind)
@@ -2127,34 +2681,49 @@ function MapRadarTabContent({
                     />
                   ))}
                 </div>
-                <div className="flex items-center justify-between text-[9px] font-mono text-slate-500 dark:text-slate-400 mt-0.5">
+                <div
+                  className={`flex items-center justify-between text-[9px] font-mono mt-0.5 ${
+                    isFullscreen
+                      ? 'text-slate-300'
+                      : 'text-slate-500 dark:text-slate-400'
+                  }`}
+                >
                   {activeLegendSpec.stops.map((stop) => {
-                    const num = Number(stop.valueLabel);
+                    const hasPlus = stop.valueLabel.includes('+');
+                    const num = Number.parseFloat(stop.valueLabel);
                     let displayLabel = stop.valueLabel;
                     if (Number.isFinite(num)) {
                       if (activeWeatherLayer === 'wind') {
                         const converted = convertWindSpeed(num, units.wind);
                         displayLabel =
                           converted !== null
-                            ? units.wind === 'ms'
-                              ? converted.toFixed(0)
-                              : String(Math.round(converted))
+                            ? `${
+                                units.wind === 'ms'
+                                  ? converted.toFixed(1)
+                                  : String(Math.round(converted))
+                              }${hasPlus ? '+' : ''}`
                             : stop.valueLabel;
                       } else if (activeWeatherLayer === 'temperature') {
                         const converted = convertTemperature(num, units.temperature);
                         displayLabel =
-                          converted !== null ? String(Math.round(converted)) : stop.valueLabel;
+                          converted !== null
+                            ? `${Math.round(converted)}°${hasPlus ? '+' : ''}`
+                            : stop.valueLabel;
                       } else if (activeWeatherLayer === 'waves') {
                         const converted = convertWaveHeight(num, units.wave);
                         displayLabel =
-                          converted !== null ? converted.toFixed(1) : stop.valueLabel;
+                          converted !== null
+                            ? `${converted.toFixed(1)}${getWaveUnitLabel(units.wave)}${hasPlus ? '+' : ''}`
+                            : stop.valueLabel;
                       } else if (activeWeatherLayer === 'rain') {
                         const converted = convertPrecipitation(num, units.precipitation);
                         displayLabel =
                           converted !== null
-                            ? units.precipitation === 'in'
-                              ? converted.toFixed(2)
-                              : stop.valueLabel
+                            ? `${
+                                units.precipitation === 'in'
+                                  ? converted.toFixed(2)
+                                  : String(num)
+                              }${hasPlus ? '+' : ''}`
                             : stop.valueLabel;
                       }
                     }
@@ -2170,12 +2739,16 @@ function MapRadarTabContent({
         <div
           className={
             isFullscreen
-              ? 'shrink-0 border-t border-slate-800 bg-slate-950/95 p-3 space-y-2.5 min-w-0'
+              ? 'shrink-0 border-t border-slate-800 bg-slate-950/95 p-2.5 space-y-2 min-w-0'
               : 'border-t border-sky-100 dark:border-slate-800 bg-sky-50/40 dark:bg-slate-950/80 p-3 sm:p-4 space-y-2.5 min-w-0'
           }
         >
           <div className="flex flex-wrap items-center justify-between gap-2">
-            <div className="inline-flex items-center rounded-xl bg-white dark:bg-slate-900 p-1 border border-sky-200/80 dark:border-slate-700" role="group" aria-label="Fonte da linha do tempo do mapa">
+            <div
+              className="inline-flex items-center rounded-xl bg-white dark:bg-slate-900 p-1 border border-sky-200/80 dark:border-slate-700"
+              role="group"
+              aria-label={tr('Fonte da linha do tempo do mapa', 'Map timeline source')}
+            >
               <button
                 type="button"
                 onClick={() => {
@@ -2189,7 +2762,7 @@ function MapRadarTabContent({
                     : 'text-slate-600 dark:text-slate-300 hover:text-sky-700'
                 }`}
               >
-                Radar Chuva (RainViewer)
+                {tr('Radar Chuva (RainViewer)', 'Rain Radar (RainViewer)')}
               </button>
               <button
                 type="button"
@@ -2204,7 +2777,7 @@ function MapRadarTabContent({
                     : 'text-slate-600 dark:text-slate-300 hover:text-sky-700'
                 }`}
               >
-                Previsão {activeModelDisplayName} ({maxModelTimelineHours}h)
+                {tr('Previsão', 'Forecast')} {activeModelDisplayName} ({maxModelTimelineHours}h)
               </button>
             </div>
 
@@ -2212,7 +2785,7 @@ function MapRadarTabContent({
               <div className="flex items-center gap-2 text-xs">
                 {safeModelHourIdx === currentLocalHourIdx ? (
                   <span className="px-2.5 py-0.5 rounded-full bg-amber-100 text-amber-900 border border-amber-300 font-bold">
-                    Agora • {formatLocalHourBadge(currentForecastHour.timestampUnix, forecast?.timezone)}
+                    {tr('Agora', 'Now')} • {formatLocalHourBadge(currentForecastHour.timestampUnix, forecast?.timezone)}
                   </span>
                 ) : (
                   <button
@@ -2220,16 +2793,16 @@ function MapRadarTabContent({
                     onClick={() => setSelectedModelHourIdx(currentLocalHourIdx)}
                     className="px-2.5 py-0.5 rounded-full bg-amber-500 hover:bg-amber-600 text-slate-950 font-bold"
                   >
-                    Voltar para Agora
+                    {tr('Voltar para Agora', 'Back to Now')}
                   </button>
                 )}
               </div>
             )}
           </div>
 
-          <div className="flex flex-col md:flex-row md:items-center justify-between gap-3">
+          <div className="flex flex-col md:flex-row md:items-center justify-between gap-2.5">
             {/* Botões Play/Pause, Passo Anterior/Próximo e Opacidade (todos >= 44x44px) */}
-            <div className="flex flex-wrap items-center gap-2">
+            <div className="flex flex-wrap items-center gap-1.5 sm:gap-2">
               <button
                 type="button"
                 onClick={() => setIsPlayingRadar((prev) => !prev)}
@@ -2238,20 +2811,26 @@ function MapRadarTabContent({
                     ? frames.length <= 1 || !radarEnabled
                     : maxModelTimelineHours <= 1
                 }
-                className="min-h-[44px] min-w-[44px] px-4 py-2 rounded-xl text-xs font-bold inline-flex items-center justify-center gap-2 bg-sky-600 hover:bg-sky-500 disabled:opacity-50 text-white shadow-sm transition-colors"
+                className="min-h-[44px] min-w-[44px] px-3.5 py-2 rounded-xl text-xs font-bold inline-flex items-center justify-center gap-2 bg-sky-600 hover:bg-sky-500 disabled:opacity-50 text-white shadow-sm transition-colors"
                 aria-label={
-                  isPlayingRadar ? 'Pausar animação do radar' : 'Reproduzir radar'
+                  isPlayingRadar
+                    ? tr('Pausar animação do radar', 'Pause radar animation')
+                    : tr('Reproduzir radar', 'Play radar')
                 }
               >
                 {isPlayingRadar ? (
                   <>
                     <Pause className="w-4 h-4" aria-hidden="true" />
-                    <span>Pausar</span>
+                    <span>{tr('Pausar', 'Pause')}</span>
                   </>
                 ) : (
                   <>
                     <Play className="w-4 h-4" aria-hidden="true" />
-                    <span>{timelineMode === 'rainviewer' ? 'Play Radar' : 'Play Modelo'}</span>
+                    <span>
+                      {timelineMode === 'rainviewer'
+                        ? tr('Play Radar', 'Play Radar')
+                        : tr('Play Modelo', 'Play Model')}
+                    </span>
                   </>
                 )}
               </button>
@@ -2280,8 +2859,8 @@ function MapRadarTabContent({
                     : maxModelTimelineHours <= 1
                 }
                 className="min-h-[44px] min-w-[44px] p-2.5 rounded-xl border border-sky-200 dark:border-slate-700 bg-white dark:bg-slate-900 hover:bg-sky-50 dark:hover:bg-slate-800 disabled:opacity-40 text-sky-800 dark:text-slate-200 inline-flex items-center justify-center"
-                title="Quadro anterior"
-                aria-label="Quadro anterior"
+                title={tr('Quadro anterior', 'Previous frame')}
+                aria-label={tr('Quadro anterior', 'Previous frame')}
               >
                 <SkipBack className="w-4 h-4" aria-hidden="true" />
               </button>
@@ -2306,8 +2885,8 @@ function MapRadarTabContent({
                     : maxModelTimelineHours <= 1
                 }
                 className="min-h-[44px] min-w-[44px] p-2.5 rounded-xl border border-sky-200 dark:border-slate-700 bg-white dark:bg-slate-900 hover:bg-sky-50 dark:hover:bg-slate-800 disabled:opacity-40 text-sky-800 dark:text-slate-200 inline-flex items-center justify-center"
-                title="Próximo quadro"
-                aria-label="Próximo quadro"
+                title={tr('Próximo quadro', 'Next frame')}
+                aria-label={tr('Próximo quadro', 'Next frame')}
               >
                 <SkipForward className="w-4 h-4" aria-hidden="true" />
               </button>
@@ -2320,10 +2899,12 @@ function MapRadarTabContent({
                   )
                 }
                 className="min-h-[44px] min-w-[44px] px-3 py-2 rounded-xl border border-sky-200 dark:border-slate-700 bg-white dark:bg-slate-900 hover:bg-sky-50 dark:hover:bg-slate-800 text-xs font-semibold text-sky-800 dark:text-slate-200 inline-flex items-center gap-1.5"
-                title="Alternar opacidade da camada de radar"
+                title={tr('Alternar opacidade da camada', 'Toggle layer opacity')}
               >
                 <Layers className="w-4 h-4 text-sky-600" aria-hidden="true" />
-                <span>Opacidade {Math.round(radarOpacity * 100)}%</span>
+                <span>
+                  {tr('Opacidade', 'Opacity')} {Math.round(radarOpacity * 100)}%
+                </span>
               </button>
 
               <button
@@ -2331,13 +2912,15 @@ function MapRadarTabContent({
                 onClick={() => void loadRainViewerRadar(true)}
                 disabled={isLoadingRadar}
                 className="min-h-[44px] min-w-[44px] px-3 py-2 rounded-xl border border-sky-200 dark:border-slate-700 bg-white dark:bg-slate-900 hover:bg-sky-50 dark:hover:bg-slate-800 text-xs font-semibold text-sky-800 dark:text-slate-200 inline-flex items-center gap-1.5"
-                title="Recarregar quadros do RainViewer"
+                title={tr('Recarregar quadros do RainViewer', 'Reload RainViewer frames')}
               >
                 <RefreshCw
                   className={`w-4 h-4 ${isLoadingRadar ? 'animate-spin' : ''}`}
                   aria-hidden="true"
                 />
-                <span className="hidden sm:inline">Atualizar Radar</span>
+                <span className="hidden sm:inline">
+                  {tr('Atualizar Radar', 'Refresh Radar')}
+                </span>
               </button>
             </div>
 
@@ -2355,7 +2938,10 @@ function MapRadarTabContent({
                       setIsPlayingRadar(false);
                       setCurrentFrameIndex(Number(e.target.value));
                     }}
-                    aria-label="Linha do tempo do radar RainViewer"
+                    aria-label={tr(
+                      'Linha do tempo do radar RainViewer',
+                      'RainViewer radar timeline',
+                    )}
                     className="w-full min-h-[44px] accent-sky-600 cursor-pointer disabled:opacity-40"
                   />
                 ) : (
@@ -2369,7 +2955,10 @@ function MapRadarTabContent({
                       setIsPlayingRadar(false);
                       setSelectedModelHourIdx(Number(e.target.value));
                     }}
-                    aria-label="Linha do tempo da previsão do modelo meteorológico"
+                    aria-label={tr(
+                      'Linha do tempo da previsão do modelo meteorológico',
+                      'Weather model forecast timeline',
+                    )}
                     className="w-full min-h-[44px] accent-sky-600 cursor-pointer disabled:opacity-40"
                   />
                 )}
@@ -2382,7 +2971,7 @@ function MapRadarTabContent({
                       {activeModelDisplayName}
                     </span>
                     <span className="font-mono text-xs sm:text-sm font-bold text-sky-900 dark:text-white bg-white dark:bg-slate-900 px-3 py-1.5 rounded-xl border border-sky-200 dark:border-slate-800">
-                      {formatFrameTimestamp(currentForecastHour.timestampUnix)}
+                      {formatFrameTimestamp(currentForecastHour.timestampUnix, locale)}
                     </span>
                   </>
                 ) : activeFrame ? (
@@ -2394,17 +2983,19 @@ function MapRadarTabContent({
                           : 'bg-emerald-50 text-emerald-700 dark:bg-emerald-950 dark:text-emerald-300 border-emerald-200 dark:border-emerald-800'
                       }`}
                     >
-                      {activeFrame.isNowcast ? 'Previsão (+30m)' : 'Observado'}
+                      {activeFrame.isNowcast
+                        ? tr('Previsão (+30m)', 'Nowcast (+30m)')
+                        : tr('Observado', 'Observed')}
                     </span>
                     <span className="font-mono text-xs sm:text-sm font-bold text-sky-900 dark:text-white bg-white dark:bg-slate-900 px-3 py-1.5 rounded-xl border border-sky-200 dark:border-slate-800">
-                      {formatFrameTimestamp(activeFrame.timeUnix)}
+                      {formatFrameTimestamp(activeFrame.timeUnix, locale)}
                     </span>
                   </>
                 ) : (
                   <span className="text-xs text-slate-500">
                     {isLoadingRadar
-                      ? 'Carregando radar...'
-                      : 'Radar pronto'}
+                      ? tr('Carregando radar...', 'Loading radar...')
+                      : tr('Radar pronto', 'Radar ready')}
                   </span>
                 )}
               </div>
@@ -2413,7 +3004,7 @@ function MapRadarTabContent({
         </div>
       </section>
 
-      {/* Gaveta Recolhível Estilo Windy (sempre montada com CSS hidden quando fechada para preservação DOM + zero poluição visual) */}
+      {/* Gaveta Recolhível Estilo Windy (acoplada lateral/inferior em Tela Cheia para nunca sobrepor o Popup do Pin) */}
       <div
         id="map-windy-controls-drawer"
         data-testid="map-windy-drawer"
@@ -2422,7 +3013,7 @@ function MapRadarTabContent({
           !isSidebarOpen
             ? 'hidden'
             : isFullscreen
-              ? 'fixed bottom-20 right-3 z-[85] max-h-[46vh] w-[calc(100vw-1.5rem)] sm:w-[420px] overflow-y-auto rounded-2xl border border-slate-700 bg-slate-900/95 backdrop-blur-md p-3.5 shadow-2xl space-y-3 min-w-0'
+              ? 'shrink-0 w-full lg:w-[400px] max-h-[38vh] lg:max-h-none lg:h-full overflow-y-auto border-t lg:border-t-0 lg:border-l border-slate-700 bg-slate-900 p-3.5 space-y-3 min-w-0'
               : 'space-y-3 min-w-0'
         }
       >
@@ -2431,14 +3022,16 @@ function MapRadarTabContent({
             <div className="flex flex-wrap items-center justify-between gap-2 border-b border-sky-100 dark:border-slate-800 pb-2.5">
               <div className="inline-flex items-center gap-2 text-xs sm:text-sm font-bold text-slate-900 dark:text-white min-w-0">
                 <SlidersHorizontal className="w-4 h-4 text-sky-600 shrink-0" aria-hidden="true" />
-                <span className="truncate">Gaveta de Camadas, Radar &amp; Pin (Estilo Windy)</span>
+                <span className="truncate">
+                  {tr('Camadas, Radar & Controles de Pin', 'Layers, Radar & Pin Controls')}
+                </span>
               </div>
 
               {/* Seletor de Estilo de Mapa Base (Padrão OSM / Costeiro Esri / Satélite Esri) */}
               <div
                 className="inline-flex flex-wrap items-center rounded-xl bg-sky-50/90 dark:bg-slate-800 p-1 border border-sky-200/80 dark:border-slate-700 min-w-0"
                 role="group"
-                aria-label="Seletor de Estilo de Mapa Base"
+                aria-label={tr('Seletor de Estilo de Mapa Base', 'Base Map Style Selector')}
               >
                 {BASE_MAP_STYLES.map((style) => (
                   <button
@@ -2451,7 +3044,7 @@ function MapRadarTabContent({
                         : 'text-slate-600 dark:text-slate-300 hover:text-sky-700 hover:bg-white/60'
                     }`}
                   >
-                    {style.shortLabel}
+                    {tr(style.shortLabelPt, style.shortLabelEn)}
                   </button>
                 ))}
               </div>
@@ -2461,14 +3054,14 @@ function MapRadarTabContent({
             <div
               className="flex flex-wrap items-center gap-1.5 min-w-0"
               role="group"
-              aria-label="Camada meteorológica do modelo"
+              aria-label={tr('Camada meteorológica do modelo', 'Model weather layer')}
             >
               <span className="text-[11px] font-bold text-sky-800 dark:text-sky-300 mr-1">
-                Camada do Modelo:
+                {tr('Camada do Modelo:', 'Model Layer:')}
               </span>
               {WEATHER_LAYER_OPTIONS.filter(
                 (opt) => opt.id !== 'waves' || forecast?.marineAvailable !== false,
-              ).map(({ id, label, Icon }) => {
+              ).map(({ id, labelPt, labelEn, Icon }) => {
                 const active = activeWeatherLayer === id;
                 return (
                   <button
@@ -2488,7 +3081,7 @@ function MapRadarTabContent({
                     }`}
                   >
                     <Icon className="w-3.5 h-3.5 shrink-0" aria-hidden="true" />
-                    <span>{label}</span>
+                    <span>{tr(labelPt, labelEn)}</span>
                   </button>
                 );
               })}
@@ -2516,13 +3109,16 @@ function MapRadarTabContent({
                     ? 'bg-amber-50 dark:bg-amber-950/60 border-amber-300 dark:border-amber-700 text-amber-800 dark:text-amber-200'
                     : 'bg-white dark:bg-slate-800 border-sky-200 dark:border-slate-700 text-slate-700 dark:text-slate-200 hover:bg-sky-50'
                 }`}
-                title="Alternar rapidamente entre mapa limpo (sem radar/overlay) e camadas meteorológicas"
+                title={tr(
+                  'Alternar rapidamente entre mapa limpo (sem radar/overlay) e camadas meteorológicas',
+                  'Quickly toggle between clean base map and weather layers',
+                )}
               >
                 <XCircle className="w-4 h-4 text-sky-600 shrink-0" aria-hidden="true" />
                 <span>
                   {!radarEnabled && activeWeatherLayer === 'none'
-                    ? 'Camada Oculta (Ativar Radar)'
-                    : 'Desativar Radar'}
+                    ? tr('Camada Oculta (Ativar Radar)', 'Layers Hidden (Enable Radar)')
+                    : tr('Desativar Radar', 'Disable Radar')}
                 </span>
               </button>
 
@@ -2537,7 +3133,7 @@ function MapRadarTabContent({
                 }`}
               >
                 <Radar className="w-4 h-4 text-sky-600 shrink-0" aria-hidden="true" />
-                <span>Radar Chuva</span>
+                <span>{tr('Radar Chuva', 'Rain Radar')}</span>
               </button>
 
               <button
@@ -2551,7 +3147,7 @@ function MapRadarTabContent({
                 }`}
               >
                 <Bookmark className="w-4 h-4 text-sky-600 shrink-0" aria-hidden="true" />
-                <span>Locais ({savedLocations.length})</span>
+                <span>{tr('Locais', 'Locations')} ({savedLocations.length})</span>
               </button>
 
               <button
@@ -2579,7 +3175,7 @@ function MapRadarTabContent({
                 }`}
               >
                 <Route className="w-4 h-4 text-sky-600 shrink-0" aria-hidden="true" />
-                <span>Trilhas ({tracks.length})</span>
+                <span>{tr('Trilhas', 'Tracks')} ({tracks.length})</span>
               </button>
 
               <button
@@ -2593,11 +3189,11 @@ function MapRadarTabContent({
                 }`}
               >
                 <Square className="w-4 h-4 text-sky-600 shrink-0" aria-hidden="true" />
-                <span>Área Offline</span>
+                <span>{tr('Área Offline', 'Offline Area')}</span>
               </button>
             </div>
 
-            {/* Controles do Pin Estilo Windy (Modo Instantâneo, Raio de Área e Nome/Favorito) */}
+            {/* Controles do Pin (Modo Instantâneo, Raio de Área, Nome, Salvar e Definir como Principal) */}
             <div className="pt-2.5 border-t border-sky-100 dark:border-slate-800 space-y-2.5 min-w-0">
               <div className="flex flex-wrap items-center gap-2 min-w-0">
                 <button
@@ -2613,14 +3209,17 @@ function MapRadarTabContent({
                   <Sparkles className="w-4 h-4 shrink-0" aria-hidden="true" />
                   <span>
                     {instantWindyPin
-                      ? 'Pin Instantâneo (Estilo Windy): Ativo'
-                      : 'Modo Inspeção (Confirmar antes de aplicar)'}
+                      ? tr('Pin Instantâneo: Ativo', 'Instant Pin: Active')
+                      : tr(
+                          'Modo Inspeção (Confirmar antes de aplicar)',
+                          'Inspect Mode (Confirm before applying)',
+                        )}
                   </span>
                 </button>
 
                 <div className="inline-flex flex-wrap items-center rounded-xl bg-sky-50/80 dark:bg-slate-800 p-1 border border-sky-200/80 dark:border-slate-700 min-w-0">
                   <span className="text-[11px] font-semibold text-sky-800 dark:text-sky-300 px-2">
-                    Área do Pin:
+                    {tr('Área do Pin:', 'Pin Area:')}
                   </span>
                   {FORECAST_AREA_RADIUS_OPTIONS_KM.map((radiusKm) => (
                     <button
@@ -2633,7 +3232,7 @@ function MapRadarTabContent({
                           : 'text-slate-600 dark:text-slate-400 hover:text-sky-700'
                       }`}
                     >
-                      {radiusKm === 0 ? 'Ponto' : `${radiusKm} km`}
+                      {radiusKm === 0 ? tr('Ponto', 'Point') : `${radiusKm} km`}
                     </button>
                   ))}
                 </div>
@@ -2643,9 +3242,15 @@ function MapRadarTabContent({
                 <div className="flex flex-wrap items-center gap-2 flex-1 min-w-0">
                   <div className="inline-flex items-center gap-2 px-3 py-1.5 rounded-xl bg-sky-50/70 dark:bg-slate-800 border border-sky-200 dark:border-slate-700 text-xs font-semibold text-sky-900 dark:text-sky-200">
                     <Navigation className="w-3.5 h-3.5 text-sky-600 shrink-0" aria-hidden="true" />
-                    <span className="font-mono font-bold">
-                      {(inspectedPoint?.latitude ?? activeLocation.latitude).toFixed(4)}°,{' '}
-                      {(inspectedPoint?.longitude ?? activeLocation.longitude).toFixed(4)}°
+                    <span className="truncate max-w-[160px]">
+                      {getFriendlyPlaceLabel(
+                        activePinTargetLat,
+                        activePinTargetLon,
+                        activeLocation.name,
+                      )}
+                    </span>
+                    <span className="font-mono text-[11px] opacity-75">
+                      {activePinTargetLat.toFixed(4)}°, {activePinTargetLon.toFixed(4)}°
                     </span>
                   </div>
 
@@ -2653,8 +3258,14 @@ function MapRadarTabContent({
                     type="text"
                     value={customPinName}
                     onChange={(e) => setCustomPinName(e.target.value)}
-                    placeholder="Nome personalizado para este Pin ou Área..."
-                    aria-label="Nome personalizado para o Pin no mapa"
+                    placeholder={tr(
+                      'Nome personalizado para este Pin ou Área...',
+                      'Custom name for this Pin or Area...',
+                    )}
+                    aria-label={tr(
+                      'Nome personalizado para o Pin no mapa',
+                      'Custom name for map Pin',
+                    )}
                     className="flex-1 min-w-0 w-full sm:w-auto min-h-[44px] px-3.5 py-1.5 rounded-xl border border-sky-200 dark:border-slate-700 bg-white dark:bg-slate-800 text-xs text-slate-800 dark:text-slate-100 placeholder:text-slate-400 focus:outline-none focus:ring-2 focus:ring-sky-500/40"
                   />
                 </div>
@@ -2665,76 +3276,101 @@ function MapRadarTabContent({
                       type="button"
                       disabled={isPinLocked}
                       onClick={() => {
-                        const targetLat =
-                          inspectedPoint?.latitude ?? activeLocation.latitude;
-                        const targetLon =
-                          inspectedPoint?.longitude ?? activeLocation.longitude;
-                        const trimmed = customPinName.trim();
-                        const areaSuffix =
-                          forecastAreaRadiusKm > 0
-                            ? ` • Área ${forecastAreaRadiusKm}km`
-                            : '';
-                        const targetName =
-                          trimmed.length > 0
-                            ? `${trimmed}${areaSuffix}`
-                            : `Pin no Mapa (${targetLat.toFixed(3)}, ${targetLon.toFixed(3)}${areaSuffix})`;
+                        const targetName = resolvePersistablePinName(
+                          activePinTargetLat,
+                          activePinTargetLon,
+                        );
                         handleSelectMapCoordinate(
-                          targetLat,
-                          targetLon,
+                          activePinTargetLat,
+                          activePinTargetLon,
                           targetName,
                           'search',
+                          { suppressRecenter: true },
                         );
                       }}
                       title={
                         isPinLocked
-                          ? 'Pin Fixado: destrave o Pin Livre para aplicar novo local'
-                          : 'Aplicar previsão para este Pin'
+                          ? tr(
+                              'Pin Fixado: destrave o Pin Livre para aplicar novo local',
+                              'Pin Locked: unlock Free Pin to apply a new spot',
+                            )
+                          : tr(
+                              'Aplicar previsão para este Pin',
+                              'Apply forecast for this Pin',
+                            )
                       }
                       className="min-h-[44px] min-w-[44px] px-4 py-2 rounded-xl text-xs font-bold bg-sky-600 hover:bg-sky-500 disabled:opacity-50 disabled:cursor-not-allowed text-white shadow-sm inline-flex items-center gap-1.5 transition-colors"
                     >
                       <MapPin className="w-4 h-4 shrink-0" aria-hidden="true" />
-                      <span>Previsão para este Pin</span>
+                      <span>{tr('Previsão para este Pin', 'Forecast for this Pin')}</span>
                     </button>
                   )}
 
-                  {onSaveLocation && (
-                    <button
-                      type="button"
-                      onClick={() =>
-                        handleSaveInspectedCoordinate(
-                          inspectedPoint?.latitude ?? activeLocation.latitude,
-                          inspectedPoint?.longitude ?? activeLocation.longitude,
-                        )
-                      }
-                      className="min-h-[44px] min-w-[44px] px-3.5 py-2 rounded-xl text-xs font-semibold border border-sky-200 dark:border-slate-700 bg-white dark:bg-slate-800 hover:bg-sky-50 dark:hover:bg-slate-700 text-sky-800 dark:text-sky-200 inline-flex items-center gap-1.5 transition-colors"
-                    >
-                      <Bookmark className="w-4 h-4 text-sky-600 shrink-0" aria-hidden="true" />
-                      <span>Salvar Pin nos Favoritos</span>
-                    </button>
-                  )}
+                  <button
+                    type="button"
+                    data-testid="map-save-location-btn"
+                    onClick={() =>
+                      handleSaveInspectedCoordinate(
+                        activePinTargetLat,
+                        activePinTargetLon,
+                      )
+                    }
+                    className="min-h-[44px] min-w-[44px] px-3.5 py-2 rounded-xl text-xs font-semibold border border-sky-200 dark:border-slate-700 bg-white dark:bg-slate-800 hover:bg-sky-50 dark:hover:bg-slate-700 text-sky-800 dark:text-sky-200 inline-flex items-center gap-1.5 transition-colors"
+                  >
+                    <Bookmark className="w-4 h-4 text-sky-600 shrink-0" aria-hidden="true" />
+                    <span>{tr('Salvar Local', 'Save Location')}</span>
+                  </button>
+
+                  <button
+                    type="button"
+                    data-testid="map-set-primary-btn"
+                    onClick={() =>
+                      handleSetPrimaryCoordinate(
+                        activePinTargetLat,
+                        activePinTargetLon,
+                      )
+                    }
+                    className="min-h-[44px] min-w-[44px] px-3.5 py-2 rounded-xl text-xs font-semibold border border-amber-300 dark:border-amber-700 bg-amber-50 dark:bg-amber-950/50 hover:bg-amber-100 dark:hover:bg-amber-900/60 text-amber-900 dark:text-amber-200 inline-flex items-center gap-1.5 transition-colors"
+                  >
+                    <Crosshair className="w-4 h-4 text-amber-600 dark:text-amber-400 shrink-0" aria-hidden="true" />
+                    <span>{tr('Definir como Principal', 'Set as Primary')}</span>
+                  </button>
                 </div>
               </div>
             </div>
           </section>
 
-      {/* Ferramenta: Área de Missão Offline (Cache de Tiles no IndexedDB — 100% Gratuito sem API Key) */}
+      {/* Ferramenta: Área de Missão Offline (100% Gratuito sem API Key) */}
       <section className="rounded-2xl border border-sky-200/80 dark:border-sky-900/60 bg-white dark:bg-slate-900/90 p-4 sm:p-5 shadow-sm space-y-4 min-w-0">
         <div className="flex flex-col md:flex-row md:items-center justify-between gap-3 border-b border-sky-100 dark:border-slate-800 pb-3">
           <div className="space-y-1">
             <div className="flex flex-wrap items-center gap-2">
               <h2 className="text-base sm:text-lg font-bold text-slate-800 dark:text-white flex items-center gap-2">
                 <HardDrive className="w-5 h-5 text-sky-600" aria-hidden="true" />
-                <span>Mapa Offline para Campo (Salvar Área no Dispositivo)</span>
+                <span>
+                  {tr(
+                    'Mapa Offline para Campo (Salvar Área no Dispositivo)',
+                    'Offline Field Map (Save Area on Device)',
+                  )}
+                </span>
               </h2>
               <span className="px-2.5 py-0.5 rounded-full text-xs font-semibold bg-sky-50 dark:bg-sky-950/60 text-sky-700 dark:text-sky-300 border border-sky-200 dark:border-sky-800">
-                Até {MAX_OFFLINE_TILES_PER_MISSION} tiles / missão •{' '}
-                {MAX_CONCURRENT_TILE_DOWNLOADS} conexões simultâneas
+                {tr(
+                  `Até ${MAX_OFFLINE_TILES_PER_MISSION} tiles / missão • ${MAX_CONCURRENT_TILE_DOWNLOADS} conexões simultâneas`,
+                  `Up to ${MAX_OFFLINE_TILES_PER_MISSION} tiles / mission • ${MAX_CONCURRENT_TILE_DOWNLOADS} concurrent`,
+                )}
               </span>
             </div>
             <p className="text-xs sm:text-sm text-slate-600 dark:text-slate-400">
-              Selecione um retângulo ou raio ao redor do Pin e salve o mapa{' '}
-              <strong>{activeBaseStyleLabel}</strong> no IndexedDB para consulta em
-              campo mesmo sem sinal de celular.
+              {tr(
+                'Selecione um retângulo ou raio ao redor do Pin e salve o mapa ',
+                'Select a rectangle or radius around the Pin and save the ',
+              )}
+              <strong>{activeBaseStyleLabel}</strong>{' '}
+              {tr(
+                'no armazenamento do dispositivo para consulta em campo mesmo sem sinal.',
+                'map on your device for field use even without signal.',
+              )}
             </p>
           </div>
 
@@ -2742,10 +3378,10 @@ function MapRadarTabContent({
           <div className="flex flex-wrap items-center gap-2">
             <div className="px-3.5 py-2 rounded-xl bg-sky-50/70 dark:bg-slate-800/90 border border-sky-200/80 dark:border-slate-700 text-xs">
               <div className="font-bold text-sky-900 dark:text-white">
-                {cacheStats.totalTiles} tiles salvos ({formatBytes(cacheStats.totalBytes)})
+                {cacheStats.totalTiles} {tr('tiles salvos', 'tiles saved')} ({formatBytes(cacheStats.totalBytes)})
               </div>
               <div className="text-[11px] text-slate-500 dark:text-slate-400">
-                Padrão: {cacheStats.lightTiles} • Costeiro: {cacheStats.darkTiles}
+                {tr('Claro', 'Light')}: {cacheStats.lightTiles} • {tr('Escuro', 'Dark')}: {cacheStats.darkTiles}
               </div>
             </div>
 
@@ -2756,7 +3392,7 @@ function MapRadarTabContent({
               className="min-h-[44px] min-w-[44px] px-3.5 py-2 rounded-xl text-xs font-semibold inline-flex items-center gap-1.5 border border-rose-200 dark:border-rose-800 bg-rose-50/70 dark:bg-rose-950/40 hover:bg-rose-100/80 disabled:opacity-40 text-rose-700 dark:text-rose-300 transition-colors"
             >
               <Trash2 className="w-4 h-4" aria-hidden="true" />
-              <span>Limpar Mapas Salvos</span>
+              <span>{tr('Limpar Mapas Salvos', 'Clear Saved Maps')}</span>
             </button>
           </div>
         </div>
@@ -2766,7 +3402,10 @@ function MapRadarTabContent({
           {/* Coluna 1: Seleção da Área Geográfica */}
           <div className="lg:col-span-7 space-y-3">
             <div className="text-xs font-bold text-sky-800 dark:text-sky-300">
-              1. Escolha a Área do Mapa para Salvar Offline
+              {tr(
+                '1. Escolha a Área do Mapa para Salvar Offline',
+                '1. Choose the Map Area to Save Offline',
+              )}
             </div>
 
             <div className="flex flex-wrap items-center gap-2">
@@ -2777,7 +3416,7 @@ function MapRadarTabContent({
                 className="min-h-[44px] min-w-[44px] px-3.5 py-2 rounded-xl text-xs font-semibold inline-flex items-center gap-1.5 bg-sky-600 hover:bg-sky-500 text-white shadow-sm transition-colors"
               >
                 <Compass className="w-4 h-4" aria-hidden="true" />
-                <span>Usar Visão Atual do Mapa</span>
+                <span>{tr('Usar Visão Atual do Mapa', 'Use Current Map View')}</span>
               </button>
 
               <button
@@ -2797,8 +3436,8 @@ function MapRadarTabContent({
                 <Maximize2 className="w-4 h-4" aria-hidden="true" />
                 <span>
                   {isDrawingMissionBox
-                    ? 'Desenhando no Mapa (2 Cliques)...'
-                    : 'Desenhar Retângulo (2 Cliques)'}
+                    ? tr('Desenhando no Mapa (2 Cliques)...', 'Drawing on Map (2 Taps)...')
+                    : tr('Desenhar Retângulo (2 Cliques)', 'Draw Rectangle (2 Taps)')}
                 </span>
               </button>
 
@@ -2814,7 +3453,7 @@ function MapRadarTabContent({
                       : 'bg-sky-50/50 dark:bg-slate-800/70 border-sky-200/80 dark:border-slate-700 text-slate-700 dark:text-slate-300 hover:bg-sky-100/60'
                   }`}
                 >
-                  Raio {radiusKm} km
+                  {tr('Raio', 'Radius')} {radiusKm} km
                 </button>
               ))}
             </div>
@@ -2823,7 +3462,7 @@ function MapRadarTabContent({
             <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 text-xs font-mono bg-sky-50/50 dark:bg-slate-950/60 p-3 rounded-xl border border-sky-100 dark:border-slate-800">
               <div>
                 <span className="text-[10px] font-sans text-slate-500 block">
-                  Norte (Lat)
+                  {tr('Norte (Lat)', 'North (Lat)')}
                 </span>
                 <strong className="text-sky-950 dark:text-slate-200">
                   {missionBounds.north.toFixed(4)}°
@@ -2831,7 +3470,7 @@ function MapRadarTabContent({
               </div>
               <div>
                 <span className="text-[10px] font-sans text-slate-500 block">
-                  Sul (Lat)
+                  {tr('Sul (Lat)', 'South (Lat)')}
                 </span>
                 <strong className="text-sky-950 dark:text-slate-200">
                   {missionBounds.south.toFixed(4)}°
@@ -2839,7 +3478,7 @@ function MapRadarTabContent({
               </div>
               <div>
                 <span className="text-[10px] font-sans text-slate-500 block">
-                  Leste (Lon)
+                  {tr('Leste (Lon)', 'East (Lon)')}
                 </span>
                 <strong className="text-sky-950 dark:text-slate-200">
                   {missionBounds.east.toFixed(4)}°
@@ -2847,7 +3486,7 @@ function MapRadarTabContent({
               </div>
               <div>
                 <span className="text-[10px] font-sans text-slate-500 block">
-                  Oeste (Lon)
+                  {tr('Oeste (Lon)', 'West (Lon)')}
                 </span>
                 <strong className="text-sky-950 dark:text-slate-200">
                   {missionBounds.west.toFixed(4)}°
@@ -2859,7 +3498,7 @@ function MapRadarTabContent({
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
               <label className="block space-y-1">
                 <span className="text-xs font-semibold text-slate-700 dark:text-slate-300">
-                  Zoom Mínimo ({missionBounds.minZoom})
+                  {tr('Zoom Mínimo', 'Min Zoom')} ({missionBounds.minZoom})
                 </span>
                 <select
                   value={missionBounds.minZoom}
@@ -2871,7 +3510,12 @@ function MapRadarTabContent({
                 >
                   {[8, 9, 10, 11, 12, 13, 14, 15, 16].map((z) => (
                     <option key={z} value={z}>
-                      Zoom {z} {z <= 10 ? '(Visão Regional)' : z <= 13 ? '(Visão Local)' : '(Detalhe Costeiro)'}
+                      Zoom {z}{' '}
+                      {z <= 10
+                        ? tr('(Visão Regional)', '(Regional View)')
+                        : z <= 13
+                          ? tr('(Visão Local)', '(Local View)')
+                          : tr('(Detalhe Costeiro)', '(Coastal Detail)')}
                     </option>
                   ))}
                 </select>
@@ -2879,7 +3523,7 @@ function MapRadarTabContent({
 
               <label className="block space-y-1">
                 <span className="text-xs font-semibold text-slate-700 dark:text-slate-300">
-                  Zoom Máximo ({missionBounds.maxZoom})
+                  {tr('Zoom Máximo', 'Max Zoom')} ({missionBounds.maxZoom})
                 </span>
                 <select
                   value={missionBounds.maxZoom}
@@ -2891,7 +3535,12 @@ function MapRadarTabContent({
                 >
                   {[8, 9, 10, 11, 12, 13, 14, 15, 16].map((z) => (
                     <option key={z} value={z}>
-                      Zoom {z} {z <= 10 ? '(Visão Regional)' : z <= 13 ? '(Visão Local)' : '(Detalhe Costeiro)'}
+                      Zoom {z}{' '}
+                      {z <= 10
+                        ? tr('(Visão Regional)', '(Regional View)')
+                        : z <= 13
+                          ? tr('(Visão Local)', '(Local View)')
+                          : tr('(Detalhe Costeiro)', '(Coastal Detail)')}
                     </option>
                   ))}
                 </select>
@@ -2904,7 +3553,7 @@ function MapRadarTabContent({
             <div className="space-y-3">
               <div className="flex items-center justify-between">
                 <span className="text-xs font-bold text-sky-800 dark:text-sky-300">
-                  2. Estimativa de Armazenamento
+                  {tr('2. Estimativa de Armazenamento', '2. Storage Estimate')}
                 </span>
                 <span
                   className={`px-2.5 py-1 rounded-full text-xs font-mono font-bold border ${
@@ -2963,12 +3612,16 @@ function MapRadarTabContent({
                   />
                   <div>
                     <strong className="block">
-                      Limite de {MAX_OFFLINE_TILES_PER_MISSION} tiles excedido (
-                      {tileEstimate.totalTiles} estimados)
+                      {tr(
+                        `Limite de ${MAX_OFFLINE_TILES_PER_MISSION} tiles excedido (${tileEstimate.totalTiles} estimados)`,
+                        `${MAX_OFFLINE_TILES_PER_MISSION}-tile limit exceeded (${tileEstimate.totalTiles} estimated)`,
+                      )}
                     </strong>
                     <span>
-                      Escolha um raio menor ou reduza o Zoom Máximo para habilitar o
-                      download offline.
+                      {tr(
+                        'Escolha um raio menor ou reduza o Zoom Máximo para habilitar o download offline.',
+                        'Choose a smaller radius or lower Max Zoom to enable offline download.',
+                      )}
                     </span>
                   </div>
                 </div>
@@ -3005,12 +3658,12 @@ function MapRadarTabContent({
                       )}
                       <span>
                         {downloadProgress.status === 'downloading'
-                          ? 'Salvando tiles offline...'
+                          ? tr('Salvando tiles offline...', 'Saving offline tiles...')
                           : downloadProgress.status === 'completed'
-                            ? 'Mapa salvo com sucesso'
+                            ? tr('Mapa salvo com sucesso', 'Map saved successfully')
                             : downloadProgress.status === 'cancelled'
-                              ? 'Download cancelado'
-                              : 'Falha no download'}
+                              ? tr('Download cancelado', 'Download cancelled')
+                              : tr('Falha no download', 'Download failed')}
                       </span>
                     </span>
                     <span className="font-mono font-bold text-sky-900 dark:text-white">
@@ -3028,8 +3681,11 @@ function MapRadarTabContent({
 
                   {downloadProgress.failedTiles > 0 && (
                     <p className="text-[11px] text-amber-600 dark:text-amber-400">
-                      {downloadProgress.failedTiles} tile(s) ignorados por oscilação de
-                      rede.
+                      {downloadProgress.failedTiles}{' '}
+                      {tr(
+                        'tile(s) ignorados por oscilação de rede.',
+                        'tile(s) skipped due to network fluctuation.',
+                      )}
                     </p>
                   )}
                   {downloadProgress.errorMessage && (
@@ -3056,8 +3712,11 @@ function MapRadarTabContent({
                 <Download className="w-4 h-4" aria-hidden="true" />
                 <span>
                   {isDownloadingTiles
-                    ? 'Salvando Mapa Offline...'
-                    : `Salvar ${tileEstimate.totalTiles} Tiles Offline`}
+                    ? tr('Salvando Mapa Offline...', 'Saving Offline Map...')
+                    : tr(
+                        `Salvar ${tileEstimate.totalTiles} Tiles Offline`,
+                        `Save ${tileEstimate.totalTiles} Offline Tiles`,
+                      )}
                 </span>
               </button>
 
@@ -3068,7 +3727,7 @@ function MapRadarTabContent({
                   className="min-h-[44px] min-w-[44px] px-4 py-2.5 rounded-xl text-xs sm:text-sm font-bold inline-flex items-center justify-center gap-1.5 bg-rose-600 hover:bg-rose-500 text-white shadow-sm transition-colors"
                 >
                   <XCircle className="w-4 h-4" aria-hidden="true" />
-                  <span>Cancelar</span>
+                  <span>{tr('Cancelar', 'Cancel')}</span>
                 </button>
               )}
             </div>
@@ -3084,10 +3743,17 @@ function MapRadarTabContent({
  * Aba Mapa & Radar encapsulada em `<ModuleErrorBoundary>` para isolamento Zero-Crash.
  */
 export function MapRadarTab(props: MapRadarTabProps): React.ReactElement {
+  const { tr } = useLocale();
   return (
     <ModuleErrorBoundary
-      moduleName="Aba Mapa Interativo, Pin Estilo Windy & Radar"
-      fallbackDescription="Falha isolada no motor cartográfico Leaflet ou camada de radar. As abas Previsão e Campo & Dados continuam operacionais."
+      moduleName={tr(
+        'Aba Mapa Interativo, Pin Estilo Windy & Radar',
+        'Interactive Map, Weather Pin & Radar Tab',
+      )}
+      fallbackDescription={tr(
+        'Falha isolada no motor cartográfico ou camada de radar. As abas Previsão e Campo & Dados continuam operacionais.',
+        'Isolated failure in the map engine or radar layer. Forecast and Field & Data tabs remain operational.',
+      )}
       onErrorLog={props.onErrorLog}
     >
       <MapRadarTabContent {...props} />
