@@ -7,6 +7,7 @@ import {
   smoothCircularHeadingDeg,
   unwrapContinuousAngleDeg,
 } from '../components/field/WindCompass';
+import { GlossaryModal } from '../components/common';
 import { AppShell } from '../components/layout';
 import { TechnicalReportsPanel } from '../components/reports';
 import { SettingsTab } from '../components/settings';
@@ -323,23 +324,48 @@ describe('FieldCast V4.0 — Modular UI, Compass 360/0 Fix, Notifications & Scie
       compMount.unmount();
     });
 
-    it('renders SettingsTab with 3 templates and TechnicalReportsPanel inside FieldDataTab sub-views', async () => {
+    it('renders SettingsTab without guide templates, GlossaryModal with 3 templates, and TechnicalReportsPanel inside FieldDataTab sub-views', async () => {
       const forecast = createCoastalTestForecast();
 
       const settingsMount = mountReactComponent(<SettingsTab forecast={forecast} />);
       expect(settingsMount.container.querySelector('[data-testid="settings-tab"]')).not.toBeNull();
-      const tplBtn = settingsMount.container.querySelector(
-        '[data-testid="use-template-tpl-morning-field"]',
-      ) as HTMLButtonElement;
-      expect(tplBtn).not.toBeNull();
-      act(() => {
-        tplBtn.click();
-      });
+      expect(
+        settingsMount.container.querySelector('[data-testid="use-template-tpl-morning-field"]'),
+      ).toBeNull();
       const startInput = settingsMount.container.querySelector(
         '[data-testid="rule-window-start"]',
       ) as HTMLInputElement;
-      expect(startInput.value).toBe('06:00');
+      expect(startInput).not.toBeNull();
       settingsMount.unmount();
+
+      const onActivateTemplate = vi.fn();
+      const glossaryMount = mountReactComponent(
+        <GlossaryModal
+          isOpen={true}
+          onClose={vi.fn()}
+          onActivateTemplate={onActivateTemplate}
+        />,
+      );
+      for (const tpl of NOTIFICATION_RULE_TEMPLATES) {
+        expect(
+          glossaryMount.container.querySelector(`[data-testid="use-template-${tpl.templateId}"]`),
+        ).not.toBeNull();
+      }
+      const tplBtn = glossaryMount.container.querySelector(
+        '[data-testid="use-template-tpl-morning-field"]',
+      ) as HTMLButtonElement;
+      act(() => {
+        tplBtn.click();
+      });
+      expect(onActivateTemplate).toHaveBeenCalledTimes(1);
+      expect(onActivateTemplate.mock.calls[0]?.[0].templateId).toBe('tpl-morning-field');
+      expect(
+        onActivateTemplate.mock.calls[0]?.[1].rules.some(
+          (r: { id: string; enabled: boolean }) =>
+            r.id === 'rule-tpl-morning-field' && r.enabled === true,
+        ),
+      ).toBe(true);
+      glossaryMount.unmount();
 
       const reportsMount = mountReactComponent(
         <TechnicalReportsPanel forecast={forecast} activeLocation={TEST_COASTAL_LOCATION} />,

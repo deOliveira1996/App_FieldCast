@@ -27,7 +27,7 @@ function getHumanReadableReason(error: Error | null): string {
     return 'Falha de comunicação de rede ao carregar dados deste módulo.';
   }
   if (msg.includes('quota') || msg.includes('indexeddb') || msg.includes('dexie')) {
-    return 'Restrição de armazenamento local (IndexedDB) detectada no navegador.';
+    return 'Restrição de armazenamento local detectada no navegador.';
   }
   if (msg.includes('canvas') || msg.includes('echarts') || msg.includes('leaflet')) {
     return 'Erro ao inicializar o motor gráfico ou camada visual deste painel.';
