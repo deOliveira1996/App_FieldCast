@@ -6,7 +6,10 @@ import {
   getLatestCachedForecast,
   getSavedLocations,
 } from '../db/database';
-import { fetchIpApproximateLocation } from '../services/geocodingService';
+import {
+  fetchIpApproximateLocation,
+  reverseGeocodeNominatim,
+} from '../services/geocodingService';
 import type { ActiveCoordinates, LocationOrigin } from '../types/field';
 import type { GpsHealthStatus } from '../types/health';
 import { haversineDistanceKm } from '../utils/exporters';
@@ -21,10 +24,15 @@ export interface RawGpsFix {
 
 export interface ResolveCascadingLocationOptions {
   timeoutMs?: number;
+  locale?: 'pt' | 'en';
   isNativePlatformFn?: () => boolean;
   getGpsPositionFn?: (timeoutMs: number) => Promise<RawGpsFix>;
   fetchIpLocationFn?: () => Promise<ActiveCoordinates>;
   getCachedLocationFn?: () => Promise<ActiveCoordinates | null>;
+  reverseGeocodeFn?: (
+    latitude: number,
+    longitude: number,
+  ) => Promise<{ friendlyLabel: string } | null>;
 }
 
 export interface SmartLocationResolution {
@@ -125,7 +133,7 @@ export async function resolveDexieCachedCoordinates(): Promise<ActiveCoordinates
         latitude: latestForecast.latitude,
         longitude: latestForecast.longitude,
         accuracyM: null,
-        name: `Cache Offline (${latestForecast.latitude.toFixed(3)}, ${latestForecast.longitude.toFixed(3)})`,
+        name: `Último local salvo (${latestForecast.latitude.toFixed(3)}, ${latestForecast.longitude.toFixed(3)})`,
         origin: 'cached',
         isApproximateIp: false,
         updatedAtIso: nowIso,
@@ -175,21 +183,36 @@ export async function resolveCascadingLocation(
   options?: ResolveCascadingLocationOptions,
 ): Promise<SmartLocationResolution> {
   const timeoutMs = options?.timeoutMs ?? GPS_TIMEOUT_MS;
+  const fallbackGpsLabel =
+    options?.locale === 'en' ? 'Current GPS Location' : 'Localização Atual (GPS)';
   const getGpsFn =
     options?.getGpsPositionFn ??
     ((t: number) => acquireDeviceGpsFix(t, options?.isNativePlatformFn));
+  const reverseGeocodeFn =
+    options?.reverseGeocodeFn ??
+    ((lat: number, lon: number) => reverseGeocodeNominatim(lat, lon));
   const fetchIpFn = options?.fetchIpLocationFn ?? (() => fetchIpApproximateLocation());
   const getCachedFn = options?.getCachedLocationFn ?? resolveDexieCachedCoordinates;
 
-  // Nível 1: GPS Nativo / Web (timeout 8s)
+  // Nível 1: GPS Nativo / Web (timeout 8s) + Geocodificação Reversa amigável
   try {
     const fix = await getGpsFn(timeoutMs);
     if (Number.isFinite(fix.latitude) && Number.isFinite(fix.longitude)) {
+      let resolvedName = fallbackGpsLabel;
+      try {
+        const rev = await reverseGeocodeFn(fix.latitude, fix.longitude);
+        if (rev?.friendlyLabel && rev.friendlyLabel.trim().length > 0) {
+          resolvedName = rev.friendlyLabel.trim();
+        }
+      } catch {
+        resolvedName = fallbackGpsLabel;
+      }
+
       const coords: ActiveCoordinates = {
         latitude: fix.latitude,
         longitude: fix.longitude,
         accuracyM: fix.accuracyM,
-        name: `Posição GPS (${fix.latitude.toFixed(4)}, ${fix.longitude.toFixed(4)})`,
+        name: resolvedName,
         origin: 'gps',
         isApproximateIp: false,
         updatedAtIso: new Date().toISOString(),
@@ -259,6 +282,7 @@ export async function resolveCascadingLocation(
 export interface UseSmartLocationOptions extends ResolveCascadingLocationOptions {
   autoResolveOnMount?: boolean;
   initialCoordinates?: ActiveCoordinates;
+  onAutoResolved?: (resolution: SmartLocationResolution) => void;
 }
 
 export interface UseSmartLocationReturn {
@@ -367,8 +391,21 @@ export function useSmartLocation(options?: UseSmartLocationOptions): UseSmartLoc
 
   useEffect(() => {
     if (options?.autoResolveOnMount !== false) {
-      void resolveLocation();
+      let cancelled = false;
+      void resolveLocation()
+        .then((res) => {
+          if (!cancelled) {
+            optionsRef.current?.onAutoResolved?.(res);
+          }
+        })
+        .catch(() => {
+          // Erro já registrado no estado do hook
+        });
+      return () => {
+        cancelled = true;
+      };
     }
+    return undefined;
   }, [options?.autoResolveOnMount, resolveLocation]);
 
   return {

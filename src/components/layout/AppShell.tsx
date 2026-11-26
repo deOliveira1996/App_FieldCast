@@ -29,9 +29,14 @@ import {
 import type { ActiveCoordinates, SavedLocation } from '../../types/field';
 import type { HealthCheckSnapshot, ToastMessage } from '../../types/health';
 import type { NominatimResult } from '../../types/schemas';
-import type { V4AppTabId } from '../../types/v4';
+import type {
+  NotificationRuleTemplate,
+  UserNotificationPreferences,
+  V4AppTabId,
+} from '../../types/v4';
 import type { ForecastViewMode } from '../../types/weather';
 import type { ThemeMode } from '../../hooks/useTheme';
+import { useLocale } from '../../context/LocaleContext';
 import {
   dispatchFieldCastLayoutRefresh,
   useViewportResize,
@@ -138,19 +143,15 @@ export interface AppShellProps {
   }) => void | Promise<void>;
   onRunHealthCheck?: () => void | Promise<void>;
   onClearErrorLogs?: () => void | Promise<void>;
+  onActivateTemplate?: (
+    template: NotificationRuleTemplate,
+    updatedPrefs: UserNotificationPreferences,
+  ) => void;
   onToast?: (toast: Omit<ToastMessage, 'id'>) => void;
   isLocationsModalOpen?: boolean;
   onLocationsModalOpenChange?: (open: boolean) => void;
   children: ReactNode;
 }
-
-const ORIGIN_BADGE_LABELS: Record<ActiveCoordinates['origin'], string> = {
-  gps: 'GPS',
-  ip: 'Via IP',
-  cached: 'Cache',
-  saved: 'Salvo',
-  search: 'Pin / Busca',
-};
 
 interface NavTabDefinition {
   id: AppTabId;
@@ -193,11 +194,13 @@ export const AppShell: React.FC<AppShellProps> = ({
   onSetPrimaryLocation,
   onRunHealthCheck,
   onClearErrorLogs,
+  onActivateTemplate,
   onToast,
   isLocationsModalOpen: controlledLocationsOpen,
   onLocationsModalOpenChange,
   children,
 }) => {
+  const { locale, toggleLocale, tr } = useLocale();
   const viewport = useViewportResize();
 
   const [isSidebarCollapsed, setIsSidebarCollapsed] = useState<boolean>(() =>
@@ -286,55 +289,84 @@ export const AppShell: React.FC<AppShellProps> = ({
     [activeLocation, onRequestGps, onSaveLocation, onSelectLocation, savedLocations, setLocationsOpen],
   );
 
+  const originBadgeLabels: Record<ActiveCoordinates['origin'], string> = {
+    gps: 'GPS',
+    ip: tr('Rede', 'Network'),
+    cached: tr('Salvo', 'Saved'),
+    saved: tr('Salvo', 'Saved'),
+    search: tr('Pin / Busca', 'Pin / Search'),
+  };
+
   const tabs: NavTabDefinition[] = [
     {
       id: 'forecast',
-      label: 'Resumo',
-      mobileLabel: 'Resumo',
-      description: 'Condições atuais, eventos extremos e resumo diário',
+      label: tr('Resumo', 'Summary'),
+      mobileLabel: tr('Resumo', 'Summary'),
+      description: tr(
+        'Condições atuais, eventos extremos e resumo diário',
+        'Current conditions, extreme events and daily summary',
+      ),
       Icon: CloudSun,
       badgeCount: activeAlertsCount > 0 ? activeAlertsCount : undefined,
     },
     {
       id: 'comparison',
-      label: 'Modelos',
-      mobileLabel: 'Modelos',
-      description: 'Comparação multi-modelo 168h e gráficos sob demanda',
+      label: tr('Modelos', 'Models'),
+      mobileLabel: tr('Modelos', 'Models'),
+      description: tr(
+        'Comparação multi-modelo 168h e gráficos sob demanda',
+        '168h multi-model comparison and on-demand charts',
+      ),
       Icon: GitCompare,
     },
     {
       id: 'navigation',
-      label: 'Navegação',
-      mobileLabel: 'Navegar',
-      description: 'Marés MSL, ondas, correntes e bússola costeira',
+      label: tr('Navegação', 'Marine'),
+      mobileLabel: tr('Navegar', 'Marine'),
+      description: tr(
+        'Marés MSL, ondas, correntes e bússola costeira',
+        'MSL tides, waves, currents and coastal compass',
+      ),
       Icon: Anchor,
     },
     {
       id: 'aeronautics',
-      label: 'Aeronáutica',
-      mobileLabel: 'Drone/Kp',
-      description: 'Voo de drone, perfil vertical, cisalhamento e índice Kp',
+      label: tr('Aeronáutica', 'Aero & Drone'),
+      mobileLabel: tr('Drone/Kp', 'Drone/Kp'),
+      description: tr(
+        'Voo de drone, perfil vertical, cisalhamento e índice Kp',
+        'Drone flight, vertical profile, wind shear and Kp index',
+      ),
       Icon: Plane,
     },
     {
       id: 'map',
-      label: 'Mapa',
-      mobileLabel: 'Mapa',
-      description: 'Mapa interativo, trava de pin, radar e tiles offline',
+      label: tr('Mapa', 'Map & Radar'),
+      mobileLabel: tr('Mapa', 'Map'),
+      description: tr(
+        'Mapa interativo, trava de pin, radar e mapas offline',
+        'Interactive map, pin lock, radar and offline maps',
+      ),
       Icon: MapIcon,
     },
     {
       id: 'field',
-      label: 'Armazenamento',
-      mobileLabel: 'Dados',
-      description: 'Rotas GPS, waypoints, séries ERA5 e relatórios',
+      label: tr('Armazenamento', 'Field & Data'),
+      mobileLabel: tr('Dados', 'Data'),
+      description: tr(
+        'Rotas GPS, marcações, séries históricas e relatórios',
+        'GPS routes, waypoints, historical series and reports',
+      ),
       Icon: Database,
     },
     {
       id: 'settings',
-      label: 'Configurações',
-      mobileLabel: 'Ajustes',
-      description: 'Notificações customizadas, janelas horárias e limites',
+      label: tr('Configurações', 'Settings'),
+      mobileLabel: tr('Ajustes', 'Settings'),
+      description: tr(
+        'Notificações customizadas, janelas horárias e limites',
+        'Custom notifications, time windows and thresholds',
+      ),
       Icon: Settings,
       badgeCount: unreadNotificationsCount > 0 ? unreadNotificationsCount : undefined,
     },
@@ -350,7 +382,7 @@ export const AppShell: React.FC<AppShellProps> = ({
     void safeAction(async () => onRefreshForecast(), {
       actionKey: 'app_shell_refresh_forecast',
       moduleName: 'AppShell',
-      errorTitle: 'Não foi possível atualizar a previsão',
+      errorTitle: tr('Não foi possível atualizar a previsão', 'Could not refresh forecast'),
       onToast,
     });
   };
@@ -383,7 +415,7 @@ export const AppShell: React.FC<AppShellProps> = ({
                   FieldCast
                 </span>
                 <span className="text-[10px] font-medium text-sky-100">
-                  Previsão &amp; Campo
+                  {tr('Previsão & Campo', 'Forecast & Field')}
                 </span>
               </div>
             </div>
@@ -393,7 +425,10 @@ export const AppShell: React.FC<AppShellProps> = ({
               <button
                 type="button"
                 onClick={() => setLocationsOpen(true)}
-                aria-label={`Local ativo: ${activeLocation.name}. Clique para buscar uma localidade ou dar um Pin no mapa.`}
+                aria-label={tr(
+                  `Local ativo: ${activeLocation.name}. Clique para buscar uma localidade ou dar um Pin no mapa.`,
+                  `Active location: ${activeLocation.name}. Click to search a location or drop a map pin.`,
+                )}
                 className="w-full min-h-[44px] px-4 py-1.5 rounded-full bg-white text-slate-800 hover:bg-sky-50 shadow-sm flex items-center justify-between gap-2.5 transition-all focus:outline-none focus:ring-2 focus:ring-sky-200 min-w-0"
               >
                 <div className="flex items-center gap-2.5 min-w-0">
@@ -409,26 +444,30 @@ export const AppShell: React.FC<AppShellProps> = ({
                 <div className="flex items-center gap-1.5 shrink-0">
                   <span className="hidden sm:inline-block px-2 py-0.5 rounded-full text-[10px] font-bold bg-sky-100 text-[#0070b8]">
                     {activeLocation.isApproximateIp
-                      ? 'Aproximado via IP'
-                      : ORIGIN_BADGE_LABELS[activeLocation.origin]}
+                      ? tr('Aproximado por Rede', 'Approx. Network')
+                      : originBadgeLabels[activeLocation.origin]}
                   </span>
                   <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-[11px] font-semibold bg-[#0080cd] text-white">
                     <Search className="w-3 h-3" aria-hidden="true" />
-                    <span className="hidden sm:inline">Buscar / Pin</span>
+                    <span className="hidden sm:inline">{tr('Buscar / Pin', 'Search / Pin')}</span>
                   </span>
                 </div>
               </button>
             </div>
 
-            {/* Right Controls: Refresh, Glossary, Theme Toggle, Settings Gear, HealthBadge */}
+            {/* Right Controls: Refresh, PT/EN Toggle, Glossary, Theme Toggle, Settings Gear, HealthBadge */}
             <div className="order-2 md:order-3 flex items-center gap-1.5 sm:gap-2 shrink-0 min-w-0">
               {onRefreshForecast && (
                 <button
                   type="button"
+                  data-testid="refresh-forecast-btn"
                   onClick={handleRefreshClick}
                   disabled={isRefreshingForecast}
-                  aria-label="Atualizar previsão meteorológica"
-                  title="Atualizar Previsão"
+                  aria-label={tr(
+                    'Atualizar previsão meteorológica',
+                    'Refresh weather forecast',
+                  )}
+                  title={tr('Atualizar Previsão', 'Refresh Forecast')}
                   className="min-h-[44px] min-w-[44px] p-2 rounded-xl bg-white/15 hover:bg-white/25 text-white border border-white/20 inline-flex items-center justify-center transition-colors focus:outline-none focus:ring-2 focus:ring-white/60"
                 >
                   <RefreshCw
@@ -438,12 +477,44 @@ export const AppShell: React.FC<AppShellProps> = ({
                 </button>
               )}
 
+              {/* Bilingual PT / EN Toggle */}
+              <button
+                type="button"
+                data-testid="locale-toggle-btn"
+                onClick={toggleLocale}
+                aria-label={tr(
+                  'Alternar idioma para Inglês (EN)',
+                  'Switch language to Portuguese (PT)',
+                )}
+                title={tr(
+                  'Idioma: Português (clique para Inglês)',
+                  'Language: English (click for Portuguese)',
+                )}
+                className="min-h-[44px] min-w-[44px] px-2.5 py-2 rounded-xl bg-white/15 hover:bg-white/25 text-white border border-white/20 inline-flex items-center justify-center gap-1 text-xs font-extrabold tracking-wide transition-colors focus:outline-none focus:ring-2 focus:ring-white/60"
+              >
+                <span
+                  className={
+                    locale === 'pt' ? 'underline decoration-2 underline-offset-2' : 'opacity-70'
+                  }
+                >
+                  PT
+                </span>
+                <span className="opacity-50">/</span>
+                <span
+                  className={
+                    locale === 'en' ? 'underline decoration-2 underline-offset-2' : 'opacity-70'
+                  }
+                >
+                  EN
+                </span>
+              </button>
+
               {/* Glossary Button (Icon-only compact) */}
               <button
                 type="button"
                 onClick={() => setIsGlossaryOpen(true)}
-                aria-label="Abrir Guia Rápido e Glossário"
-                title="Guia Rápido & Glossário"
+                aria-label={tr('Abrir Guia Rápido e Glossário', 'Open Quick Guide & Glossary')}
+                title={tr('Guia Rápido & Glossário', 'Quick Guide & Glossary')}
                 className="hidden sm:inline-flex min-h-[44px] min-w-[44px] p-2 rounded-xl bg-white/15 hover:bg-white/25 text-white border border-white/20 items-center justify-center transition-colors focus:outline-none focus:ring-2 focus:ring-white/60"
               >
                 <BookOpen className="w-4 h-4" aria-hidden="true" />
@@ -455,13 +526,13 @@ export const AppShell: React.FC<AppShellProps> = ({
                 onClick={onToggleTheme}
                 aria-label={
                   theme === 'dark'
-                    ? 'Alternar para Tema Claro Clean'
-                    : 'Alternar para Tema Noturno'
+                    ? tr('Alternar para Tema Claro Clean', 'Switch to Clean Light Theme')
+                    : tr('Alternar para Tema Noturno', 'Switch to Dark Theme')
                 }
                 title={
                   theme === 'dark'
-                    ? 'Tema Claro Clean (Azul e Branco)'
-                    : 'Tema Noturno Oceânico'
+                    ? tr('Tema Claro Clean (Azul e Branco)', 'Clean Light Theme (Blue & White)')
+                    : tr('Tema Noturno Oceânico', 'Oceanic Dark Theme')
                 }
                 className="hidden sm:inline-flex min-h-[44px] min-w-[44px] p-2 rounded-xl bg-white/15 hover:bg-white/25 text-white border border-white/20 items-center justify-center transition-colors focus:outline-none focus:ring-2 focus:ring-white/60"
               >
@@ -477,9 +548,12 @@ export const AppShell: React.FC<AppShellProps> = ({
                 type="button"
                 data-testid="header-settings-btn"
                 onClick={() => onTabChange('settings')}
-                aria-label="Abrir Configurações e Alertas"
+                aria-label={tr(
+                  'Abrir Configurações e Alertas',
+                  'Open Settings and Alerts',
+                )}
                 aria-current={activeTab === 'settings' ? 'page' : undefined}
-                title="Configurações & Alertas"
+                title={tr('Configurações & Alertas', 'Settings & Alerts')}
                 className={`relative min-h-[44px] min-w-[44px] p-2 rounded-xl border inline-flex items-center justify-center transition-colors focus:outline-none focus:ring-2 focus:ring-white/70 ${
                   activeTab === 'settings'
                     ? 'bg-white text-[#0070b8] border-white shadow-sm'
@@ -518,8 +592,8 @@ export const AppShell: React.FC<AppShellProps> = ({
               data-testid="sidebar-collapse-toggle"
               onClick={handleToggleSidebarCollapsed}
               aria-expanded={false}
-              aria-label="Expandir barra lateral"
-              title="Expandir barra lateral"
+              aria-label={tr('Expandir barra lateral', 'Expand sidebar')}
+              title={tr('Expandir barra lateral', 'Expand sidebar')}
               className="hidden md:inline-flex fixed left-1.5 top-[72px] z-40 min-h-[44px] min-w-[44px] w-9 h-9 rounded-full border border-sky-200 dark:border-sky-700 bg-white/95 dark:bg-[#132a47]/95 hover:bg-sky-50 dark:hover:bg-sky-900/70 text-[#0080cd] dark:text-sky-200 shadow-md items-center justify-center transition-colors focus:outline-none focus:ring-2 focus:ring-sky-500"
             >
               <ChevronRight className="w-4 h-4" aria-hidden="true" />
@@ -529,7 +603,7 @@ export const AppShell: React.FC<AppShellProps> = ({
           {/* Desktop Retractable Left Sidebar (0px visual footprint when collapsed) */}
           <aside
             data-testid="app-retractable-sidebar"
-            aria-label="Barra Lateral de Módulos"
+            aria-label={tr('Barra Lateral de Módulos', 'Modules Sidebar')}
             data-collapsed={isSidebarCollapsed ? 'true' : 'false'}
             className={`hidden md:block shrink-0 transition-[width,opacity] duration-200 ${
               isSidebarCollapsed
@@ -542,7 +616,7 @@ export const AppShell: React.FC<AppShellProps> = ({
               <div className="flex items-center justify-between px-1 gap-2 min-w-0">
                 <div className="min-w-0">
                   <span className="block text-[10px] font-extrabold uppercase tracking-wider text-sky-700 dark:text-sky-300 truncate">
-                    Módulos
+                    {tr('Módulos', 'Modules')}
                   </span>
                   <span className="block text-xs font-semibold text-slate-600 dark:text-sky-200/80 truncate">
                     {activeLocation.name}
@@ -555,8 +629,8 @@ export const AppShell: React.FC<AppShellProps> = ({
                     data-testid="sidebar-collapse-toggle"
                     onClick={handleToggleSidebarCollapsed}
                     aria-expanded={true}
-                    aria-label="Recolher barra lateral"
-                    title="Recolher barra lateral"
+                    aria-label={tr('Recolher barra lateral', 'Collapse sidebar')}
+                    title={tr('Recolher barra lateral', 'Collapse sidebar')}
                     className="min-h-[44px] min-w-[44px] rounded-xl border border-sky-200/80 dark:border-sky-800 bg-sky-50/80 dark:bg-[#132a47] hover:bg-sky-100 dark:hover:bg-sky-900/60 text-slate-700 dark:text-sky-100 inline-flex items-center justify-center shrink-0 transition-colors focus:outline-none focus:ring-2 focus:ring-sky-500"
                   >
                     <ChevronLeft className="w-4 h-4" aria-hidden="true" />
@@ -566,7 +640,7 @@ export const AppShell: React.FC<AppShellProps> = ({
 
               {/* Desktop Primary Navigation (All 7 Tabs) */}
               <nav
-                aria-label="Navegação Principal Desktop"
+                aria-label={tr('Navegação Principal Desktop', 'Desktop Primary Navigation')}
                 className="hidden md:flex flex-col gap-1.5 min-w-0"
               >
                 {tabs.map(({ id, label, Icon, badgeCount }) => {
@@ -626,7 +700,7 @@ export const AppShell: React.FC<AppShellProps> = ({
 
         {/* Mobile Fixed Bottom Tab Bar (4 Quick Tabs + Menu Drawer Button >= 48x44px) */}
         <nav
-          aria-label="Navegação Principal Mobile"
+          aria-label={tr('Navegação Principal Mobile', 'Mobile Primary Navigation')}
           className="md:hidden fixed bottom-0 inset-x-0 z-40 max-w-[100vw] border-t border-sky-200 dark:border-sky-800/70 bg-white/95 dark:bg-[#0f243d]/95 backdrop-blur-md px-2 pt-2 pb-[max(0.65rem,env(safe-area-inset-bottom,0px))] shadow-xl"
         >
           <div className="grid grid-cols-5 gap-1.5 max-w-lg mx-auto min-w-0">
@@ -707,7 +781,7 @@ export const AppShell: React.FC<AppShellProps> = ({
               data-testid="mobile-sidebar-drawer"
               role="dialog"
               aria-modal="true"
-              aria-label="Menu Completo FieldCast"
+              aria-label={tr('Menu Completo FieldCast', 'FieldCast Full Menu')}
               onClick={(e) => e.stopPropagation()}
               className="w-[min(88vw,360px)] max-w-full h-full flex flex-col justify-between bg-white dark:bg-[#0f243d] text-slate-800 dark:text-sky-50 border-l border-sky-200 dark:border-sky-800 shadow-2xl overflow-y-auto px-4 pt-[max(1rem,env(safe-area-inset-top,0px))] pb-[max(1.25rem,env(safe-area-inset-bottom,0px))] gap-5"
             >
@@ -716,7 +790,7 @@ export const AppShell: React.FC<AppShellProps> = ({
                 <div className="flex items-center justify-between gap-3 pb-3 border-b border-sky-100 dark:border-sky-800/80">
                   <div className="min-w-0">
                     <span className="block text-base font-extrabold text-slate-900 dark:text-white truncate">
-                      Menu FieldCast
+                      {tr('Menu FieldCast', 'FieldCast Menu')}
                     </span>
                     <span className="block text-xs text-slate-500 dark:text-sky-200/80 truncate">
                       {activeLocation.name}
@@ -727,7 +801,7 @@ export const AppShell: React.FC<AppShellProps> = ({
                     type="button"
                     data-testid="mobile-drawer-close"
                     onClick={() => setIsMobileDrawerOpen(false)}
-                    aria-label="Fechar menu lateral"
+                    aria-label={tr('Fechar menu lateral', 'Close side menu')}
                     className="min-h-[44px] min-w-[44px] rounded-xl border border-sky-200 dark:border-sky-800 bg-sky-50 dark:bg-[#132a47] text-slate-700 dark:text-sky-100 inline-flex items-center justify-center hover:bg-sky-100 dark:hover:bg-sky-900/60 transition-colors focus:outline-none focus:ring-2 focus:ring-sky-500"
                   >
                     <X className="w-5 h-5" aria-hidden="true" />
@@ -737,7 +811,7 @@ export const AppShell: React.FC<AppShellProps> = ({
                 {/* All 7 Modular Tabs */}
                 <div className="space-y-1.5">
                   <span className="block text-[11px] font-extrabold uppercase tracking-wider text-sky-700 dark:text-sky-300 px-1">
-                    Todas as Seções (7)
+                    {tr('Todas as Seções (7)', 'All Sections (7)')}
                   </span>
                   <div className="flex flex-col gap-1.5">
                     {tabs.map(({ id, label, description, Icon, badgeCount }) => {
@@ -791,7 +865,7 @@ export const AppShell: React.FC<AppShellProps> = ({
                 {/* Quick Model Switch */}
                 <div className="space-y-2 pt-2 border-t border-sky-100 dark:border-sky-800/80">
                   <span className="block text-[11px] font-extrabold uppercase tracking-wider text-sky-700 dark:text-sky-300 px-1">
-                    Modelo Meteorológico Rápido
+                    {tr('Modelo Meteorológico Rápido', 'Quick Weather Model')}
                   </span>
                   <ModelModeSwitchPill
                     viewMode={effectiveViewMode}
@@ -813,12 +887,12 @@ export const AppShell: React.FC<AppShellProps> = ({
                   {theme === 'dark' ? (
                     <>
                       <Sun className="w-4 h-4 text-amber-400 shrink-0" aria-hidden="true" />
-                      <span>Tema Claro</span>
+                      <span>{tr('Tema Claro', 'Light Theme')}</span>
                     </>
                   ) : (
                     <>
                       <Moon className="w-4 h-4 text-sky-700 shrink-0" aria-hidden="true" />
-                      <span>Tema Noturno</span>
+                      <span>{tr('Tema Noturno', 'Dark Theme')}</span>
                     </>
                   )}
                 </button>
@@ -833,7 +907,7 @@ export const AppShell: React.FC<AppShellProps> = ({
                   className="min-h-[48px] min-w-[44px] px-3 py-2 rounded-xl border border-sky-200 dark:border-sky-800 bg-sky-50 dark:bg-[#132a47] text-slate-800 dark:text-sky-100 text-xs font-bold inline-flex items-center justify-center gap-2 hover:bg-sky-100 dark:hover:bg-sky-900/50 transition-colors focus:outline-none focus:ring-2 focus:ring-sky-500"
                 >
                   <BookOpen className="w-4 h-4 text-[#0080cd] dark:text-sky-300 shrink-0" aria-hidden="true" />
-                  <span>Glossário</span>
+                  <span>{tr('Glossário', 'Glossary')}</span>
                 </button>
               </div>
             </aside>
@@ -841,7 +915,11 @@ export const AppShell: React.FC<AppShellProps> = ({
         )}
 
         {/* Modals managed by AppShell */}
-        <GlossaryModal isOpen={isGlossaryOpen} onClose={() => setIsGlossaryOpen(false)} />
+        <GlossaryModal
+          isOpen={isGlossaryOpen}
+          onClose={() => setIsGlossaryOpen(false)}
+          onActivateTemplate={onActivateTemplate}
+        />
 
         <HealthCheckModal
           isOpen={isHealthOpen}

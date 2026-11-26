@@ -37,9 +37,14 @@ import {
   toggleFavoriteLocation,
   upsertSavedLocation,
 } from './db/database';
-import { useSmartLocation } from './hooks/useSmartLocation';
+import {
+  resolveDexieCachedCoordinates,
+  useSmartLocation,
+  type SmartLocationResolution,
+} from './hooks/useSmartLocation';
 import { useTheme } from './hooks/useTheme';
 import { useToast } from './hooks/useToast';
+import { LocaleProvider, useLocale } from './context/LocaleContext';
 import { UnitsProvider } from './context/UnitsContext';
 import {
   probeIpWhoisHealth,
@@ -63,7 +68,10 @@ import {
 } from './services/notificationService';
 import { probeRainViewerHealth } from './services/rainViewerService';
 import { detectRuntimePlatform } from './services/platform';
-import type { UserNotificationPreferences } from './types/v4';
+import type {
+  NotificationRuleTemplate,
+  UserNotificationPreferences,
+} from './types/v4';
 import type {
   ActiveCoordinates,
   PrimaryLocationPreference,
@@ -89,6 +97,7 @@ import {
 import { haversineDistanceKm } from './utils/exporters';
 
 const THRESHOLDS_STORAGE_KEY = 'fieldcast_safe_window_thresholds';
+export const AUTO_REFRESH_INTERVAL_MS = 3_600_000;
 
 const OFFLINE_REFERENCE_CATALOG: ReadonlyArray<{
   place_id: number;
@@ -289,7 +298,8 @@ async function ensureBundledForecastCacheSeeded(
   }
 }
 
-export function App(): React.ReactElement {
+function AppContent(): React.ReactElement {
+  const { locale, tr } = useLocale();
   const { theme, isDark, toggleTheme } = useTheme('dark');
   const { toasts, addToast, dismissToast } = useToast();
 
@@ -359,7 +369,30 @@ export function App(): React.ReactElement {
   thresholdsRef.current = thresholds;
 
   const hasUserSelectedLocationRef = useRef<boolean>(false);
+  const hasStartupLocationResolvedRef = useRef<boolean>(false);
   const activeFetchRequestIdRef = useRef<number>(0);
+  const lastPeriodicSyncAtRef = useRef<number>(Date.now());
+  const activeCoordsRef = useRef<{ latitude: number; longitude: number }>({
+    latitude: initialStartupCoords.latitude,
+    longitude: initialStartupCoords.longitude,
+  });
+  const startupResolvedHandlerRef = useRef<(resolution: SmartLocationResolution) => void>(() => {});
+
+  const getStartupFallbackLocation = useCallback(async (): Promise<ActiveCoordinates | null> => {
+    const persisted = loadPrimaryLocationPreference();
+    if (persisted) {
+      return {
+        latitude: persisted.latitude,
+        longitude: persisted.longitude,
+        accuracyM: null,
+        name: persisted.name,
+        origin: 'cached',
+        isApproximateIp: false,
+        updatedAtIso: new Date().toISOString(),
+      };
+    }
+    return resolveDexieCachedCoordinates();
+  }, []);
 
   const {
     activeLocation,
@@ -367,10 +400,20 @@ export function App(): React.ReactElement {
     resolveLocation,
     setManualLocation,
   } = useSmartLocation({
-    autoResolveOnMount: false,
-    timeoutMs: 3500,
+    autoResolveOnMount: true,
+    timeoutMs: 8000,
+    locale,
     initialCoordinates: initialStartupCoords,
+    getCachedLocationFn: getStartupFallbackLocation,
+    onAutoResolved: (resolution) => {
+      startupResolvedHandlerRef.current(resolution);
+    },
   });
+
+  activeCoordsRef.current = {
+    latitude: activeLocation.latitude,
+    longitude: activeLocation.longitude,
+  };
 
   const refreshHealthMetrics = useCallback(async () => {
     const [idbHealthy, errors] = await Promise.all([
@@ -531,7 +574,22 @@ export function App(): React.ReactElement {
     [addToast, refreshHealthMetrics],
   );
 
-  // Inicialização principal do banco Dexie, pontos salvos, waypoints, trilhas e previsão inicial
+  startupResolvedHandlerRef.current = (resolution: SmartLocationResolution) => {
+    hasStartupLocationResolvedRef.current = true;
+    if (hasUserSelectedLocationRef.current) {
+      return;
+    }
+    const coords = resolution.coordinates;
+    activeCoordsRef.current = {
+      latitude: coords.latitude,
+      longitude: coords.longitude,
+    };
+    void loadForecastForCoordinates(coords.latitude, coords.longitude, {
+      silent: true,
+    });
+  };
+
+  // Inicialização principal do banco local, pontos salvos, waypoints, trilhas e previsão inicial
   useEffect(() => {
     let cancelled = false;
 
@@ -549,46 +607,38 @@ export function App(): React.ReactElement {
         setWaypoints(initialWaypoints);
         setTracks(initialTracks);
 
-        if (!hasUserSelectedLocationRef.current) {
-          const persistedPrimary = loadPrimaryLocationPreference();
-          const defaultLoc = persistedPrimary
-            ? {
-                latitude: persistedPrimary.latitude,
-                longitude: persistedPrimary.longitude,
-                name: persistedPrimary.name,
-                origin: persistedPrimary.origin,
-              }
-            : (() => {
-                const fallbackSaved =
-                  initialSaved.find((loc) => loc.id === 'loc-florianopolis-sc') ??
-                  initialSaved[0] ??
-                  DEFAULT_SAVED_LOCATIONS[0]!;
-                return {
-                  latitude: fallbackSaved.latitude,
-                  longitude: fallbackSaved.longitude,
-                  name: fallbackSaved.name,
-                  origin: 'saved' as const,
-                };
-              })();
-
-          setManualLocation({
-            latitude: defaultLoc.latitude,
-            longitude: defaultLoc.longitude,
-            name: defaultLoc.name,
-            origin: defaultLoc.origin,
-          });
-          await loadForecastForCoordinates(defaultLoc.latitude, defaultLoc.longitude, {
-            silent: true,
-          });
+        if (!hasUserSelectedLocationRef.current && !hasStartupLocationResolvedRef.current) {
+          await loadForecastForCoordinates(
+            initialStartupCoords.latitude,
+            initialStartupCoords.longitude,
+            {
+              silent: true,
+            },
+          );
         }
+
+        // Checagem inicial silenciosa de disponibilidade das APIs na inicialização
+        void Promise.allSettled([
+          probeRainViewerHealth(),
+          probeNominatimHealth(),
+          probeIpWhoisHealth(),
+        ]).then(() => {
+          if (!cancelled) {
+            lastPeriodicSyncAtRef.current = Date.now();
+            void refreshHealthMetrics();
+          }
+        });
 
         // Verifica regras de recorrência semanal vencidas sem bloquear a tela inicial
         void evaluateDueRecurrenceRules().then(({ generatedLogs }) => {
           if (!cancelled && generatedLogs.length > 0) {
             addToast({
               type: 'info',
-              title: 'Log histórico periódico atualizado',
-              message: `${generatedLogs.length} relatório(s) semanal(is) pronto(s) em Campo & Dados.`,
+              title: tr('Log histórico periódico atualizado', 'Periodic historical log updated'),
+              message: tr(
+                `${generatedLogs.length} relatório(s) semanal(is) pronto(s) em Campo & Dados.`,
+                `${generatedLogs.length} weekly report(s) ready in Field & Data.`,
+              ),
             });
           }
         });
@@ -598,7 +648,7 @@ export function App(): React.ReactElement {
           module: 'AppBootstrap',
           action: 'bootstrapApp',
           message:
-            err instanceof Error ? err.message : 'Erro ao inicializar armazenamento Dexie',
+            err instanceof Error ? err.message : 'Erro ao inicializar armazenamento local',
         });
       } finally {
         if (!cancelled) {
@@ -612,7 +662,69 @@ export function App(): React.ReactElement {
     return () => {
       cancelled = true;
     };
-  }, [handleErrorLog, loadForecastForCoordinates, refreshHealthMetrics]);
+  }, [
+    addToast,
+    handleErrorLog,
+    initialStartupCoords.latitude,
+    initialStartupCoords.longitude,
+    loadForecastForCoordinates,
+    refreshHealthMetrics,
+    tr,
+  ]);
+
+  // Atualização periódica automática a cada 1 hora (3.600.000 ms) + verificação ao retornar ao foco
+  const runSilentPeriodicSync = useCallback(async () => {
+    lastPeriodicSyncAtRef.current = Date.now();
+    const { latitude, longitude } = activeCoordsRef.current;
+    await Promise.allSettled([
+      loadForecastForCoordinates(latitude, longitude, {
+        silent: true,
+        forceNetwork: false,
+      }),
+      probeRainViewerHealth(),
+      probeNominatimHealth(),
+      probeIpWhoisHealth(),
+    ]);
+    await refreshHealthMetrics();
+  }, [loadForecastForCoordinates, refreshHealthMetrics]);
+
+  useEffect(() => {
+    const intervalId = window.setInterval(() => {
+      void runSilentPeriodicSync();
+    }, AUTO_REFRESH_INTERVAL_MS);
+
+    const handleVisibilityChange = () => {
+      if (document.visibilityState !== 'visible') {
+        return;
+      }
+      const elapsedMs = Date.now() - lastPeriodicSyncAtRef.current;
+      if (elapsedMs >= AUTO_REFRESH_INTERVAL_MS) {
+        void runSilentPeriodicSync();
+      }
+    };
+
+    document.addEventListener('visibilitychange', handleVisibilityChange);
+    return () => {
+      window.clearInterval(intervalId);
+      document.removeEventListener('visibilitychange', handleVisibilityChange);
+    };
+  }, [runSilentPeriodicSync]);
+
+  // Sincronização reativa quando preferências de notificação são atualizadas pelo Guia Rápido/Ajustes
+  useEffect(() => {
+    const handlePrefsUpdated = (event: Event) => {
+      const detail = (event as CustomEvent<UserNotificationPreferences>).detail;
+      if (detail && typeof detail === 'object') {
+        setNotificationPrefs(detail);
+      } else {
+        setNotificationPrefs(loadNotificationPreferences());
+      }
+    };
+    window.addEventListener('fieldcast:notification-prefs-updated', handlePrefsUpdated);
+    return () => {
+      window.removeEventListener('fieldcast:notification-prefs-updated', handlePrefsUpdated);
+    };
+  }, []);
 
   // Handlers de Pontos Salvos & Geolocalização
   const handleSelectLocation = useCallback(
@@ -935,11 +1047,11 @@ export function App(): React.ReactElement {
             : 'warning',
       title:
         resolution.tierResolved === 1
-          ? 'Posição GPS obtida com sucesso'
+          ? tr('Posição GPS obtida com sucesso', 'GPS position acquired')
           : resolution.tierResolved === 2
-            ? 'Localização aproximada via IP (ipwho.is)'
-            : 'GPS indisponível — Usando coordenada em cache offline',
-      message: `${finalCoords.name} (${finalCoords.latitude.toFixed(4)}°, ${finalCoords.longitude.toFixed(4)}°) • Você pode fixá-la como Área Principal no topo.`,
+            ? tr('Localização aproximada por rede', 'Approximate network location')
+            : tr('GPS indisponível — Usando último local salvo', 'GPS unavailable — Using last saved location'),
+      message: `${finalCoords.name} (${finalCoords.latitude.toFixed(4)}°, ${finalCoords.longitude.toFixed(4)}°) • ${tr('Você pode fixá-la como Área Principal no topo.', 'You can pin it as your Primary Area at the top.')}`,
     });
 
     await loadForecastForCoordinates(finalCoords.latitude, finalCoords.longitude, {
@@ -1085,6 +1197,21 @@ export function App(): React.ReactElement {
     }
   }, [addToast, forecast, notificationPrefs]);
 
+  const handleActivateAlertTemplate = useCallback(
+    (template: NotificationRuleTemplate, updatedPrefs: UserNotificationPreferences) => {
+      setNotificationPrefs(updatedPrefs);
+      addToast({
+        type: 'success',
+        title: tr('Alerta ativado com sucesso', 'Alert activated successfully'),
+        message: tr(
+          `A regra "${template.name}" foi ativada nas suas notificações.`,
+          `The rule "${template.name}" has been activated in your alerts.`,
+        ),
+      });
+    },
+    [addToast, tr],
+  );
+
   const handleTabChange = useCallback((nextTab: AppTabId) => {
     setActiveTab(nextTab);
     if (nextTab === 'settings') {
@@ -1093,11 +1220,10 @@ export function App(): React.ReactElement {
   }, []);
 
   return (
-    <UnitsProvider>
-      <GlobalErrorBoundary
-        onErrorLog={handleErrorLog}
-        onClearCache={resetDatabaseForTests}
-      >
+    <GlobalErrorBoundary
+      onErrorLog={handleErrorLog}
+      onClearCache={resetDatabaseForTests}
+    >
       <AppShell
         activeTab={activeTab}
         onTabChange={handleTabChange}
@@ -1123,6 +1249,7 @@ export function App(): React.ReactElement {
         onRequestGps={handleRequestGps}
         onRunHealthCheck={handleRunHealthCheck}
         onClearErrorLogs={handleClearErrorLogs}
+        onActivateTemplate={handleActivateAlertTemplate}
         onToast={addToast}
         isLocationsModalOpen={isLocationsModalOpen}
         onLocationsModalOpenChange={setIsLocationsModalOpen}
@@ -1291,8 +1418,17 @@ export function App(): React.ReactElement {
       </AppShell>
 
       <ToastContainer toasts={toasts} onDismiss={dismissToast} />
-      </GlobalErrorBoundary>
-    </UnitsProvider>
+    </GlobalErrorBoundary>
+  );
+}
+
+export function App(): React.ReactElement {
+  return (
+    <LocaleProvider>
+      <UnitsProvider>
+        <AppContent />
+      </UnitsProvider>
+    </LocaleProvider>
   );
 }
 
