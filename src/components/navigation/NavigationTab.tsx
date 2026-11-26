@@ -15,12 +15,14 @@ import {
   Gauge,
   MapPin,
   Navigation,
+  Save,
   ShieldAlert,
   Sliders,
   Waves,
   Wind,
   Zap,
 } from 'lucide-react';
+import { useLocale } from '../../context/LocaleContext';
 import { useUnits } from '../../context/UnitsContext';
 import type { ActiveCoordinates } from '../../types/field';
 import type { ErrorLogRecord, ToastMessage } from '../../types/health';
@@ -40,6 +42,8 @@ import { safeAction } from '../../utils/safeAction';
 import {
   convertWaveHeight,
   convertWindSpeed,
+  formatWave,
+  formatWind,
   getWaveUnitLabel,
   getWindUnitLabel,
   waveHeightToM,
@@ -49,6 +53,7 @@ import {
   FullscreenViewer,
   ModelModeSwitchPill,
   ModuleErrorBoundary,
+  NumericInput,
 } from '../common';
 import { WindCompass } from '../field/WindCompass';
 import { degreesToCardinalShort } from '../forecast/CurrentSummaryCard';
@@ -243,6 +248,7 @@ export const NavigationTab: React.FC<NavigationTabProps> = ({
   onToast,
   onErrorLog,
 }) => {
+  const { tr } = useLocale();
   const { units } = useUnits();
   const hours = forecast?.hours ?? [];
   const currentHourIndex = useCurrentLocalHourIndex(hours, forecast?.timezone);
@@ -566,15 +572,19 @@ export const NavigationTab: React.FC<NavigationTabProps> = ({
   }, [currentHourIndex, hours]);
 
   const tideChartOption: EChartsOption = useMemo(() => {
+    const waveUnitLabel = getWaveUnitLabel(units.wave);
+    const waveDecimals = units.wave === 'ft' ? 1 : 2;
     const labels = chartSlice.map((h) => formatShortLocalTime(h.timestampUnix, forecast?.timezone));
-    const mslData = chartSlice.map((h) =>
-      typeof h.marine?.seaLevelHeightMsl === 'number'
-        ? Number(h.marine.seaLevelHeightMsl.toFixed(2))
-        : null,
-    );
-    const waveData = chartSlice.map((h) =>
-      typeof h.marine?.waveHeight === 'number' ? Number(h.marine.waveHeight.toFixed(2)) : null,
-    );
+    const mslData = chartSlice.map((h) => {
+      if (typeof h.marine?.seaLevelHeightMsl !== 'number') return null;
+      const converted = convertWaveHeight(h.marine.seaLevelHeightMsl, units.wave);
+      return converted !== null ? Number(converted.toFixed(waveDecimals)) : null;
+    });
+    const waveData = chartSlice.map((h) => {
+      if (typeof h.marine?.waveHeight !== 'number') return null;
+      const converted = convertWaveHeight(h.marine.waveHeight, units.wave);
+      return converted !== null ? Number(converted.toFixed(waveDecimals)) : null;
+    });
     const selectedLocalLabel = activeHour
       ? formatShortLocalTime(activeHour.timestampUnix, forecast?.timezone)
       : undefined;
@@ -605,14 +615,14 @@ export const NavigationTab: React.FC<NavigationTabProps> = ({
       yAxis: [
         {
           type: 'value',
-          name: 'Maré MSL (m)',
+          name: `${tr('Maré MSL', 'MSL Tide')} (${waveUnitLabel})`,
           nameTextStyle: { color: textColor, fontSize: 10 },
           axisLabel: { color: textColor, fontSize: 10 },
           splitLine: { lineStyle: { color: gridColor } },
         },
         {
           type: 'value',
-          name: 'Onda (m)',
+          name: `${tr('Onda', 'Wave')} (${waveUnitLabel})`,
           min: 0,
           nameTextStyle: { color: textColor, fontSize: 10 },
           axisLabel: { color: textColor, fontSize: 10 },
@@ -621,7 +631,7 @@ export const NavigationTab: React.FC<NavigationTabProps> = ({
       ],
       series: [
         {
-          name: 'Nível do Mar (MSL)',
+          name: `${tr('Nível do Mar (MSL)', 'Sea Level (MSL)')} (${waveUnitLabel})`,
           type: 'line',
           smooth: true,
           yAxisIndex: 0,
@@ -634,14 +644,14 @@ export const NavigationTab: React.FC<NavigationTabProps> = ({
           markLine: selectedLocalLabel
             ? {
                 symbol: ['none', 'none'],
-                label: { formatter: 'Hora Ref.', color: '#0284c7', fontSize: 10 },
+                label: { formatter: tr('Hora Ref.', 'Ref. Hour'), color: '#0284c7', fontSize: 10 },
                 lineStyle: { color: '#0ea5e9', type: 'dashed', width: 2 },
                 data: [{ xAxis: selectedLocalLabel }],
               }
             : undefined,
         },
         {
-          name: 'Altura de Onda (m)',
+          name: `${tr('Altura de Onda', 'Wave Height')} (${waveUnitLabel})`,
           type: 'line',
           smooth: true,
           yAxisIndex: 1,
@@ -651,7 +661,7 @@ export const NavigationTab: React.FC<NavigationTabProps> = ({
         },
       ],
     };
-  }, [activeHour, chartSlice, forecast?.timezone, isDark]);
+  }, [activeHour, chartSlice, forecast?.timezone, isDark, tr, units.wave]);
 
   const groupedTides = useMemo(() => {
     const groups = new Map<string, typeof tideExtrema>();
@@ -662,6 +672,31 @@ export const NavigationTab: React.FC<NavigationTabProps> = ({
     }
     return Array.from(groups.entries());
   }, [tideExtrema]);
+
+  const handleSaveNavigationLimits = () => {
+    void safeAction(
+      async () => {
+        if (typeof window !== 'undefined' && typeof window.localStorage !== 'undefined') {
+          window.localStorage.setItem(NAVIGATION_LIMITS_STORAGE_KEY, JSON.stringify(navLimits));
+        }
+        onToast?.({
+          type: 'success',
+          title: tr('Limites náuticos salvos', 'Marine limits saved'),
+          message: tr(
+            'Os parâmetros de navegação costeira foram salvos no dispositivo.',
+            'Coastal navigation thresholds saved on device.',
+          ),
+        });
+      },
+      {
+        actionKey: 'navigation_tab_save_limits',
+        moduleName: 'NavigationTab',
+        errorTitle: tr('Falha ao salvar limites náuticos', 'Failed to save marine limits'),
+        onToast,
+        onErrorLog,
+      },
+    );
+  };
 
   const handleRequestGpsClick = () => {
     if (!onRequestGps) return;
@@ -881,17 +916,17 @@ export const NavigationTab: React.FC<NavigationTabProps> = ({
 
               <div className="rounded-xl border border-slate-200/80 dark:border-sky-800/60 bg-slate-50/70 dark:bg-[#0f243d] p-3.5">
                 <p className="text-[11px] font-semibold uppercase tracking-wide text-slate-500 dark:text-slate-400">
-                  Vento 10m ({resolvedSurface.sourceLabel})
+                  {tr('Vento 10m', '10m Wind')} ({resolvedSurface.sourceLabel})
                 </p>
                 <p className="text-lg font-extrabold text-slate-900 dark:text-white mt-1">
                   {resolvedSurface.windSpeed10mKmh !== null
-                    ? `${resolvedSurface.windSpeed10mKmh.toFixed(1)} km/h`
+                    ? formatWind(resolvedSurface.windSpeed10mKmh, units.wind, 1)
                     : 'N/D'}
                 </p>
                 <p className="text-[11px] text-slate-500 dark:text-slate-400 mt-0.5">
-                  Rajada:{' '}
+                  {tr('Rajada:', 'Gust:')}{' '}
                   {resolvedSurface.windGusts10mKmh !== null
-                    ? `${resolvedSurface.windGusts10mKmh.toFixed(1)} km/h`
+                    ? formatWind(resolvedSurface.windGusts10mKmh, units.wind, 1)
                     : 'N/D'}
                 </p>
               </div>
@@ -920,17 +955,28 @@ export const NavigationTab: React.FC<NavigationTabProps> = ({
               ))}
             </ul>
 
-            {/* Limites Editáveis da Embarcação (persistidos em localStorage) */}
+            {/* Limites Editáveis da Embarcação */}
             <div className="pt-3 border-t border-slate-100 dark:border-sky-800/50 space-y-2.5">
-              <div className="flex items-center gap-1.5 text-xs font-bold text-slate-800 dark:text-slate-200">
-                <Sliders className="w-3.5 h-3.5 text-sky-600 dark:text-sky-400" />
-                <span>Limites Operacionais da Embarcação:</span>
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <div className="flex items-center gap-1.5 text-xs font-bold text-slate-800 dark:text-slate-200">
+                  <Sliders className="w-3.5 h-3.5 text-sky-600 dark:text-sky-400" />
+                  <span>{tr('Limites Operacionais da Embarcação:', 'Vessel Operational Limits:')}</span>
+                </div>
+                <button
+                  type="button"
+                  data-testid="save-navigation-limits-btn"
+                  onClick={handleSaveNavigationLimits}
+                  className="inline-flex min-h-[40px] items-center gap-1.5 rounded-xl bg-sky-600 hover:bg-sky-700 px-3 py-1.5 text-xs font-bold text-white shadow-sm transition-colors"
+                >
+                  <Save className="w-3.5 h-3.5" aria-hidden="true" />
+                  {tr('Salvar Limites', 'Save Limits')}
+                </button>
               </div>
 
               <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
                 <div className="text-[11px] text-slate-600 dark:text-slate-300">
                   <label className="flex items-center justify-between gap-1 cursor-pointer">
-                    <span>Vento Máx ({getWindUnitLabel(units.wind)})</span>
+                    <span>{tr('Vento Máx', 'Max Wind')} ({getWindUnitLabel(units.wind)})</span>
                     <input
                       type="checkbox"
                       data-testid="nav-limit-enable-wind"
@@ -944,19 +990,21 @@ export const NavigationTab: React.FC<NavigationTabProps> = ({
                       className="h-4 w-4 accent-sky-600 rounded"
                     />
                   </label>
-                  <input
-                    type="number"
+                  <NumericInput
                     data-testid="nav-limit-max-wind"
                     min={1}
                     max={150}
                     step={0.5}
+                    allowEmpty={false}
+                    fallbackValue={Number(
+                      (convertWindSpeed(navLimits.maxWindKmh, units.wind) ?? navLimits.maxWindKmh).toFixed(1),
+                    )}
                     disabled={!(navLimits.enabled?.maxWindKmh ?? true)}
                     value={Number(
                       (convertWindSpeed(navLimits.maxWindKmh, units.wind) ?? navLimits.maxWindKmh).toFixed(1),
                     )}
-                    onChange={(e) => {
-                      const num = Number(e.target.value);
-                      if (!Number.isFinite(num)) return;
+                    onValueChange={(_, num) => {
+                      if (num === null) return;
                       setNavLimits((prev) => ({
                         ...prev,
                         maxWindKmh: Math.max(5, Math.min(110, windSpeedToKmh(num, units.wind))),
@@ -968,7 +1016,7 @@ export const NavigationTab: React.FC<NavigationTabProps> = ({
 
                 <div className="text-[11px] text-slate-600 dark:text-slate-300">
                   <label className="flex items-center justify-between gap-1 cursor-pointer">
-                    <span>Onda Máx Hs ({getWaveUnitLabel(units.wave)})</span>
+                    <span>{tr('Onda Máx Hs', 'Max Wave Hs')} ({getWaveUnitLabel(units.wave)})</span>
                     <input
                       type="checkbox"
                       data-testid="nav-limit-enable-wave"
@@ -982,19 +1030,21 @@ export const NavigationTab: React.FC<NavigationTabProps> = ({
                       className="h-4 w-4 accent-sky-600 rounded"
                     />
                   </label>
-                  <input
-                    type="number"
+                  <NumericInput
                     data-testid="nav-limit-max-wave"
                     min={0.2}
                     max={40}
                     step={0.1}
+                    allowEmpty={false}
+                    fallbackValue={Number(
+                      (convertWaveHeight(navLimits.maxWaveM, units.wave) ?? navLimits.maxWaveM).toFixed(1),
+                    )}
                     disabled={!(navLimits.enabled?.maxWaveM ?? true)}
                     value={Number(
                       (convertWaveHeight(navLimits.maxWaveM, units.wave) ?? navLimits.maxWaveM).toFixed(1),
                     )}
-                    onChange={(e) => {
-                      const num = Number(e.target.value);
-                      if (!Number.isFinite(num)) return;
+                    onValueChange={(_, num) => {
+                      if (num === null) return;
                       setNavLimits((prev) => ({
                         ...prev,
                         maxWaveM: Math.max(0.2, Math.min(12, waveHeightToM(num, units.wave))),
@@ -1006,7 +1056,7 @@ export const NavigationTab: React.FC<NavigationTabProps> = ({
 
                 <div className="text-[11px] text-slate-600 dark:text-slate-300">
                   <label className="flex items-center justify-between gap-1 cursor-pointer">
-                    <span>Corrente Máx ({getWindUnitLabel(units.wind)})</span>
+                    <span>{tr('Corrente Máx', 'Max Current')} ({getWindUnitLabel(units.wind)})</span>
                     <input
                       type="checkbox"
                       data-testid="nav-limit-enable-current"
@@ -1020,19 +1070,21 @@ export const NavigationTab: React.FC<NavigationTabProps> = ({
                       className="h-4 w-4 accent-sky-600 rounded"
                     />
                   </label>
-                  <input
-                    type="number"
+                  <NumericInput
                     data-testid="nav-limit-max-current"
                     min={0.1}
                     max={25}
                     step={0.1}
+                    allowEmpty={false}
+                    fallbackValue={Number(
+                      (convertWindSpeed(navLimits.maxCurrentKmh, units.wind) ?? navLimits.maxCurrentKmh).toFixed(1),
+                    )}
                     disabled={!(navLimits.enabled?.maxCurrentKmh ?? true)}
                     value={Number(
                       (convertWindSpeed(navLimits.maxCurrentKmh, units.wind) ?? navLimits.maxCurrentKmh).toFixed(1),
                     )}
-                    onChange={(e) => {
-                      const num = Number(e.target.value);
-                      if (!Number.isFinite(num)) return;
+                    onValueChange={(_, num) => {
+                      if (num === null) return;
                       setNavLimits((prev) => ({
                         ...prev,
                         maxCurrentKmh: Math.max(0.2, Math.min(20, windSpeedToKmh(num, units.wind))),
@@ -1130,29 +1182,29 @@ export const NavigationTab: React.FC<NavigationTabProps> = ({
               <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3">
                 <div className="rounded-xl border border-slate-200/80 dark:border-sky-800/60 bg-slate-50/70 dark:bg-[#0f243d] p-4">
                   <p className="text-[11px] font-semibold uppercase tracking-wide text-slate-500 dark:text-slate-400">
-                    Nível do Mar (MSL)
+                    {tr('Nível do Mar (MSL)', 'Sea Level (MSL)')}
                   </p>
                   <p className="text-xl font-extrabold text-sky-700 dark:text-sky-300 mt-1">
                     {typeof marine?.seaLevelHeightMsl === 'number'
-                      ? `${marine.seaLevelHeightMsl >= 0 ? '+' : ''}${marine.seaLevelHeightMsl.toFixed(2)} m`
+                      ? `${marine.seaLevelHeightMsl >= 0 ? '+' : ''}${formatWave(marine.seaLevelHeightMsl, units.wave, 2)}`
                       : 'N/D'}
                   </p>
                   <p className="text-[11px] text-slate-500 dark:text-slate-400 mt-1">
-                    Referência regional aproximada
+                    {tr('Referência regional aproximada', 'Approximate regional reference')}
                   </p>
                 </div>
 
                 <div className="rounded-xl border border-slate-200/80 dark:border-sky-800/60 bg-slate-50/70 dark:bg-[#0f243d] p-4">
                   <p className="text-[11px] font-semibold uppercase tracking-wide text-slate-500 dark:text-slate-400">
-                    Onda Significativa
+                    {tr('Onda Significativa', 'Significant Wave')}
                   </p>
                   <p className="text-xl font-extrabold text-slate-900 dark:text-white mt-1">
                     {marine?.waveHeight !== null && marine?.waveHeight !== undefined
-                      ? `${marine.waveHeight.toFixed(2)} m`
+                      ? formatWave(marine.waveHeight, units.wave, 2)
                       : 'N/D'}
                   </p>
                   <p className="text-[11px] text-slate-500 dark:text-slate-400 mt-1">
-                    Período:{' '}
+                    {tr('Período:', 'Period:')}{' '}
                     {marine?.wavePeriod !== null && marine?.wavePeriod !== undefined
                       ? `${marine.wavePeriod.toFixed(1)} s`
                       : 'N/D'}{' '}
@@ -1162,11 +1214,11 @@ export const NavigationTab: React.FC<NavigationTabProps> = ({
 
                 <div className="rounded-xl border border-slate-200/80 dark:border-sky-800/60 bg-slate-50/70 dark:bg-[#0f243d] p-4">
                   <p className="text-[11px] font-semibold uppercase tracking-wide text-slate-500 dark:text-slate-400">
-                    Swell Primário
+                    {tr('Swell Primário', 'Primary Swell')}
                   </p>
                   <p className="text-xl font-extrabold text-slate-900 dark:text-white mt-1">
                     {marine?.swellWaveHeight !== null && marine?.swellWaveHeight !== undefined
-                      ? `${marine.swellWaveHeight.toFixed(2)} m`
+                      ? formatWave(marine.swellWaveHeight, units.wave, 2)
                       : 'N/D'}
                   </p>
                   <p className="text-[11px] text-slate-500 dark:text-slate-400 mt-1">
@@ -1179,16 +1231,16 @@ export const NavigationTab: React.FC<NavigationTabProps> = ({
 
                 <div className="rounded-xl border border-slate-200/80 dark:border-sky-800/60 bg-slate-50/70 dark:bg-[#0f243d] p-4">
                   <p className="text-[11px] font-semibold uppercase tracking-wide text-slate-500 dark:text-slate-400">
-                    Corrente Oceânica
+                    {tr('Corrente Oceânica', 'Ocean Current')}
                   </p>
                   <p className="text-xl font-extrabold text-slate-900 dark:text-white mt-1">
                     {marine?.oceanCurrentVelocity !== null &&
                     marine?.oceanCurrentVelocity !== undefined
-                      ? `${marine.oceanCurrentVelocity.toFixed(2)} km/h`
+                      ? formatWind(marine.oceanCurrentVelocity, units.wind, 2)
                       : 'N/D'}
                   </p>
                   <p className="text-[11px] text-slate-500 dark:text-slate-400 mt-1">
-                    Rumo: {degreesToCardinalShort(marine?.oceanCurrentDirection)}{' '}
+                    {tr('Rumo:', 'Bearing:')} {degreesToCardinalShort(marine?.oceanCurrentDirection)}{' '}
                     {typeof marine?.oceanCurrentDirection === 'number'
                       ? `(${Math.round(marine.oceanCurrentDirection)}°)`
                       : ''}
@@ -1248,7 +1300,7 @@ export const NavigationTab: React.FC<NavigationTabProps> = ({
                               </span>
                               <span className="font-mono font-bold text-slate-900 dark:text-white">
                                 {ev.hourBadge} · {ev.seaLevelHeightMsl >= 0 ? '+' : ''}
-                                {ev.seaLevelHeightMsl.toFixed(2)} m
+                                {formatWave(ev.seaLevelHeightMsl, units.wave, 2)}
                               </span>
                             </div>
                           ))}
@@ -1348,16 +1400,18 @@ export const NavigationTab: React.FC<NavigationTabProps> = ({
                 <div className="flex items-center justify-between p-3 rounded-xl bg-white dark:bg-[#132a47] border border-slate-200/60 dark:border-sky-800/40">
                   <span className="inline-flex items-center gap-1.5 text-slate-600 dark:text-slate-300">
                     <Wind className="w-4 h-4 text-sky-500" />
-                    Vento 10m
+                    {tr('Vento 10m', '10m Wind')}
                   </span>
                   <strong className="text-sm text-slate-900 dark:text-white">
                     {resolvedSurface.windSpeed10mKmh !== null
-                      ? `${resolvedSurface.windSpeed10mKmh.toFixed(1)} km/h`
+                      ? formatWind(resolvedSurface.windSpeed10mKmh, units.wind, 1)
                       : 'N/D'}
                   </strong>
                 </div>
                 <div className="flex items-center justify-between p-3 rounded-xl bg-white dark:bg-[#132a47] border border-slate-200/60 dark:border-sky-800/40">
-                  <span className="text-slate-600 dark:text-slate-300">Direção Verdadeira</span>
+                  <span className="text-slate-600 dark:text-slate-300">
+                    {tr('Direção Verdadeira', 'True Direction')}
+                  </span>
                   <strong className="text-sm text-slate-900 dark:text-white">
                     {degreesToCardinalShort(resolvedSurface.windDirection10mDeg)}{' '}
                     {typeof resolvedSurface.windDirection10mDeg === 'number'
@@ -1366,10 +1420,12 @@ export const NavigationTab: React.FC<NavigationTabProps> = ({
                   </strong>
                 </div>
                 <div className="flex items-center justify-between p-3 rounded-xl bg-white dark:bg-[#132a47] border border-slate-200/60 dark:border-sky-800/40">
-                  <span className="text-slate-600 dark:text-slate-300">Rajadas Máx 10m</span>
+                  <span className="text-slate-600 dark:text-slate-300">
+                    {tr('Rajadas Máx 10m', 'Max 10m Gusts')}
+                  </span>
                   <strong className="text-sm text-slate-900 dark:text-white">
                     {resolvedSurface.windGusts10mKmh !== null
-                      ? `${resolvedSurface.windGusts10mKmh.toFixed(1)} km/h`
+                      ? formatWind(resolvedSurface.windGusts10mKmh, units.wind, 1)
                       : 'N/D'}
                   </strong>
                 </div>

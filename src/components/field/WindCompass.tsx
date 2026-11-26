@@ -9,9 +9,12 @@ import {
   Waves,
   Wind,
 } from 'lucide-react';
+import { useLocale } from '../../context/LocaleContext';
+import { useUnits } from '../../context/UnitsContext';
 import type { CompassPreference, CompassReading } from '../../types/field';
 import type { ErrorLogRecord, ToastMessage } from '../../types/health';
 import { safeAction } from '../../utils/safeAction';
+import { formatWave, formatWind } from '../../utils/units';
 
 export const COMPASS_PREF_STORAGE_KEY = 'fieldcast_compass_pref_v1';
 
@@ -393,6 +396,8 @@ export const WindCompass: React.FC<WindCompassProps> = ({
   onToast,
   onErrorLog,
 }) => {
+  const { tr } = useLocale();
+  const { units } = useUnits();
   const isIosPermissionRequired = requiresIosOrientationPermission();
 
   const [iosPermissionState, setIosPermissionState] = useState<
@@ -942,11 +947,11 @@ export const WindCompass: React.FC<WindCompassProps> = ({
                 <Wind className="w-5 h-5 text-sky-500" aria-hidden="true" />
                 <div>
                   <div className="text-xs font-semibold text-slate-600 dark:text-slate-400">
-                    Vento 10m (Verdadeiro / Relativo)
+                    {tr('Vento 10m (Verdadeiro / Relativo)', '10m Wind (True / Relative)')}
                   </div>
                   <div className="text-sm font-bold text-slate-900 dark:text-white">
                     {windDirection10mDeg !== null ? `${Math.round(windDirection10mDeg)}°` : 'N/D'}{' '}
-                    {windSpeed10mKmh !== null ? `(${windSpeed10mKmh.toFixed(1)} km/h)` : ''}
+                    {windSpeed10mKmh !== null ? `(${formatWind(windSpeed10mKmh, units.wind, 1)})` : ''}
                   </div>
                 </div>
               </div>
@@ -961,11 +966,11 @@ export const WindCompass: React.FC<WindCompassProps> = ({
                   <Waves className="w-5 h-5 text-teal-500" aria-hidden="true" />
                   <div>
                     <div className="text-xs font-semibold text-slate-600 dark:text-slate-400">
-                      Ondas (Verdadeiro / Relativo)
+                      {tr('Ondas (Verdadeiro / Relativo)', 'Waves (True / Relative)')}
                     </div>
                     <div className="text-sm font-bold text-slate-900 dark:text-white">
                       {waveDirectionDeg !== null ? `${Math.round(waveDirectionDeg)}°` : 'N/D'}{' '}
-                      {waveHeightM !== null ? `(${waveHeightM.toFixed(2)} m)` : ''}
+                      {waveHeightM !== null ? `(${formatWave(waveHeightM, units.wave, 2)})` : ''}
                     </div>
                   </div>
                 </div>
