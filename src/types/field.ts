@@ -108,7 +108,17 @@ export interface OfflineMissionProgress {
   errorMessage?: string;
 }
 
-export type ExportFormat = 'csv' | 'json' | 'gpx' | 'geojson' | 'kml' | 'kmz';
+export type ExportFormat =
+  | 'csv'
+  | 'json'
+  | 'gpx'
+  | 'geojson'
+  | 'kml'
+  | 'kmz'
+  | 'html'
+  | 'md'
+  | 'pdf'
+  | 'docx';
 
 export interface PrimaryLocationPreference {
   savedLocationId?: string;

@@ -21,7 +21,7 @@ export type ExportDatasetKind = 'forecast' | 'waypoints' | 'tracks' | 'mission_b
 
 export interface ExportDeliveryPayload {
   filename: string;
-  content: string | Uint8Array;
+  content: string | Uint8Array | Blob;
   format: ExportFormat;
   title?: string;
   text?: string;
@@ -34,7 +34,11 @@ export interface ExportDeliveryResult {
   filename: string;
   byteLength: number;
   mimeType: string;
+  savedPathDisplay: string;
+  uri?: string;
 }
+
+export type ShareDeliveryResult = ExportDeliveryResult;
 
 export function getMimeTypeForFormat(format: ExportFormat): string {
   switch (format) {
@@ -50,6 +54,14 @@ export function getMimeTypeForFormat(format: ExportFormat): string {
       return 'application/vnd.google-earth.kml+xml;charset=utf-8';
     case 'kmz':
       return 'application/vnd.google-earth.kmz';
+    case 'html':
+      return 'text/html;charset=utf-8';
+    case 'md':
+      return 'text/markdown;charset=utf-8';
+    case 'pdf':
+      return 'application/pdf';
+    case 'docx':
+      return 'application/vnd.openxmlformats-officedocument.wordprocessingml.document';
   }
 }
 
@@ -67,7 +79,29 @@ export function getFileExtensionForFormat(format: ExportFormat): string {
       return 'kml';
     case 'kmz':
       return 'kmz';
+    case 'html':
+      return 'html';
+    case 'md':
+      return 'md';
+    case 'pdf':
+      return 'pdf';
+    case 'docx':
+      return 'docx';
   }
+}
+
+function sanitizeExportFilename(filename: string, format: ExportFormat): string {
+  const cleaned = filename
+    .replace(/[\\/]+/g, '_')
+    .replace(/\.\.+/g, '.')
+    .replace(/[^a-zA-Z0-9._-]/g, '_')
+    .replace(/^_+/, '')
+    .trim();
+  const ext = getFileExtensionForFormat(format);
+  if (!cleaned) {
+    return `fieldcast-export.${ext}`;
+  }
+  return cleaned;
 }
 
 function uint8ArrayToBase64(bytes: Uint8Array): string {
@@ -87,8 +121,11 @@ function uint8ArrayToBase64(bytes: Uint8Array): string {
   return Buffer.from(bytes).toString('base64');
 }
 
-function toBlobPart(content: string | Uint8Array): BlobPart {
-  return typeof content === 'string' ? content : new Uint8Array(content);
+function toBlobPart(content: string | Uint8Array | Blob): BlobPart {
+  if (typeof content === 'string' || content instanceof Blob) {
+    return content;
+  }
+  return new Uint8Array(content);
 }
 
 /**
@@ -96,14 +133,15 @@ function toBlobPart(content: string | Uint8Array): BlobPart {
  */
 export function triggerBrowserFileDownload(
   filename: string,
-  content: string | Uint8Array,
+  content: string | Uint8Array | Blob,
   mimeType: string,
 ): void {
   if (typeof document === 'undefined' || typeof Blob === 'undefined') {
     return;
   }
 
-  const blob = new Blob([toBlobPart(content)], { type: mimeType });
+  const blob =
+    content instanceof Blob ? content : new Blob([toBlobPart(content)], { type: mimeType });
   const hasUrlApi =
     typeof URL !== 'undefined' && typeof URL.createObjectURL === 'function';
 
@@ -136,9 +174,34 @@ function isMobileUserAgent(): boolean {
   return /Android|iPhone|iPad|iPod/i.test(navigator.userAgent || '');
 }
 
+async function resolveNativeWritePayload(
+  content: string | Uint8Array | Blob,
+): Promise<{ data: string; encoding?: Encoding; byteLength: number }> {
+  if (typeof content === 'string') {
+    return {
+      data: content,
+      encoding: Encoding.UTF8,
+      byteLength: new TextEncoder().encode(content).byteLength,
+    };
+  }
+  if (content instanceof Blob) {
+    const buf = new Uint8Array(await content.arrayBuffer());
+    return {
+      data: uint8ArrayToBase64(buf),
+      byteLength: buf.byteLength,
+    };
+  }
+  return {
+    data: uint8ArrayToBase64(content),
+    byteLength: content.byteLength,
+  };
+}
+
 /**
- * Entrega um arquivo exportado (CSV, JSON, GPX, GeoJSON, KML ou KMZ):
- * - No Android/iOS nativo (`Capacitor.isNativePlatform()`): grava no cache via `@capacitor/filesystem` e abre `@capacitor/share`.
+ * Entrega um arquivo exportado (CSV, JSON, GPX, GeoJSON, KML, KMZ, HTML, MD, PDF ou DOCX):
+ * - No Android/iOS nativo (`Capacitor.isNativePlatform()`): grava preferencialmente em
+ *   `Directory.Documents` (`FieldCast/<arquivo>`), com fallback para `Directory.Cache`,
+ *   e abre `@capacitor/share` (tratando cancelamento sem descartar o arquivo salvo).
  * - Na Web Mobile (quando `preferNativeShare === true` e `navigator.canShare` suporta arquivos): utiliza Web Share API.
  * - No Desktop (ou fallback universal): dispara download direto via `Blob` + `<a download>`.
  */
@@ -146,10 +209,13 @@ export async function exportAndDeliverFile(
   payload: ExportDeliveryPayload,
 ): Promise<ExportDeliveryResult> {
   const mimeType = getMimeTypeForFormat(payload.format);
+  const safeFilename = sanitizeExportFilename(payload.filename, payload.format);
   const byteLength =
     typeof payload.content === 'string'
       ? new TextEncoder().encode(payload.content).byteLength
-      : payload.content.byteLength;
+      : payload.content instanceof Blob
+        ? payload.content.size
+        : payload.content.byteLength;
 
   const isNative =
     payload.isNativePlatformFn?.() ??
@@ -163,35 +229,55 @@ export async function exportAndDeliverFile(
 
   if (isNative) {
     try {
-      const written =
-        typeof payload.content === 'string'
-          ? await Filesystem.writeFile({
-              path: payload.filename,
-              data: payload.content,
-              directory: Directory.Cache,
-              encoding: Encoding.UTF8,
-            })
-          : await Filesystem.writeFile({
-              path: payload.filename,
-              data: uint8ArrayToBase64(payload.content),
-              directory: Directory.Cache,
-            });
+      const prepared = await resolveNativeWritePayload(payload.content);
+      const relativePath = `FieldCast/${safeFilename}`;
+      let writtenUri: string | undefined;
+      let savedPathDisplay = `Documentos/${relativePath}`;
 
-      await Share.share({
-        title: payload.title ?? `FieldCast — ${payload.filename}`,
-        text: payload.text ?? `Exportação FieldCast (${payload.filename})`,
-        files: [written.uri],
-        dialogTitle: payload.title ?? 'Compartilhar Dados de Campo',
-      });
+      try {
+        const writtenDocs = await Filesystem.writeFile({
+          path: relativePath,
+          data: prepared.data,
+          directory: Directory.Documents,
+          recursive: true,
+          ...(prepared.encoding ? { encoding: prepared.encoding } : {}),
+        });
+        writtenUri = writtenDocs.uri;
+      } catch {
+        const writtenCache = await Filesystem.writeFile({
+          path: relativePath,
+          data: prepared.data,
+          directory: Directory.Cache,
+          recursive: true,
+          ...(prepared.encoding ? { encoding: prepared.encoding } : {}),
+        });
+        writtenUri = writtenCache.uri;
+        savedPathDisplay = `Cache/${relativePath}`;
+      }
 
-      return {
-        deliveredVia: 'capacitor_share',
-        filename: payload.filename,
-        byteLength,
-        mimeType,
-      };
+      if (writtenUri) {
+        try {
+          await Share.share({
+            title: payload.title ?? `FieldCast — ${safeFilename}`,
+            text: payload.text ?? `Exportação FieldCast (${safeFilename})`,
+            files: [writtenUri],
+            dialogTitle: payload.title ?? 'Compartilhar Dados de Campo',
+          });
+        } catch {
+          // Usuário cancelou ou fechou a folha de compartilhamento — o arquivo permanece salvo
+        }
+
+        return {
+          deliveredVia: 'capacitor_share',
+          filename: safeFilename,
+          byteLength: prepared.byteLength,
+          mimeType,
+          savedPathDisplay,
+          uri: writtenUri,
+        };
+      }
     } catch {
-      // Fallback para download caso o usuário cancele ou plugin falhe
+      // Fallback para download caso o plugin de arquivos falhe
     }
   }
 
@@ -203,22 +289,23 @@ export async function exportAndDeliverFile(
     typeof File !== 'undefined'
   ) {
     try {
-      const file = new File([toBlobPart(payload.content)], payload.filename, {
+      const file = new File([toBlobPart(payload.content)], safeFilename, {
         type: mimeType,
       });
       const canShareFiles =
         typeof navigator.canShare === 'function' && navigator.canShare({ files: [file] });
       if (canShareFiles) {
         await navigator.share({
-          title: payload.title ?? `FieldCast — ${payload.filename}`,
+          title: payload.title ?? `FieldCast — ${safeFilename}`,
           text: payload.text,
           files: [file],
         });
         return {
           deliveredVia: 'web_share',
-          filename: payload.filename,
+          filename: safeFilename,
           byteLength,
           mimeType,
+          savedPathDisplay: `Compartilhamento/${safeFilename}`,
         };
       }
     } catch {
@@ -226,13 +313,89 @@ export async function exportAndDeliverFile(
     }
   }
 
-  triggerBrowserFileDownload(payload.filename, payload.content, mimeType);
+  triggerBrowserFileDownload(safeFilename, payload.content, mimeType);
   return {
     deliveredVia: 'browser_download',
-    filename: payload.filename,
+    filename: safeFilename,
     byteLength,
     mimeType,
+    savedPathDisplay: `Downloads/${safeFilename}`,
   };
+}
+
+/**
+ * Reabre a folha nativa de compartilhamento (`@capacitor/share` no nativo ou Web Share API)
+ * para um arquivo já gerado/salvo, permitindo que banners pós-exportação compartilhem sob demanda.
+ */
+export async function shareDeliveredPayload(options: {
+  filename: string;
+  format: ExportFormat;
+  data: string | Uint8Array | Blob;
+  title?: string;
+  uri?: string;
+  isNativePlatformFn?: () => boolean;
+}): Promise<boolean> {
+  const mimeType = getMimeTypeForFormat(options.format);
+  const safeFilename = sanitizeExportFilename(options.filename, options.format);
+  const isNative =
+    options.isNativePlatformFn?.() ??
+    (() => {
+      try {
+        return Capacitor.isNativePlatform();
+      } catch {
+        return false;
+      }
+    })();
+
+  if (isNative) {
+    try {
+      let targetUri = options.uri;
+      if (!targetUri) {
+        const prepared = await resolveNativeWritePayload(options.data);
+        const written = await Filesystem.writeFile({
+          path: `FieldCast/${safeFilename}`,
+          data: prepared.data,
+          directory: Directory.Cache,
+          recursive: true,
+          ...(prepared.encoding ? { encoding: prepared.encoding } : {}),
+        });
+        targetUri = written.uri;
+      }
+      await Share.share({
+        title: options.title ?? `FieldCast — ${safeFilename}`,
+        text: `Exportação FieldCast (${safeFilename})`,
+        files: [targetUri],
+        dialogTitle: options.title ?? 'Compartilhar Arquivo FieldCast',
+      });
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  if (
+    typeof navigator !== 'undefined' &&
+    typeof navigator.share === 'function' &&
+    typeof File !== 'undefined'
+  ) {
+    try {
+      const file = new File([toBlobPart(options.data)], safeFilename, { type: mimeType });
+      const canShare =
+        typeof navigator.canShare !== 'function' || navigator.canShare({ files: [file] });
+      if (canShare) {
+        await navigator.share({
+          title: options.title ?? `FieldCast — ${safeFilename}`,
+          files: [file],
+        });
+        return true;
+      }
+    } catch {
+      return false;
+    }
+  }
+
+  triggerBrowserFileDownload(safeFilename, options.data, mimeType);
+  return false;
 }
 
 export interface BuildExportArtifactParams {

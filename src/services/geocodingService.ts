@@ -3,7 +3,9 @@ import type { ServiceEndpointStatus } from '../types/health';
 import {
   IpWhoIsResponseSchema,
   NominatimResponseSchema,
+  NominatimReverseResultSchema,
   type NominatimResult,
+  type NominatimReverseResult,
 } from '../types/schemas';
 import {
   fetchWithCircuitBreaker,
@@ -12,10 +14,27 @@ import {
 } from './httpClient';
 
 export const NOMINATIM_SEARCH_ENDPOINT = 'https://nominatim.openstreetmap.org/search';
+export const NOMINATIM_REVERSE_ENDPOINT = 'https://nominatim.openstreetmap.org/reverse';
 export const IPWHOIS_ENDPOINT = 'https://ipwho.is/';
 export const NOMINATIM_MIN_INTERVAL_MS = 1000;
+export const REVERSE_GEOCODE_CACHE_STORAGE_KEY = 'fieldcast_reverse_geocode_cache_v42';
+export const REVERSE_GEOCODE_CACHE_MAX_ENTRIES = 100;
 
 let lastNominatimRequestTimestampMs = 0;
+
+export interface ReverseGeocodeResult {
+  latitude: number;
+  longitude: number;
+  neighborhood: string | null;
+  city: string | null;
+  state: string | null;
+  friendlyLabel: string;
+  fullDisplayName: string;
+  fromCache: boolean;
+}
+
+const reverseGeocodeMemoryCache = new Map<string, ReverseGeocodeResult>();
+let reverseGeocodeStorageHydrated = false;
 
 export interface GeocodingLocationResult {
   id: string;
@@ -132,6 +151,219 @@ export async function searchLocationsNominatim(
   });
 
   return mapped;
+}
+
+function hydrateReverseGeocodeCacheFromStorage(): void {
+  if (reverseGeocodeStorageHydrated) {
+    return;
+  }
+  reverseGeocodeStorageHydrated = true;
+  try {
+    if (typeof localStorage === 'undefined') {
+      return;
+    }
+    const raw = localStorage.getItem(REVERSE_GEOCODE_CACHE_STORAGE_KEY);
+    if (!raw) {
+      return;
+    }
+    const parsed = JSON.parse(raw) as Array<[string, ReverseGeocodeResult]>;
+    if (!Array.isArray(parsed)) {
+      return;
+    }
+    for (const entry of parsed.slice(-REVERSE_GEOCODE_CACHE_MAX_ENTRIES)) {
+      if (
+        Array.isArray(entry) &&
+        typeof entry[0] === 'string' &&
+        entry[1] &&
+        typeof entry[1].friendlyLabel === 'string'
+      ) {
+        reverseGeocodeMemoryCache.set(entry[0], entry[1]);
+      }
+    }
+  } catch {
+    // Ignora cache corrompido ou localStorage indisponível
+  }
+}
+
+function persistReverseGeocodeCacheToStorage(): void {
+  try {
+    if (typeof localStorage === 'undefined') {
+      return;
+    }
+    const serialized = JSON.stringify(
+      Array.from(reverseGeocodeMemoryCache.entries()).slice(-REVERSE_GEOCODE_CACHE_MAX_ENTRIES),
+    );
+    localStorage.setItem(REVERSE_GEOCODE_CACHE_STORAGE_KEY, serialized);
+  } catch {
+    // Ignora falha de cota em localStorage
+  }
+}
+
+function setReverseGeocodeCacheEntry(key: string, value: ReverseGeocodeResult): void {
+  hydrateReverseGeocodeCacheFromStorage();
+  if (reverseGeocodeMemoryCache.has(key)) {
+    reverseGeocodeMemoryCache.delete(key);
+  }
+  reverseGeocodeMemoryCache.set(key, value);
+  while (reverseGeocodeMemoryCache.size > REVERSE_GEOCODE_CACHE_MAX_ENTRIES) {
+    const oldestKey = reverseGeocodeMemoryCache.keys().next().value;
+    if (oldestKey === undefined) break;
+    reverseGeocodeMemoryCache.delete(oldestKey);
+  }
+  persistReverseGeocodeCacheToStorage();
+}
+
+/**
+ * Limpa o cache de geocodificação reversa em memória e localStorage (útil em testes).
+ */
+export function clearReverseGeocodeCache(): void {
+  reverseGeocodeMemoryCache.clear();
+  reverseGeocodeStorageHydrated = true;
+  try {
+    if (typeof localStorage !== 'undefined') {
+      localStorage.removeItem(REVERSE_GEOCODE_CACHE_STORAGE_KEY);
+    }
+  } catch {
+    // Ignora
+  }
+}
+
+/**
+ * Monta a URL de geocodificação reversa do Nominatim (OSM).
+ */
+export function buildNominatimReverseUrl(latitude: number, longitude: number): string {
+  return `${NOMINATIM_REVERSE_ENDPOINT}?lat=${latitude}&lon=${longitude}&format=jsonv2&addressdetails=1&accept-language=pt-BR`;
+}
+
+function formatReverseGeocodeResult(
+  latitude: number,
+  longitude: number,
+  payload: NominatimReverseResult,
+): ReverseGeocodeResult | null {
+  if (payload.error) {
+    return null;
+  }
+
+  const addr = payload.address;
+  const neighborhoodRaw =
+    addr?.neighbourhood ??
+    addr?.neighborhood ??
+    addr?.suburb ??
+    addr?.quarter ??
+    addr?.city_district ??
+    addr?.hamlet ??
+    null;
+  const cityRaw =
+    addr?.city ?? addr?.town ?? addr?.municipality ?? addr?.village ?? null;
+  const stateRaw = addr?.state ?? addr?.region ?? null;
+
+  const neighborhood = neighborhoodRaw?.trim() || null;
+  const city = cityRaw?.trim() || null;
+  const state = stateRaw?.trim() || null;
+
+  let friendlyLabel: string | null = null;
+  if (neighborhood && city && neighborhood.toLowerCase() !== city.toLowerCase()) {
+    friendlyLabel = `${neighborhood}, ${city}`;
+  } else if (city && state) {
+    friendlyLabel = `${city} — ${state}`;
+  } else if (city) {
+    friendlyLabel = city;
+  } else if (neighborhood && state) {
+    friendlyLabel = `${neighborhood} — ${state}`;
+  } else if (neighborhood) {
+    friendlyLabel = neighborhood;
+  } else if (state) {
+    friendlyLabel = state;
+  } else {
+    const fallback =
+      payload.name?.trim() ||
+      payload.display_name?.split(',')[0]?.trim() ||
+      null;
+    friendlyLabel = fallback;
+  }
+
+  if (!friendlyLabel) {
+    return null;
+  }
+
+  return {
+    latitude,
+    longitude,
+    neighborhood,
+    city,
+    state,
+    friendlyLabel,
+    fullDisplayName: payload.display_name?.trim() || friendlyLabel,
+    fromCache: false,
+  };
+}
+
+/**
+ * Executa geocodificação reversa via Nominatim (OSM) para traduzir `(lat, lon)` em Bairro/Cidade/Estado,
+ * com cache em memória + `localStorage` (até 100 entradas) e degradação graciosa offline (`null`).
+ */
+export async function reverseGeocodeNominatim(
+  latitude: number,
+  longitude: number,
+  options?: {
+    minIntervalMs?: number;
+    fetchImpl?: typeof fetch;
+    timeoutMs?: number;
+    maxRetries?: number;
+    backoffBaseMs?: number;
+  },
+): Promise<ReverseGeocodeResult | null> {
+  if (!Number.isFinite(latitude) || !Number.isFinite(longitude)) {
+    return null;
+  }
+
+  const cacheKey = `${latitude.toFixed(3)},${longitude.toFixed(3)}`;
+  hydrateReverseGeocodeCacheFromStorage();
+  const cached = reverseGeocodeMemoryCache.get(cacheKey);
+  if (cached) {
+    return {
+      ...cached,
+      fromCache: true,
+    };
+  }
+
+  try {
+    const minInterval = options?.minIntervalMs ?? NOMINATIM_MIN_INTERVAL_MS;
+    const now = Date.now();
+    const elapsed = now - lastNominatimRequestTimestampMs;
+
+    if (lastNominatimRequestTimestampMs > 0 && elapsed < minInterval) {
+      const waitMs = minInterval - elapsed;
+      await new Promise((resolve) => setTimeout(resolve, waitMs));
+    }
+
+    lastNominatimRequestTimestampMs = Date.now();
+    const url = buildNominatimReverseUrl(latitude, longitude);
+
+    const response = await fetchWithCircuitBreaker({
+      service: 'nominatim',
+      url,
+      schema: NominatimReverseResultSchema,
+      headers: {
+        'Accept-Language': 'pt-BR,pt;q=0.9,en;q=0.8',
+      },
+      fetchImpl: options?.fetchImpl,
+      timeoutMs: options?.timeoutMs ?? 6000,
+      maxRetries: options?.maxRetries ?? 1,
+      backoffBaseMs: options?.backoffBaseMs,
+      degradedOnOpen: true,
+    });
+
+    const formatted = formatReverseGeocodeResult(latitude, longitude, response.data);
+    if (!formatted) {
+      return null;
+    }
+
+    setReverseGeocodeCacheEntry(cacheKey, formatted);
+    return formatted;
+  } catch {
+    return null;
+  }
 }
 
 /**

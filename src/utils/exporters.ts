@@ -779,10 +779,11 @@ export function computeCrc32(bytes: Uint8Array): number {
 }
 
 /**
- * Empacota entradas em um arquivo ZIP (PKZIP Stored / método 0) 100% em TypeScript puro.
+ * Empacota entradas em um arquivo ZIP (PKZIP Stored / método 0) 100% em TypeScript puro,
+ * aceitando payloads `Uint8Array` ou `string` (UTF-8).
  */
-export function buildStoredZip(
-  entries: ReadonlyArray<{ name: string; data: Uint8Array }>,
+export function buildPureZipArchiveBytes(
+  entries: ReadonlyArray<{ name: string; data: Uint8Array | string }>,
 ): Uint8Array {
   const encoder = new TextEncoder();
   const now = new Date();
@@ -805,9 +806,11 @@ export function buildStoredZip(
   let offset = 0;
   for (const entry of entries) {
     const nameBytes = encoder.encode(entry.name);
-    const crc = computeCrc32(entry.data);
-    localRecords.push({ nameBytes, data: entry.data, crc, offset });
-    offset += 30 + nameBytes.length + entry.data.length;
+    const dataBytes =
+      typeof entry.data === 'string' ? encoder.encode(entry.data) : entry.data;
+    const crc = computeCrc32(dataBytes);
+    localRecords.push({ nameBytes, data: dataBytes, crc, offset });
+    offset += 30 + nameBytes.length + dataBytes.length;
   }
 
   const centralDirOffset = offset;
@@ -874,6 +877,15 @@ export function buildStoredZip(
   view.setUint16(cursor + 20, 0, true);
 
   return out;
+}
+
+/**
+ * Empacota entradas em um arquivo ZIP (PKZIP Stored / método 0) 100% em TypeScript puro.
+ */
+export function buildStoredZip(
+  entries: ReadonlyArray<{ name: string; data: Uint8Array }>,
+): Uint8Array {
+  return buildPureZipArchiveBytes(entries);
 }
 
 /**

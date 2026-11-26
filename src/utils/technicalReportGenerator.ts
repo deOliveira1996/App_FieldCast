@@ -4,7 +4,7 @@ import type {
   ScientificAnalysisSummary,
   TechnicalReportDocument,
 } from '../types/v4';
-import { formatCardinalDirection, UTF8_BOM } from './exporters';
+import { buildPureZipArchiveBytes, formatCardinalDirection, UTF8_BOM } from './exporters';
 import { formatLocalYMD } from './localTimeHour';
 
 const WATER_STRESS_LABELS_PT: Record<
@@ -754,4 +754,654 @@ export function formatScientificStatsCsvBom(analysis: ScientificAnalysisSummary)
  */
 export function formatTechnicalReportJson(doc: TechnicalReportDocument): string {
   return JSON.stringify(doc, null, 2);
+}
+
+// ============================================================================
+// Exportador PDF 1.4 100% Client-Side (WinAnsi, multipágina, tabela xref exata)
+// ============================================================================
+
+const WINANSI_EXTRA_MAP: Record<number, number> = {
+  0x20ac: 0x80, // €
+  0x201a: 0x82, // ‚
+  0x0192: 0x83, // ƒ
+  0x201e: 0x84, // „
+  0x2026: 0x85, // …
+  0x2020: 0x86, // †
+  0x2021: 0x87, // ‡
+  0x02c6: 0x88, // ˆ
+  0x2030: 0x89, // ‰
+  0x0160: 0x8a, // Š
+  0x2039: 0x8b, // ‹
+  0x0152: 0x8c, // Œ
+  0x017d: 0x8e, // Ž
+  0x2018: 0x91, // ‘
+  0x2019: 0x92, // ’
+  0x201c: 0x93, // “
+  0x201d: 0x94, // ”
+  0x2022: 0x95, // •
+  0x2013: 0x96, // –
+  0x2014: 0x97, // —
+  0x02dc: 0x98, // ˜
+  0x2122: 0x99, // ™
+  0x0161: 0x9a, // š
+  0x203a: 0x9b, // ›
+  0x0153: 0x9c, // œ
+  0x017e: 0x9e, // ž
+  0x0178: 0x9f, // Ÿ
+};
+
+const UNICODE_ASCII_FALLBACK: Record<string, string> = {
+  '→': '->',
+  '←': '<-',
+  '↔': '<->',
+  '−': '-',
+  '≥': '>=',
+  '≤': '<=',
+  '≠': '!=',
+  '≈': '~=',
+  '∈': 'in',
+  'α': 'alpha',
+  'β': 'beta',
+  'Δ': 'Delta',
+  'σ': 'sigma',
+  'θ': 'theta',
+  'π': 'pi',
+  'Σ': 'Sigma',
+  '∑': 'soma',
+};
+
+function sanitizeForPdfMeasure(raw: string): string {
+  let out = '';
+  for (const ch of raw) {
+    if (UNICODE_ASCII_FALLBACK[ch]) {
+      out += UNICODE_ASCII_FALLBACK[ch];
+    } else {
+      out += ch;
+    }
+  }
+  return out;
+}
+
+function encodePdfWinAnsiLiteralBytes(raw: string): number[] {
+  const normalized = sanitizeForPdfMeasure(raw);
+  const bytes: number[] = [0x28]; // '('
+  for (let i = 0; i < normalized.length; i++) {
+    const code = normalized.charCodeAt(i);
+    if (code === 0x28 || code === 0x29 || code === 0x5c) {
+      // Escapa '(', ')' e '\'
+      bytes.push(0x5c, code);
+      continue;
+    }
+    if (code >= 0x20 && code <= 0x7e) {
+      bytes.push(code);
+      continue;
+    }
+    if (code >= 0xa0 && code <= 0xff) {
+      bytes.push(code);
+      continue;
+    }
+    const winAnsiCode = WINANSI_EXTRA_MAP[code];
+    if (winAnsiCode !== undefined) {
+      bytes.push(winAnsiCode);
+      continue;
+    }
+    // Fallback ASCII para caracteres fora da tabela WinAnsi
+    const asciiBase = normalized[i]!
+      .normalize('NFD')
+      .replace(/[\u0300-\u036f]/g, '');
+    if (asciiBase.length > 0 && asciiBase.charCodeAt(0) >= 0x20 && asciiBase.charCodeAt(0) <= 0x7e) {
+      const fallbackCode = asciiBase.charCodeAt(0);
+      if (fallbackCode === 0x28 || fallbackCode === 0x29 || fallbackCode === 0x5c) {
+        bytes.push(0x5c, fallbackCode);
+      } else {
+        bytes.push(fallbackCode);
+      }
+    } else {
+      bytes.push(0x3f); // '?'
+    }
+  }
+  bytes.push(0x29); // ')'
+  return bytes;
+}
+
+function wrapPdfLines(text: string, maxWidthPt: number, fontSizePt: number): string[] {
+  const cleaned = sanitizeForPdfMeasure(text).replace(/\r\n/g, '\n');
+  const approxCharWidth = fontSizePt * 0.51;
+  const maxChars = Math.max(16, Math.floor(maxWidthPt / approxCharWidth));
+  const result: string[] = [];
+
+  for (const paragraph of cleaned.split('\n')) {
+    const trimmed = paragraph.trim();
+    if (!trimmed) {
+      result.push('');
+      continue;
+    }
+    const words = trimmed.split(/\s+/);
+    let currentLine = '';
+    for (const word of words) {
+      if (!currentLine) {
+        if (word.length <= maxChars) {
+          currentLine = word;
+        } else {
+          // Quebra palavra muito longa (ex.: URL)
+          for (let i = 0; i < word.length; i += maxChars) {
+            result.push(word.slice(i, i + maxChars));
+          }
+          currentLine = '';
+        }
+      } else if (currentLine.length + 1 + word.length <= maxChars) {
+        currentLine += ` ${word}`;
+      } else {
+        result.push(currentLine);
+        if (word.length <= maxChars) {
+          currentLine = word;
+        } else {
+          for (let i = 0; i < word.length; i += maxChars) {
+            result.push(word.slice(i, i + maxChars));
+          }
+          currentLine = '';
+        }
+      }
+    }
+    if (currentLine) {
+      result.push(currentLine);
+    }
+  }
+
+  return result;
+}
+
+function asciiToBytes(str: string): Uint8Array {
+  const arr = new Uint8Array(str.length);
+  for (let i = 0; i < str.length; i++) {
+    arr[i] = str.charCodeAt(i) & 0xff;
+  }
+  return arr;
+}
+
+function concatUint8Arrays(chunks: readonly Uint8Array[]): Uint8Array {
+  let total = 0;
+  for (const c of chunks) {
+    total += c.byteLength;
+  }
+  const out = new Uint8Array(total);
+  let offset = 0;
+  for (const c of chunks) {
+    out.set(c, offset);
+    offset += c.byteLength;
+  }
+  return out;
+}
+
+interface PdfTextCommand {
+  font: 'F1' | 'F2';
+  size: number;
+  x: number;
+  y: number;
+  text: string;
+}
+
+/**
+ * Gera um documento **PDF 1.4** binário válido 100% no cliente (`Uint8Array`)
+ * com paginação automática A4, tipografia Helvetica / Helvetica-Bold (WinAnsiEncoding),
+ * tabela de métricas estatísticas, balanço hídrico e tabela `xref` exata por byte-offset.
+ */
+export function generateTechnicalReportPdfBytes(doc: TechnicalReportDocument): Uint8Array {
+  const { analysis } = doc;
+  const wb = analysis.waterBalance;
+  const windCardinal = formatCardinalDirection(analysis.dominantWindDirectionDeg);
+  const stressLabel = WATER_STRESS_LABELS_PT[wb.waterStressClassification];
+
+  const pageWidth = 595;
+  const pageHeight = 842;
+  const marginLeft = 45;
+  const marginRight = 45;
+  const contentWidth = pageWidth - marginLeft - marginRight;
+  const topY = 792;
+  const bottomY = 52;
+
+  const pages: PdfTextCommand[][] = [[]];
+  let cursorY = topY;
+
+  const ensureSpace = (neededPt: number) => {
+    if (cursorY - neededPt < bottomY) {
+      pages.push([]);
+      cursorY = topY;
+    }
+  };
+
+  const pushTextLine = (
+    text: string,
+    options?: {
+      font?: 'F1' | 'F2';
+      size?: number;
+      lineHeight?: number;
+      indent?: number;
+    },
+  ) => {
+    const font = options?.font ?? 'F1';
+    const size = options?.size ?? 9.5;
+    const lineHeight = options?.lineHeight ?? size * 1.38;
+    const indent = options?.indent ?? 0;
+    ensureSpace(lineHeight);
+    pages[pages.length - 1]!.push({
+      font,
+      size,
+      x: marginLeft + indent,
+      y: cursorY,
+      text,
+    });
+    cursorY -= lineHeight;
+  };
+
+  const pushParagraph = (
+    text: string,
+    options?: { font?: 'F1' | 'F2'; size?: number; indent?: number; spaceAfter?: number },
+  ) => {
+    const font = options?.font ?? 'F1';
+    const size = options?.size ?? 9.5;
+    const indent = options?.indent ?? 0;
+    const lines = wrapPdfLines(text, contentWidth - indent, size);
+    for (const line of lines) {
+      if (line === '') {
+        cursorY -= size * 0.6;
+        continue;
+      }
+      pushTextLine(line, { font, size, indent });
+    }
+    cursorY -= options?.spaceAfter ?? 5;
+  };
+
+  const pushSectionHeading = (heading: string) => {
+    ensureSpace(28);
+    cursorY -= 6;
+    pushTextLine(heading, { font: 'F2', size: 11.5, lineHeight: 16 });
+    cursorY -= 2;
+  };
+
+  // Cabeçalho do relatório
+  pushParagraph(doc.title, { font: 'F2', size: 14, spaceAfter: 3 });
+  pushParagraph(doc.subtitle, { font: 'F1', size: 10, spaceAfter: 3 });
+  pushParagraph(`ID: ${doc.reportId} | Emitido em: ${doc.generatedAtIso}`, {
+    font: 'F1',
+    size: 8.5,
+    spaceAfter: 8,
+  });
+
+  // Seção 1: Metadados Geodésicos
+  pushSectionHeading('1. Identificação Geodésica e Metadados');
+  pushParagraph(
+    `Localidade: ${analysis.locationName} | Coordenadas WGS84: ${analysis.latitude.toFixed(4)}°, ${analysis.longitude.toFixed(4)}° | Altitude DEM: ${Math.round(analysis.elevationDemM)} m`,
+    { size: 9, spaceAfter: 2 },
+  );
+  pushParagraph(
+    `Fuso Horário: ${analysis.timezone} | Janela: ${analysis.periodStartIso} -> ${analysis.periodEndIso}`,
+    { size: 9, spaceAfter: 2 },
+  );
+  pushParagraph(
+    `Fonte / Modelos: ${analysis.activeModelLabel} (${analysis.modelsCompared.join(', ')}) | Vento Vetorial: ${fmtStat(analysis.dominantWindDirectionDeg, 1)}° (${windCardinal}), R = ${fmtStat(analysis.windDirectionalConsistencyR, 3)}`,
+    { size: 9, spaceAfter: 6 },
+  );
+
+  // Seção 2: Resumo Executivo
+  pushSectionHeading('2. Resumo Executivo');
+  pushParagraph(doc.executiveSummary, { size: 9.5, spaceAfter: 6 });
+
+  // Seção 3: Balanço Hídrico Agroclimático
+  pushSectionHeading('3. Balanço Hídrico Agroclimático (FAO-56)');
+  pushParagraph(`Classificação Hídrica: ${stressLabel}`, { font: 'F2', size: 9.5, spaceAfter: 2 });
+  pushParagraph(
+    `Precipitação (P): ${fmtStat(wb.totalPrecipitationMm, 2)} mm | ET0 Ref.: ${fmtStat(wb.totalEt0FaoMm, 2)} mm | Saldo Líquido (P - ET0): ${fmtSigned(wb.netWaterBalanceMm, 2)} mm`,
+    { size: 9, spaceAfter: 2 },
+  );
+  pushParagraph(
+    `Graus-Dia (GDD Base 10°C): ${fmtStat(wb.growingDegreeDaysBase10C, 2)} °C·dia | Umidade Relativa Média: ${fmtStat(wb.meanRelativeHumidityPct, 1)}% | Índice de Calor Máx.: ${fmtStat(wb.maxHeatIndexC, 1)} °C`,
+    { size: 9, spaceAfter: 6 },
+  );
+
+  // Seção 4: Tabela de Métricas Estatísticas
+  pushSectionHeading('4. Síntese Estatística Descritiva, Quantis e Tendência (OLS)');
+  pushTextLine(
+    'Variável (Unid.) | N | Média | DP | Med | Mín | P10 | P90 | Máx | Tend/24h | |Z|máx',
+    { font: 'F2', size: 8, lineHeight: 12 },
+  );
+  for (const m of analysis.metrics) {
+    const rowText = `${m.label} (${m.unit}) | ${m.sampleCount} | ${fmtStat(m.mean, 2)} | ${fmtStat(m.stdDev, 2)} | ${fmtStat(m.median, 2)} | ${fmtStat(m.min, 2)} | ${fmtStat(m.p10, 2)} | ${fmtStat(m.p90, 2)} | ${fmtStat(m.max, 2)} | ${fmtSigned(m.linearTrendPerDay, 2)} | ${fmtStat(m.anomalyZScoreMax, 2)}`;
+    pushParagraph(rowText, { size: 8, spaceAfter: 2 });
+  }
+
+  // Seção 5: Metodologia
+  pushSectionHeading('5. Metodologia Físico-Matemática');
+  pushParagraph(doc.methodologySection, { size: 9, spaceAfter: 6 });
+
+  // Seção 6: Interpretação dos Resultados
+  pushSectionHeading('6. Interpretação Objetiva dos Resultados');
+  pushParagraph(doc.resultsInterpretation, { size: 9.5, spaceAfter: 6 });
+
+  // Seção 7: Discussão Parcimoniosa
+  pushSectionHeading('7. Discussão Parcimoniosa');
+  pushParagraph(doc.parcimonicDiscussion, { size: 9.5, spaceAfter: 6 });
+
+  // Seção 8: Limitações e Avisos
+  pushSectionHeading('8. Limitações Técnicas e Avisos Operacionais');
+  for (const disclaimer of doc.limitationsAndDisclaimers) {
+    pushParagraph(`• ${disclaimer}`, { size: 8.8, indent: 8, spaceAfter: 3 });
+  }
+
+  // Seção 9: Referências
+  if (analysis.citations.length > 0) {
+    pushSectionHeading('9. Referências e Fontes Primárias');
+    analysis.citations.forEach((c, idx) => {
+      pushParagraph(
+        `${idx + 1}. ${c.datasetName} (${c.provider}, ${c.spatialResolution}, ${c.temporalResolution}): ${c.formalCitation} — ${c.url}`,
+        { size: 8.2, indent: 8, spaceAfter: 2 },
+      );
+    });
+  }
+
+  // Rodapé paginado em cada página
+  const totalPages = pages.length;
+  pages.forEach((cmds, pageIdx) => {
+    cmds.push({
+      font: 'F1',
+      size: 8,
+      x: marginLeft,
+      y: 28,
+      text: `FieldCast Offline-First Technical Report • ${doc.reportId} • Página ${pageIdx + 1}/${totalPages}`,
+    });
+  });
+
+  // Monta os streams de conteúdo de cada página
+  const buildPageStreamBytes = (cmds: readonly PdfTextCommand[]): Uint8Array => {
+    const streamChunks: Uint8Array[] = [asciiToBytes('BT\n')];
+    for (const cmd of cmds) {
+      streamChunks.push(
+        asciiToBytes(`/${cmd.font} ${cmd.size.toFixed(1)} Tf 1 0 0 1 ${cmd.x.toFixed(1)} ${cmd.y.toFixed(1)} Tm `),
+      );
+      streamChunks.push(new Uint8Array(encodePdfWinAnsiLiteralBytes(cmd.text)));
+      streamChunks.push(asciiToBytes(' Tj\n'));
+    }
+    streamChunks.push(asciiToBytes('ET\n'));
+    return concatUint8Arrays(streamChunks);
+  };
+
+  // Objetos PDF:
+  // 1: Catalog
+  // 2: Pages
+  // 3: Font F1 (Helvetica + WinAnsiEncoding)
+  // 4: Font F2 (Helvetica-Bold + WinAnsiEncoding)
+  // Para cada página i (0..totalPages-1):
+  //   pageObjNum = 5 + i*2
+  //   contentObjNum = 6 + i*2
+  const objects: Array<{ id: number; body: Uint8Array }> = [];
+  const pageIds = pages.map((_, idx) => 5 + idx * 2);
+
+  objects.push({
+    id: 1,
+    body: asciiToBytes('<< /Type /Catalog /Pages 2 0 R >>'),
+  });
+  objects.push({
+    id: 2,
+    body: asciiToBytes(`<< /Type /Pages /Kids [${pageIds.map((id) => `${id} 0 R`).join(' ')}] /Count ${totalPages} >>`),
+  });
+  objects.push({
+    id: 3,
+    body: asciiToBytes('<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding /WinAnsiEncoding >>'),
+  });
+  objects.push({
+    id: 4,
+    body: asciiToBytes('<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica-Bold /Encoding /WinAnsiEncoding >>'),
+  });
+
+  pages.forEach((cmds, idx) => {
+    const pageObjId = 5 + idx * 2;
+    const contentObjId = 6 + idx * 2;
+    const streamBytes = buildPageStreamBytes(cmds);
+
+    objects.push({
+      id: pageObjId,
+      body: asciiToBytes(
+        `<< /Type /Page /Parent 2 0 R /MediaBox [0 0 ${pageWidth} ${pageHeight}] /Resources << /Font << /F1 3 0 R /F2 4 0 R >> >> /Contents ${contentObjId} 0 R >>`,
+      ),
+    });
+
+    objects.push({
+      id: contentObjId,
+      body: concatUint8Arrays([
+        asciiToBytes(`<< /Length ${streamBytes.byteLength} >>\nstream\n`),
+        streamBytes,
+        asciiToBytes('endstream'),
+      ]),
+    });
+  });
+
+  // Serializa arquivo PDF com byte-offsets exatos para xref
+  const fileChunks: Uint8Array[] = [
+    new Uint8Array([0x25, 0x50, 0x44, 0x46, 0x2d, 0x31, 0x2e, 0x34, 0x0a, 0x25, 0xe2, 0xe3, 0xcf, 0xd3, 0x0a]),
+  ];
+  let byteOffset = fileChunks[0]!.byteLength;
+  const offsets: number[] = [0]; // obj 0
+
+  for (const obj of objects) {
+    offsets[obj.id] = byteOffset;
+    const header = asciiToBytes(`${obj.id} 0 obj\n`);
+    const footer = asciiToBytes('\nendobj\n');
+    fileChunks.push(header, obj.body, footer);
+    byteOffset += header.byteLength + obj.body.byteLength + footer.byteLength;
+  }
+
+  const xrefOffset = byteOffset;
+  const maxObjId = objects.length;
+  const xrefLines: string[] = [
+    `xref\n0 ${maxObjId + 1}\n`,
+    '0000000000 65535 f \n',
+  ];
+  for (let id = 1; id <= maxObjId; id++) {
+    const off = offsets[id] ?? 0;
+    xrefLines.push(`${String(off).padStart(10, '0')} 00000 n \n`);
+  }
+  xrefLines.push(
+    `trailer\n<< /Size ${maxObjId + 1} /Root 1 0 R >>\n`,
+    `startxref\n${xrefOffset}\n`,
+    '%%EOF\n',
+  );
+
+  fileChunks.push(asciiToBytes(xrefLines.join('')));
+  return concatUint8Arrays(fileChunks);
+}
+
+// ============================================================================
+// Exportador OOXML (.docx) 100% Client-Side via buildPureZipArchiveBytes
+// ============================================================================
+
+function escapeDocxXml(raw: string): string {
+  return raw
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&apos;');
+}
+
+function buildDocxParagraph(text: string, styleId?: string, bold = false): string {
+  const pPr = styleId ? `<w:pPr><w:pStyle w:val="${styleId}"/></w:pPr>` : '';
+  const rPr = bold ? '<w:rPr><w:b/></w:rPr>' : '';
+  return `<w:p>${pPr}<w:r>${rPr}<w:t xml:space="preserve">${escapeDocxXml(text)}</w:t></w:r></w:p>`;
+}
+
+function buildDocxTableCell(text: string, isHeader = false): string {
+  const shd = isHeader ? '<w:shd w:val="clear" w:color="auto" w:fill="E2E8F0"/>' : '';
+  const rPr = isHeader ? '<w:rPr><w:b/><w:sz w:val="18"/></w:rPr>' : '<w:rPr><w:sz w:val="18"/></w:rPr>';
+  return `<w:tc><w:tcPr>${shd}</w:tcPr><w:p><w:r>${rPr}<w:t xml:space="preserve">${escapeDocxXml(text)}</w:t></w:r></w:p></w:tc>`;
+}
+
+/**
+ * Gera um arquivo **OOXML (.docx)** válido 100% no cliente via `buildPureZipArchiveBytes`,
+ * contendo `[Content_Types].xml`, `_rels/.rels`, `word/styles.xml` e `word/document.xml`
+ * com títulos estilizados, resumo executivo, tabela `<w:tbl>` de métricas e notas metodológicas.
+ */
+export function generateTechnicalReportDocxBytes(doc: TechnicalReportDocument): Uint8Array {
+  const { analysis } = doc;
+  const wb = analysis.waterBalance;
+  const windCardinal = formatCardinalDirection(analysis.dominantWindDirectionDeg);
+  const stressLabel = WATER_STRESS_LABELS_PT[wb.waterStressClassification];
+
+  const contentTypesXml = [
+    '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>',
+    '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">',
+    '  <Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>',
+    '  <Default Extension="xml" ContentType="application/xml"/>',
+    '  <Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/>',
+    '  <Override PartName="/word/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.styles+xml"/>',
+    '</Types>',
+  ].join('\n');
+
+  const rootRelsXml = [
+    '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>',
+    '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">',
+    '  <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/>',
+    '</Relationships>',
+  ].join('\n');
+
+  const stylesXml = [
+    '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>',
+    '<w:styles xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">',
+    '  <w:style w:type="paragraph" w:default="1" w:styleId="Normal">',
+    '    <w:name w:val="Normal"/>',
+    '    <w:rPr><w:rFonts w:ascii="Calibri" w:hAnsi="Calibri"/><w:sz w:val="22"/></w:rPr>',
+    '  </w:style>',
+    '  <w:style w:type="paragraph" w:styleId="Title">',
+    '    <w:name w:val="Title"/>',
+    '    <w:basedOn w:val="Normal"/>',
+    '    <w:pPr><w:spacing w:after="120"/></w:pPr>',
+    '    <w:rPr><w:b/><w:color w:val="0F172A"/><w:sz w:val="32"/></w:rPr>',
+    '  </w:style>',
+    '  <w:style w:type="paragraph" w:styleId="Heading1">',
+    '    <w:name w:val="heading 1"/>',
+    '    <w:basedOn w:val="Normal"/>',
+    '    <w:pPr><w:spacing w:before="220" w:after="80"/></w:pPr>',
+    '    <w:rPr><w:b/><w:color w:val="0369A1"/><w:sz w:val="26"/></w:rPr>',
+    '  </w:style>',
+    '</w:styles>',
+  ].join('\n');
+
+  const tableHeaders = [
+    'Variável',
+    'Unid.',
+    'N',
+    'Média',
+    'DP',
+    'Mediana',
+    'Mín',
+    'P10',
+    'P90',
+    'Máx',
+    'IQR',
+    'Tend./24h',
+    '|Z| máx',
+  ];
+
+  const headerRowXml = `<w:tr>${tableHeaders.map((h) => buildDocxTableCell(h, true)).join('')}</w:tr>`;
+  const dataRowsXml = analysis.metrics
+    .map((m) => {
+      const cells = [
+        m.label,
+        m.unit,
+        String(m.sampleCount),
+        fmtStat(m.mean, 2),
+        fmtStat(m.stdDev, 2),
+        fmtStat(m.median, 2),
+        fmtStat(m.min, 2),
+        fmtStat(m.p10, 2),
+        fmtStat(m.p90, 2),
+        fmtStat(m.max, 2),
+        fmtStat(m.iqr, 2),
+        fmtSigned(m.linearTrendPerDay, 2),
+        fmtStat(m.anomalyZScoreMax, 2),
+      ];
+      return `<w:tr>${cells.map((c) => buildDocxTableCell(c, false)).join('')}</w:tr>`;
+    })
+    .join('');
+
+  const metricsTableXml = [
+    '<w:tbl>',
+    '  <w:tblPr>',
+    '    <w:tblBorders>',
+    '      <w:top w:val="single" w:sz="4" w:space="0" w:color="CBD5E1"/>',
+    '      <w:left w:val="single" w:sz="4" w:space="0" w:color="CBD5E1"/>',
+    '      <w:bottom w:val="single" w:sz="4" w:space="0" w:color="CBD5E1"/>',
+    '      <w:right w:val="single" w:sz="4" w:space="0" w:color="CBD5E1"/>',
+    '      <w:insideH w:val="single" w:sz="4" w:space="0" w:color="CBD5E1"/>',
+    '      <w:insideV w:val="single" w:sz="4" w:space="0" w:color="CBD5E1"/>',
+    '    </w:tblBorders>',
+    '  </w:tblPr>',
+    headerRowXml,
+    dataRowsXml,
+    '</w:tbl>',
+  ].join('');
+
+  const bodyParts: string[] = [
+    buildDocxParagraph(doc.title, 'Title', true),
+    buildDocxParagraph(doc.subtitle),
+    buildDocxParagraph(`ID do Relatório: ${doc.reportId} | Emitido em: ${doc.generatedAtIso}`),
+
+    buildDocxParagraph('1. Identificação Geodésica e Metadados', 'Heading1', true),
+    buildDocxParagraph(
+      `Localidade: ${analysis.locationName} | Coordenadas WGS84: ${analysis.latitude.toFixed(4)}°, ${analysis.longitude.toFixed(4)}° | Altitude Ortométrica (DEM): ${Math.round(analysis.elevationDemM)} m`,
+    ),
+    buildDocxParagraph(
+      `Fuso Horário: ${analysis.timezone} | Janela Temporal: ${analysis.periodStartIso} a ${analysis.periodEndIso}`,
+    ),
+    buildDocxParagraph(
+      `Fonte / Modelos: ${analysis.activeModelLabel} (${analysis.modelsCompared.join(', ')}) | Vento Vetorial Dominante: ${fmtStat(analysis.dominantWindDirectionDeg, 1)}° (${windCardinal}), R = ${fmtStat(analysis.windDirectionalConsistencyR, 3)}`,
+    ),
+
+    buildDocxParagraph('2. Resumo Executivo', 'Heading1', true),
+    buildDocxParagraph(doc.executiveSummary),
+
+    buildDocxParagraph('3. Balanço Hídrico Agroclimático (FAO-56)', 'Heading1', true),
+    buildDocxParagraph(`Classificação Hídrica: ${stressLabel}`, undefined, true),
+    buildDocxParagraph(
+      `Precipitação Acumulada (P): ${fmtStat(wb.totalPrecipitationMm, 2)} mm | Evapotranspiração Ref. (ET0): ${fmtStat(wb.totalEt0FaoMm, 2)} mm | Saldo Hídrico (P - ET0): ${fmtSigned(wb.netWaterBalanceMm, 2)} mm`,
+    ),
+    buildDocxParagraph(
+      `Graus-Dia Acumulados (GDD Base 10°C): ${fmtStat(wb.growingDegreeDaysBase10C, 2)} °C·dia | Umidade Relativa Média: ${fmtStat(wb.meanRelativeHumidityPct, 1)}% | Índice de Calor Máximo: ${fmtStat(wb.maxHeatIndexC, 1)} °C`,
+    ),
+
+    buildDocxParagraph('4. Síntese Estatística Descritiva, Quantis e Tendência Linear (OLS)', 'Heading1', true),
+    metricsTableXml,
+
+    buildDocxParagraph('5. Metodologia Físico-Matemática', 'Heading1', true),
+    ...doc.methodologySection.split(/\n\n+/).map((p) => buildDocxParagraph(p)),
+
+    buildDocxParagraph('6. Interpretação Objetiva dos Resultados', 'Heading1', true),
+    buildDocxParagraph(doc.resultsInterpretation),
+
+    buildDocxParagraph('7. Discussão Parcimoniosa', 'Heading1', true),
+    buildDocxParagraph(doc.parcimonicDiscussion),
+
+    buildDocxParagraph('8. Limitações Técnicas e Avisos Operacionais', 'Heading1', true),
+    ...doc.limitationsAndDisclaimers.map((d) => buildDocxParagraph(`• ${d}`)),
+
+    buildDocxParagraph('9. Referências Bibliográficas e Fontes Primárias', 'Heading1', true),
+    ...analysis.citations.map((c, idx) =>
+      buildDocxParagraph(
+        `${idx + 1}. ${c.datasetName} (${c.provider}, ${c.spatialResolution}, ${c.temporalResolution}): ${c.formalCitation} — ${c.url}`,
+      ),
+    ),
+  ];
+
+  const documentXml = [
+    '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>',
+    '<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">',
+    `  <w:body>${bodyParts.join('')}<w:sectPr><w:pgSz w:w="11906" w:h="16838"/><w:pgMar w:top="1134" w:right="1134" w:bottom="1134" w:left="1134"/></w:sectPr></w:body>`,
+    '</w:document>',
+  ].join('\n');
+
+  return buildPureZipArchiveBytes([
+    { name: '[Content_Types].xml', data: contentTypesXml },
+    { name: '_rels/.rels', data: rootRelsXml },
+    { name: 'word/styles.xml', data: stylesXml },
+    { name: 'word/document.xml', data: documentXml },
+  ]);
 }

@@ -231,6 +231,44 @@ export const NominatimResponseSchema = z.array(NominatimResultSchema);
 export type NominatimResult = z.infer<typeof NominatimResultSchema>;
 
 /**
+ * Schema de geocodificação reversa Nominatim (OSM `format=jsonv2&addressdetails=1`)
+ */
+export const NominatimReverseAddressSchema = z
+  .object({
+    neighbourhood: z.string().optional(),
+    neighborhood: z.string().optional(),
+    suburb: z.string().optional(),
+    quarter: z.string().optional(),
+    city_district: z.string().optional(),
+    hamlet: z.string().optional(),
+    village: z.string().optional(),
+    town: z.string().optional(),
+    city: z.string().optional(),
+    municipality: z.string().optional(),
+    county: z.string().optional(),
+    state_district: z.string().optional(),
+    state: z.string().optional(),
+    region: z.string().optional(),
+    country: z.string().optional(),
+    country_code: z.string().optional(),
+  })
+  .passthrough();
+
+export const NominatimReverseResultSchema = z
+  .object({
+    place_id: z.number().optional(),
+    lat: z.union([z.string(), z.number()]).optional(),
+    lon: z.union([z.string(), z.number()]).optional(),
+    display_name: z.string().optional(),
+    name: z.string().optional(),
+    address: NominatimReverseAddressSchema.optional(),
+    error: z.string().optional(),
+  })
+  .passthrough();
+
+export type NominatimReverseResult = z.infer<typeof NominatimReverseResultSchema>;
+
+/**
  * Schema do fallback de geolocalização por IP (`https://ipwho.is/`)
  */
 export const IpWhoIsResponseSchema = z
