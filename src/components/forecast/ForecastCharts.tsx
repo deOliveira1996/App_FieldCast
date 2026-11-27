@@ -1566,22 +1566,13 @@ export const ForecastCharts: React.FC<ForecastChartsProps> = ({
       aria-label={tr('Gráficos Horários Interativos', 'Interactive Hourly Charts')}
       className="space-y-4"
     >
-      {/* Climatempo-style Rounded Pill Selector Bar for Hourly Charts */}
-      <div className="rounded-2xl border border-slate-200/90 dark:border-sky-800/70 bg-white dark:bg-[#132a47] px-4 py-3 shadow-sm flex flex-wrap items-center justify-between gap-2.5">
-        <div className="flex items-center gap-2">
-          <h2 className="text-sm sm:text-base font-extrabold text-slate-900 dark:text-white">
-            {tr('Gráfico Hora a Hora', 'Hour-by-Hour Charts')}
-          </h2>
-          <span className="text-xs text-slate-500 dark:text-sky-200/75 hidden sm:inline">
-            •{' '}
-            {tr(
-              'Escolha um parâmetro em destaque ou veja o painel combinado',
-              'Focus on one parameter or view all panels',
-            )}
-          </span>
-        </div>
+      {/* Compact Rounded Pill Selector Bar for Hourly Charts */}
+      <div className="rounded-2xl border border-slate-200/90 dark:border-sky-800/70 bg-white dark:bg-[#132a47] px-3 py-2 shadow-sm flex flex-wrap items-center justify-between gap-2">
+        <h2 className="text-xs sm:text-sm font-extrabold text-slate-900 dark:text-white">
+          {tr('Gráfico Hora a Hora', 'Hour-by-Hour Charts')}
+        </h2>
 
-        <div className="flex items-center gap-1.5 overflow-x-auto scrollbar-thin pb-0.5 max-w-full">
+        <div className="flex items-center gap-1 overflow-x-auto scrollbar-thin pb-0.5 max-w-full">
           {focusTabs.map(({ id, label, Icon }) => {
             const isSelected = focusTab === id;
             return (
@@ -1590,7 +1581,7 @@ export const ForecastCharts: React.FC<ForecastChartsProps> = ({
                 type="button"
                 onClick={() => setFocusTab(id)}
                 aria-pressed={isSelected}
-                className={`min-h-[34px] px-3 py-1.5 rounded-full text-xs font-bold inline-flex items-center gap-1.5 shrink-0 border transition-all ${
+                className={`min-h-[34px] px-2.5 py-1 rounded-full text-xs font-bold inline-flex items-center gap-1.5 shrink-0 border transition-all ${
                   isSelected
                     ? 'bg-[#0080cd] text-white border-[#0080cd] shadow-sm'
                     : 'bg-[#f4f8fb] dark:bg-[#0d1f36] text-slate-700 dark:text-sky-200 border-slate-200 dark:border-sky-800 hover:bg-sky-50'

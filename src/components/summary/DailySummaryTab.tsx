@@ -8,6 +8,7 @@ import {
   CheckCircle2,
   ChevronDown,
   ChevronUp,
+  ClipboardCheck,
   Clock,
   Cloud,
   CloudRain,
@@ -20,6 +21,7 @@ import {
   MapPin,
   Moon,
   Mountain,
+  RotateCcw,
   ShieldCheck,
   Sliders,
   Sparkles,
@@ -32,7 +34,12 @@ import {
 } from 'lucide-react';
 import { useLocale } from '../../context/LocaleContext';
 import { useUnits } from '../../context/UnitsContext';
-import type { GlobalExtremeEventAlert, ThunderstormRiskLevel } from '../../types/v4';
+import { getGroundTruthObservations } from '../../db/database';
+import type {
+  GlobalExtremeEventAlert,
+  GroundTruthObservation,
+  ThunderstormRiskLevel,
+} from '../../types/v4';
 import type {
   EnsembleHour,
   ForecastViewMode,
@@ -42,6 +49,13 @@ import type {
   SafeWindowThresholds,
   WeatherModelId,
 } from '../../types/weather';
+import {
+  applyCalibratedWeightsToForecast,
+  computeRegionalCalibration,
+  detectLiveDivergence,
+  loadUseCalibratedModelPref,
+  saveUseCalibratedModelPref,
+} from '../../utils/groundTruthCalibration';
 import {
   formatLocalHourBadge,
   formatLocalYMD,
@@ -63,10 +77,12 @@ import {
   type UnitPreferences,
 } from '../../utils/units';
 import { CollapsibleModule } from '../common/CollapsibleModule';
+import { GroundTruthModal } from '../common/GroundTruthModal';
 import { HelpPopover } from '../common/HelpPopover';
 import { ModuleErrorBoundary } from '../common/ModuleErrorBoundary';
 import { ForecastSkeleton } from '../common/SkeletonLoaders';
 import { degreesToCardinalShort } from '../forecast/CurrentSummaryCard';
+import { EphemerisCard } from '../forecast/EphemerisCard';
 import type { ForecastTabProps } from '../forecast/ForecastTab';
 import { ThresholdSettingsModal } from '../forecast/ThresholdSettingsModal';
 import { useAppLocationContext } from '../layout/AppShell';
@@ -889,54 +905,140 @@ export const DailySummaryTab: React.FC<DailySummaryTabProps> = ({
   const [manualHourIndex, setManualHourIndex] = useState<number | null>(null);
   const [isExtremeDetailsOpen, setIsExtremeDetailsOpen] = useState<boolean>(false);
   const [isThresholdModalOpen, setIsThresholdModalOpen] = useState<boolean>(false);
+  const [isGroundTruthModalOpen, setIsGroundTruthModalOpen] = useState<boolean>(false);
   const [isSettingPrimary, setIsSettingPrimary] = useState<boolean>(false);
 
-  const forecastKey = forecast
-    ? `${forecast.locationKey}_${forecast.hours[0]?.timestampUnix ?? 0}`
+  const [gtObservations, setGtObservations] = useState<GroundTruthObservation[]>([]);
+  const [useCalibratedModel, setUseCalibratedModel] = useState<boolean>(() =>
+    loadUseCalibratedModelPref(),
+  );
+
+  const refreshGroundTruth = useCallback(async () => {
+    const list = await getGroundTruthObservations();
+    setGtObservations((prev) => (prev.length === 0 && list.length === 0 ? prev : list));
+    const pref = loadUseCalibratedModelPref();
+    setUseCalibratedModel((prev) => (prev === pref ? prev : pref));
+  }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+    const sync = async () => {
+      const list = await getGroundTruthObservations();
+      if (cancelled) return;
+      setGtObservations((prev) => (prev.length === 0 && list.length === 0 ? prev : list));
+      const pref = loadUseCalibratedModelPref();
+      setUseCalibratedModel((prev) => (prev === pref ? prev : pref));
+    };
+    void sync();
+
+    const handleUpdated = () => {
+      void sync();
+    };
+    if (typeof window !== 'undefined') {
+      window.addEventListener('fieldcast:ground-truth-updated', handleUpdated);
+    }
+    return () => {
+      cancelled = true;
+      if (typeof window !== 'undefined') {
+        window.removeEventListener('fieldcast:ground-truth-updated', handleUpdated);
+      }
+    };
+  }, []);
+
+  const regionalCalibration = useMemo(
+    () =>
+      computeRegionalCalibration(
+        gtObservations,
+        activeLocation.latitude,
+        activeLocation.longitude,
+      ),
+    [gtObservations, activeLocation.latitude, activeLocation.longitude],
+  );
+
+  const isCalibratedActive =
+    useCalibratedModel &&
+    regionalCalibration.calibrationEligible &&
+    activeSummaryModel === 'fieldcast';
+
+  const displayForecast = useMemo(() => {
+    if (!forecast) return null;
+    if (useCalibratedModel && regionalCalibration.calibrationEligible) {
+      return applyCalibratedWeightsToForecast(forecast, regionalCalibration);
+    }
+    return forecast;
+  }, [forecast, useCalibratedModel, regionalCalibration]);
+
+  const liveDivergence = useMemo(
+    () => detectLiveDivergence(gtObservations, activeLocation, forecast),
+    [gtObservations, activeLocation, forecast],
+  );
+
+  const handleResetStandardEnsemble = useCallback(() => {
+    saveUseCalibratedModelPref(false);
+    setUseCalibratedModel(false);
+    if (typeof window !== 'undefined' && typeof window.dispatchEvent === 'function') {
+      window.dispatchEvent(new CustomEvent('fieldcast:ground-truth-updated'));
+    }
+    onToast?.({
+      type: 'info',
+      title: tr('FieldCast Ensemble padrão restaurado', 'Standard FieldCast Ensemble restored'),
+      message: tr(
+        'Pesos uniformes entre os 4 modelos restabelecidos.',
+        'Equal weights across all 4 models restored.',
+      ),
+    });
+  }, [onToast, tr]);
+
+  const forecastKey = displayForecast
+    ? `${displayForecast.locationKey}_${displayForecast.hours[0]?.timestampUnix ?? 0}`
     : '';
 
   useEffect(() => {
     setManualHourIndex(null);
   }, [forecastKey]);
 
-  const safeHourIndex = forecast
+  const safeHourIndex = displayForecast
     ? Math.min(
         Math.max(0, manualHourIndex ?? currentLocalHourIndex),
-        Math.max(0, forecast.hours.length - 1),
+        Math.max(0, displayForecast.hours.length - 1),
       )
     : 0;
 
   const activeMetrics = useMemo(
-    () => (forecast ? resolveHourMetrics(forecast, safeHourIndex, activeSummaryModel) : null),
-    [forecast, safeHourIndex, activeSummaryModel],
+    () =>
+      displayForecast
+        ? resolveHourMetrics(displayForecast, safeHourIndex, activeSummaryModel)
+        : null,
+    [displayForecast, safeHourIndex, activeSummaryModel],
   );
 
   const extremeAlerts = useMemo(
     () =>
-      forecast
-        ? deriveDeterministicExtremeEvents(forecast, currentLocalHourIndex, units, tr)
+      displayForecast
+        ? deriveDeterministicExtremeEvents(displayForecast, currentLocalHourIndex, units, tr)
         : [],
-    [forecast, currentLocalHourIndex, units, tr],
+    [displayForecast, currentLocalHourIndex, units, tr],
   );
 
   const todayLocalYmd = useMemo(() => {
-    if (!forecast) {
+    if (!displayForecast) {
       return formatLocalYMD(new Date());
     }
-    const refHour = forecast.hours[safeHourIndex] ?? forecast.hours[currentLocalHourIndex];
+    const refHour =
+      displayForecast.hours[safeHourIndex] ?? displayForecast.hours[currentLocalHourIndex];
     return refHour
-      ? formatLocalYMD(new Date(refHour.timestampUnix * 1000), forecast.timezone)
-      : formatLocalYMD(new Date(), forecast.timezone);
-  }, [forecast, safeHourIndex, currentLocalHourIndex]);
+      ? formatLocalYMD(new Date(refHour.timestampUnix * 1000), displayForecast.timezone)
+      : formatLocalYMD(new Date(), displayForecast.timezone);
+  }, [displayForecast, safeHourIndex, currentLocalHourIndex]);
 
   const realNowLocalYmd = useMemo(
-    () => formatLocalYMD(new Date(), forecast?.timezone),
-    [forecast?.timezone],
+    () => formatLocalYMD(new Date(), displayForecast?.timezone),
+    [displayForecast?.timezone],
   );
 
   // Group all forecast hours strictly by local YYYY-MM-DD (NEVER UTC midnight!)
   const dailySummaries = useMemo(() => {
-    if (!forecast) {
+    if (!displayForecast) {
       return [];
     }
     const groups = new Map<
@@ -952,10 +1054,10 @@ export const DailySummaryTab: React.FC<DailySummaryTabProps> = ({
       }
     >();
 
-    for (let idx = 0; idx < forecast.hours.length; idx++) {
-      const h = forecast.hours[idx]!;
-      const ymd = formatLocalYMD(new Date(h.timestampUnix * 1000), forecast.timezone);
-      const m = resolveHourMetrics(forecast, idx, activeSummaryModel);
+    for (let idx = 0; idx < displayForecast.hours.length; idx++) {
+      const h = displayForecast.hours[idx]!;
+      const ymd = formatLocalYMD(new Date(h.timestampUnix * 1000), displayForecast.timezone);
+      const m = resolveHourMetrics(displayForecast, idx, activeSummaryModel);
       if (!m) {
         continue;
       }
@@ -1008,7 +1110,7 @@ export const DailySummaryTab: React.FC<DailySummaryTabProps> = ({
         maxCloudPct: Math.round(g.maxCloudPct),
         thunderstormRisk: g.worstStorm,
       }));
-  }, [forecast, activeSummaryModel, realNowLocalYmd, intlLocale, tr]);
+  }, [displayForecast, activeSummaryModel, realNowLocalYmd, intlLocale, tr]);
 
   const activeDayMinMax = useMemo(() => {
     const matchedDay =
@@ -1035,36 +1137,36 @@ export const DailySummaryTab: React.FC<DailySummaryTabProps> = ({
   }, [dailySummaries]);
 
   const next24Hours = useMemo(() => {
-    if (!forecast || forecast.hours.length === 0) {
+    if (!displayForecast || displayForecast.hours.length === 0) {
       return [];
     }
     const startIdx = Math.min(
       Math.max(0, currentLocalHourIndex),
-      Math.max(0, forecast.hours.length - 1),
+      Math.max(0, displayForecast.hours.length - 1),
     );
-    const slice = forecast.hours.slice(startIdx, startIdx + 24);
+    const slice = displayForecast.hours.slice(startIdx, startIdx + 24);
     const baseIndex = slice.length > 0 ? startIdx : 0;
-    const targetList = slice.length > 0 ? slice : forecast.hours.slice(0, 24);
+    const targetList = slice.length > 0 ? slice : displayForecast.hours.slice(0, 24);
 
     return targetList.map((h, offset) => {
       const absoluteIndex = baseIndex + offset;
-      const metrics = resolveHourMetrics(forecast, absoluteIndex, activeSummaryModel);
+      const metrics = resolveHourMetrics(displayForecast, absoluteIndex, activeSummaryModel);
       return {
         absoluteIndex,
         timestampUnix: h.timestampUnix,
-        hourLabel: formatLocalHourBadge(h.timestampUnix, forecast.timezone),
+        hourLabel: formatLocalHourBadge(h.timestampUnix, displayForecast.timezone),
         isCurrentHour: absoluteIndex === currentLocalHourIndex,
         isSelectedHour: absoluteIndex === safeHourIndex,
         metrics,
       };
     });
-  }, [forecast, currentLocalHourIndex, safeHourIndex, activeSummaryModel]);
+  }, [displayForecast, currentLocalHourIndex, safeHourIndex, activeSummaryModel]);
 
   const activeEphemeris = useMemo(() => {
-    if (!forecast || forecast.ephemerisByDay.length === 0) {
+    if (!displayForecast || displayForecast.ephemerisByDay.length === 0) {
       return null;
     }
-    const matched = forecast.ephemerisByDay.find((day) => {
+    const matched = displayForecast.ephemerisByDay.find((day) => {
       const raw = day.dateIso.trim();
       if (/^\d{4}-\d{2}-\d{2}$/.test(raw)) {
         return raw === todayLocalYmd;
@@ -1072,16 +1174,16 @@ export const DailySummaryTab: React.FC<DailySummaryTabProps> = ({
       const parsed = new Date(raw);
       return Number.isNaN(parsed.getTime())
         ? raw.slice(0, 10) === todayLocalYmd
-        : formatLocalYMD(parsed, forecast.timezone) === todayLocalYmd;
+        : formatLocalYMD(parsed, displayForecast.timezone) === todayLocalYmd;
     });
-    return matched ?? forecast.ephemerisByDay[0] ?? null;
-  }, [forecast, todayLocalYmd]);
+    return matched ?? displayForecast.ephemerisByDay[0] ?? null;
+  }, [displayForecast, todayLocalYmd]);
 
-  if (isLoading && !forecast) {
+  if (isLoading && !displayForecast) {
     return <ForecastSkeleton />;
   }
 
-  if (!forecast) {
+  if (!displayForecast) {
     return (
       <div
         data-testid="daily-summary-tab"
@@ -1112,8 +1214,8 @@ export const DailySummaryTab: React.FC<DailySummaryTabProps> = ({
     );
   }
 
-  const selectedEnsembleHour = forecast.hours[safeHourIndex];
-  const activeThresholds = thresholds ?? forecast.thresholdsUsed;
+  const selectedEnsembleHour = displayForecast.hours[safeHourIndex];
+  const activeThresholds = thresholds ?? displayForecast.thresholdsUsed;
   const activeModelDisplayLabel =
     activeSummaryModel === 'fieldcast'
       ? 'FieldCast Ensemble'
@@ -1130,7 +1232,7 @@ export const DailySummaryTab: React.FC<DailySummaryTabProps> = ({
     activeMetrics,
     selectedEnsembleHour,
     activeThresholds,
-    forecast.marineAvailable,
+    displayForecast.marineAvailable,
   );
 
   const safeWindowMeta: Record<
@@ -1177,20 +1279,23 @@ export const DailySummaryTab: React.FC<DailySummaryTabProps> = ({
 
   const currentStormMeta = stormBadgeMeta[activeMetrics?.thunderstormRisk ?? 'none'];
   const currentSafeMeta = safeWindowMeta[safeWindowStatus];
-  const confidence = selectedEnsembleHour?.confidence ?? forecast.overallConfidence;
+  const confidence = selectedEnsembleHour?.confidence ?? displayForecast.overallConfidence;
   const isInspectingOtherHour = safeHourIndex !== currentLocalHourIndex;
   const displayedHourHHMM = selectedEnsembleHour
-    ? formatLocalHourBadge(selectedEnsembleHour.timestampUnix, forecast.timezone)
+    ? formatLocalHourBadge(selectedEnsembleHour.timestampUnix, displayForecast.timezone)
     : '00:00';
-  const currentNowHHMM = forecast.hours[currentLocalHourIndex]
-    ? formatLocalHourBadge(forecast.hours[currentLocalHourIndex]!.timestampUnix, forecast.timezone)
+  const currentNowHHMM = displayForecast.hours[currentLocalHourIndex]
+    ? formatLocalHourBadge(
+        displayForecast.hours[currentLocalHourIndex]!.timestampUnix,
+        displayForecast.timezone,
+      )
     : displayedHourHHMM;
 
   const hasExtremeAlerts = extremeAlerts.length > 0;
   const primaryExtremeAlert = extremeAlerts[0] ?? null;
 
-  const demElevConverted = convertWaveHeight(forecast.elevationDemM, units.wave);
-  const demElevText = `${Math.round(demElevConverted ?? forecast.elevationDemM)} ${waveLabel}`;
+  const demElevConverted = convertWaveHeight(displayForecast.elevationDemM, units.wave);
+  const demElevText = `${Math.round(demElevConverted ?? displayForecast.elevationDemM)} ${waveLabel}`;
   const noExtremeGustThresh = formatWind(55, units.wind, 0);
   const noExtremeRainThresh = `${formatPrecip(15, units.precipitation, 0)}/h`;
   const noExtremeWaveThresh = formatWave(3.0, units.wave, 1);
@@ -1269,7 +1374,7 @@ export const DailySummaryTab: React.FC<DailySummaryTabProps> = ({
               'Monitoramento Global de Eventos Extremos',
               'Global Extreme Events Monitoring',
             )}
-            className={`rounded-xl border p-3 sm:p-3.5 space-y-2.5 transition-colors ${
+            className={`rounded-xl border px-3 py-2 sm:px-3.5 sm:py-2.5 space-y-2.5 transition-colors ${
               hasExtremeAlerts
                 ? primaryExtremeAlert?.severity === 'extreme'
                   ? 'border-rose-300 bg-rose-50/95 dark:border-rose-700 dark:bg-rose-950/55 text-rose-950 dark:text-rose-100'
@@ -1277,10 +1382,16 @@ export const DailySummaryTab: React.FC<DailySummaryTabProps> = ({
                 : 'border-emerald-200 bg-emerald-50/85 dark:border-emerald-800/80 dark:bg-emerald-950/40 text-emerald-950 dark:text-emerald-100'
             }`}
           >
-            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2.5">
-              <div className="flex items-start gap-2.5 min-w-0">
+            {/* Preserve official source attribution for screen readers and accessibility audits even when collapsed */}
+            <span className="sr-only">
+              {primaryExtremeAlert?.sourceName ??
+                tr(OFFICIAL_MULTI_MODEL_SOURCE_PT, OFFICIAL_MULTI_MODEL_SOURCE_EN)}
+            </span>
+
+            <div className="flex items-center justify-between gap-2">
+              <div className="flex items-center gap-2 min-w-0 flex-1">
                 <div
-                  className={`p-2 rounded-xl shrink-0 border ${
+                  className={`p-1.5 rounded-lg shrink-0 border ${
                     hasExtremeAlerts
                       ? primaryExtremeAlert?.severity === 'extreme'
                         ? 'bg-rose-500 text-white border-rose-600'
@@ -1289,62 +1400,28 @@ export const DailySummaryTab: React.FC<DailySummaryTabProps> = ({
                   }`}
                 >
                   {hasExtremeAlerts ? (
-                    <AlertTriangle className="w-4 h-4" aria-hidden="true" />
+                    <AlertTriangle className="w-3.5 h-3.5" aria-hidden="true" />
                   ) : (
-                    <CheckCircle2 className="w-4 h-4" aria-hidden="true" />
+                    <CheckCircle2 className="w-3.5 h-3.5" aria-hidden="true" />
                   )}
                 </div>
 
-                <div className="space-y-1 min-w-0">
-                  <div className="flex flex-wrap items-center gap-1.5">
-                    <span className="text-xs sm:text-sm font-extrabold">
-                      {hasExtremeAlerts && primaryExtremeAlert
-                        ? primaryExtremeAlert.title
-                        : tr(
-                            'Sem Eventos Extremos Severos Previstos',
-                            'No Severe Extreme Events Forecast',
-                          )}
+                <div className="flex flex-wrap items-center gap-1.5 min-w-0">
+                  <span className="text-xs sm:text-sm font-extrabold truncate">
+                    {hasExtremeAlerts && primaryExtremeAlert
+                      ? primaryExtremeAlert.title
+                      : tr('Sem Eventos Extremos Previstos', 'No Extreme Events Forecast')}
+                  </span>
+                  {hasExtremeAlerts && primaryExtremeAlert && (
+                    <span className="px-2 py-0.5 rounded-full text-[11px] font-extrabold bg-white/85 dark:bg-slate-900/75 border border-current/20 shrink-0">
+                      {primaryExtremeAlert.metricBadge}
                     </span>
-                    {hasExtremeAlerts && primaryExtremeAlert && (
-                      <span className="px-2 py-0.5 rounded-full text-[11px] font-extrabold bg-white/85 dark:bg-slate-900/75 border border-current/20">
-                        {primaryExtremeAlert.metricBadge}
-                      </span>
-                    )}
-                    {extremeAlerts.length > 1 && (
-                      <span className="px-2 py-0.5 rounded-full text-[11px] font-bold bg-white/80 dark:bg-slate-900/70">
-                        +{extremeAlerts.length - 1} {tr('alerta(s)', 'alert(s)')}
-                      </span>
-                    )}
-                  </div>
-
-                  <p className="text-xs leading-relaxed opacity-90">
-                    {hasExtremeAlerts && primaryExtremeAlert ? (
-                      <>
-                        <strong>{tr('Danos potenciais:', 'Potential impacts:')}</strong>{' '}
-                        {primaryExtremeAlert.potentialDamages}{' '}
-                        <span className="font-semibold">
-                          ({tr('Pico:', 'Peak:')}{' '}
-                          {formatAlertWindowBadge(
-                            primaryExtremeAlert.peakTimestampUnix,
-                            forecast.timezone,
-                            intlLocale,
-                          )}
-                          )
-                        </span>
-                      </>
-                    ) : (
-                      tr(
-                        `Sem gatilho de tempestade, rajada ≥ ${noExtremeGustThresh}, chuva ≥ ${noExtremeRainThresh} ou ressaca ≥ ${noExtremeWaveThresh}.`,
-                        `No severe storm, gust ≥ ${noExtremeGustThresh}, rain ≥ ${noExtremeRainThresh}, or swell ≥ ${noExtremeWaveThresh} trigger.`,
-                      )
-                    )}
-                  </p>
-
-                  <p className="text-[11px] font-semibold opacity-80">
-                    {primaryExtremeAlert?.sourceName
-                      ? `${tr('Fonte Oficial:', 'Official Source:')} ${primaryExtremeAlert.sourceName}`
-                      : tr(OFFICIAL_MULTI_MODEL_SOURCE_PT, OFFICIAL_MULTI_MODEL_SOURCE_EN)}
-                  </p>
+                  )}
+                  {extremeAlerts.length > 1 && (
+                    <span className="px-2 py-0.5 rounded-full text-[11px] font-bold bg-white/80 dark:bg-slate-900/70 shrink-0">
+                      +{extremeAlerts.length - 1} {tr('alerta(s)', 'alert(s)')}
+                    </span>
+                  )}
                 </div>
               </div>
 
@@ -1353,7 +1430,7 @@ export const DailySummaryTab: React.FC<DailySummaryTabProps> = ({
                 data-testid="extreme-events-details-toggle"
                 onClick={() => setIsExtremeDetailsOpen((prev) => !prev)}
                 aria-expanded={isExtremeDetailsOpen}
-                className="min-h-[44px] min-w-[44px] px-3 py-1.5 rounded-xl text-xs font-extrabold inline-flex items-center justify-center gap-1.5 shrink-0 bg-white/90 hover:bg-white dark:bg-[#0d1f36]/90 dark:hover:bg-[#0d1f36] text-slate-900 dark:text-sky-100 border border-slate-200/90 dark:border-sky-700/80 shadow-xs transition-colors focus:outline-none focus:ring-2 focus:ring-sky-500"
+                className="min-h-[44px] min-w-[44px] px-2.5 sm:px-3 py-1.5 rounded-xl text-xs font-extrabold inline-flex items-center justify-center gap-1.5 shrink-0 bg-white/90 hover:bg-white dark:bg-[#0d1f36]/90 dark:hover:bg-[#0d1f36] text-slate-900 dark:text-sky-100 border border-slate-200/90 dark:border-sky-700/80 shadow-xs transition-colors focus:outline-none focus:ring-2 focus:ring-sky-500"
               >
                 <span>
                   {isExtremeDetailsOpen
@@ -1372,8 +1449,39 @@ export const DailySummaryTab: React.FC<DailySummaryTabProps> = ({
             {isExtremeDetailsOpen && (
               <div
                 data-testid="extreme-events-details-panel"
-                className="pt-3 border-t border-current/15 space-y-3 text-slate-800 dark:text-sky-100"
+                className="pt-2.5 border-t border-current/15 space-y-3 text-slate-800 dark:text-sky-100"
               >
+                {/* Detailed Summary, Peak Window & Official Source */}
+                <div className="space-y-1 text-xs">
+                  <p className="leading-relaxed">
+                    {hasExtremeAlerts && primaryExtremeAlert ? (
+                      <>
+                        <strong>{tr('Danos potenciais:', 'Potential impacts:')}</strong>{' '}
+                        {primaryExtremeAlert.potentialDamages}{' '}
+                        <span className="font-semibold">
+                          ({tr('Pico:', 'Peak:')}{' '}
+                          {formatAlertWindowBadge(
+                            primaryExtremeAlert.peakTimestampUnix,
+                            displayForecast.timezone,
+                            intlLocale,
+                          )}
+                          )
+                        </span>
+                      </>
+                    ) : (
+                      tr(
+                        `Sem gatilho de tempestade, rajada ≥ ${noExtremeGustThresh}, chuva ≥ ${noExtremeRainThresh} ou ressaca ≥ ${noExtremeWaveThresh}.`,
+                        `No severe storm, gust ≥ ${noExtremeGustThresh}, rain ≥ ${noExtremeRainThresh}, or swell ≥ ${noExtremeWaveThresh} trigger.`,
+                      )
+                    )}
+                  </p>
+                  <p className="text-[11px] font-semibold opacity-80">
+                    {primaryExtremeAlert?.sourceName
+                      ? `${tr('Fonte Oficial:', 'Official Source:')} ${primaryExtremeAlert.sourceName}`
+                      : tr(OFFICIAL_MULTI_MODEL_SOURCE_PT, OFFICIAL_MULTI_MODEL_SOURCE_EN)}
+                  </p>
+                </div>
+
                 {extremeAlerts.length > 0 && (
                   <div className="grid grid-cols-1 md:grid-cols-2 gap-2.5">
                     {extremeAlerts.map((alert) => (
@@ -1489,7 +1597,7 @@ export const DailySummaryTab: React.FC<DailySummaryTabProps> = ({
                     </span>
                     <p className="font-extrabold text-slate-900 dark:text-white">
                       {activeEphemeris
-                        ? `${tr('Sol', 'Sun')} ${formatTimeIsoHHMM(activeEphemeris.sunriseIso, forecast.timezone, intlLocale)}–${formatTimeIsoHHMM(activeEphemeris.sunsetIso, forecast.timezone, intlLocale)} • ${activeEphemeris.moonPhaseLabel} (${Math.round(activeEphemeris.moonIlluminationPct)}%)`
+                        ? `${tr('Sol', 'Sun')} ${formatTimeIsoHHMM(activeEphemeris.sunriseIso, displayForecast.timezone, intlLocale)}–${formatTimeIsoHHMM(activeEphemeris.sunsetIso, displayForecast.timezone, intlLocale)} • ${activeEphemeris.moonPhaseLabel} (${Math.round(activeEphemeris.moonIlluminationPct)}%)`
                         : tr('Efemérides locais indisponíveis', 'Local ephemeris unavailable')}
                     </p>
                   </div>
@@ -1498,6 +1606,45 @@ export const DailySummaryTab: React.FC<DailySummaryTabProps> = ({
             )}
           </section>
         </CollapsibleModule>
+
+        {/* Live t0 Ground-Truth Divergence Banner (strictly visual for current hour; future hours preserved) */}
+        {liveDivergence && (
+          <div
+            role="status"
+            data-testid="live-divergence-banner"
+            className={`rounded-2xl border px-3.5 py-2.5 flex flex-col sm:flex-row sm:items-center justify-between gap-2.5 shadow-xs ${
+              liveDivergence.severity === 'warning'
+                ? 'border-amber-300 bg-amber-50/95 text-amber-950 dark:border-amber-700/80 dark:bg-amber-950/55 dark:text-amber-100'
+                : 'border-sky-300 bg-sky-50/95 text-sky-950 dark:border-sky-700/80 dark:bg-sky-950/55 dark:text-sky-100'
+            }`}
+          >
+            <div className="flex items-start gap-2.5 min-w-0">
+              <AlertTriangle
+                className={`w-4 h-4 shrink-0 mt-0.5 ${
+                  liveDivergence.severity === 'warning'
+                    ? 'text-amber-600 dark:text-amber-300'
+                    : 'text-[#0080cd] dark:text-sky-300'
+                }`}
+                aria-hidden="true"
+              />
+              <div className="min-w-0 space-y-0.5">
+                <p className="text-xs font-extrabold">
+                  {locale === 'en' ? liveDivergence.headlineEn : liveDivergence.headlinePt}
+                </p>
+                <p className="text-[11px] leading-snug opacity-90">
+                  {locale === 'en' ? liveDivergence.detailEn : liveDivergence.detailPt}
+                </p>
+              </div>
+            </div>
+            <button
+              type="button"
+              onClick={() => setIsGroundTruthModalOpen(true)}
+              className="min-h-[44px] px-3 py-1.5 rounded-xl text-xs font-bold shrink-0 bg-white/90 hover:bg-white dark:bg-[#0d1f36]/90 dark:hover:bg-[#0d1f36] text-slate-900 dark:text-sky-100 border border-current/20 transition-colors"
+            >
+              {tr('Ver Validações', 'View Check-ins')}
+            </button>
+          </div>
+        )}
 
         {/* 3. Hero Daily Card (CollapsibleModule: Condições Atuais) */}
         <CollapsibleModule
@@ -1607,14 +1754,46 @@ export const DailySummaryTab: React.FC<DailySummaryTabProps> = ({
                     {activeModelDisplayLabel}
                   </span>
 
+                  {isCalibratedActive && (
+                    <span
+                      data-testid="calibrated-model-active-badge"
+                      className="inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full text-[11px] font-extrabold bg-emerald-50 dark:bg-emerald-950/60 text-emerald-800 dark:text-emerald-200 border border-emerald-300 dark:border-emerald-700"
+                    >
+                      <Sparkles className="w-3 h-3 shrink-0" aria-hidden="true" />
+                      <span>{tr('Calibrado Local', 'Locally Calibrated')}</span>
+                      <button
+                        type="button"
+                        data-testid="reset-standard-ensemble-btn"
+                        onClick={handleResetStandardEnsemble}
+                        title={tr(
+                          'Voltar ao FieldCast Ensemble padrão',
+                          'Switch back to standard FieldCast Ensemble',
+                        )}
+                        className="ml-0.5 inline-flex items-center gap-0.5 underline hover:opacity-80"
+                      >
+                        <RotateCcw className="w-3 h-3" aria-hidden="true" />
+                        <span>{tr('Padrão', 'Default')}</span>
+                      </button>
+                    </span>
+                  )}
+
                   <span className="px-2 py-0.5 rounded-full text-[11px] font-medium bg-slate-100 dark:bg-[#0d1f36] text-slate-600 dark:text-sky-200">
                     DEM {demElevText}
                   </span>
                 </div>
               </div>
 
-              {/* Right Status Badges: Compact Field Quality Score (0-100) + Safe Window + Thresholds Button */}
+              {/* Right Status Badges: Compact Field Quality Score (0-100) + Safe Window + Validate Weather */}
               <div className="flex flex-wrap items-center gap-2 shrink-0">
+                <button
+                  type="button"
+                  data-testid="open-ground-truth-btn"
+                  onClick={() => setIsGroundTruthModalOpen(true)}
+                  className="min-h-[44px] min-w-[44px] px-3 py-1.5 rounded-xl text-xs font-extrabold inline-flex items-center gap-1.5 bg-white dark:bg-[#0d1f36] hover:bg-sky-50 dark:hover:bg-sky-900/50 text-[#0070b8] dark:text-sky-200 border border-sky-200 dark:border-sky-700 shadow-xs transition-colors focus:outline-none focus:ring-2 focus:ring-sky-500"
+                >
+                  <ClipboardCheck className="w-4 h-4 text-[#0080cd] dark:text-sky-400 shrink-0" aria-hidden="true" />
+                  <span>{tr('Validar Tempo', 'Validate Weather')}</span>
+                </button>
                 <div
                   data-testid="field-quality-score"
                   className={`min-h-[44px] px-3 py-1.5 rounded-xl border inline-flex items-center gap-1.5 ${quality.badgeClass}`}
@@ -1807,7 +1986,7 @@ export const DailySummaryTab: React.FC<DailySummaryTabProps> = ({
               </div>
             </div>
 
-            {forecast.marineAvailable && selectedEnsembleHour?.marine && (
+            {displayForecast.marineAvailable && selectedEnsembleHour?.marine && (
               <div className="rounded-2xl border border-sky-100 dark:border-sky-800/75 bg-sky-50/70 dark:bg-[#0d1f36]/75 px-3.5 py-2 flex flex-wrap items-center justify-between gap-2 text-xs">
                 <div className="flex flex-wrap items-center gap-2">
                   <Waves className="w-4 h-4 text-[#0080cd] dark:text-sky-400 shrink-0" aria-hidden="true" />
@@ -1937,7 +2116,7 @@ export const DailySummaryTab: React.FC<DailySummaryTabProps> = ({
             `Próximos 7 Dias (${activeModelDisplayLabel})`,
             `Next 7 Days (${activeModelDisplayLabel})`,
           )}
-          subtitle={forecast.timezone}
+          subtitle={displayForecast.timezone}
           icon={<Calendar className="w-4 h-4 text-[#0080cd] dark:text-sky-400" aria-hidden="true" />}
           defaultOpen={true}
           keepMounted={true}
@@ -2039,6 +2218,29 @@ export const DailySummaryTab: React.FC<DailySummaryTabProps> = ({
           </div>
         </CollapsibleModule>
 
+        {/* 5B. Restored Solar Ephemeris & Dedicated Moon Phase Module (Collapsible) */}
+        {displayForecast.ephemerisByDay.length > 0 && (
+          <CollapsibleModule
+            testId="ephemeris-summary-module"
+            title={tr('Sol, Luz Natural & Fase da Lua', 'Sun, Daylight & Moon Phase')}
+            subtitle={
+              activeEphemeris
+                ? `${tr('Sol', 'Sun')} ${formatTimeIsoHHMM(activeEphemeris.sunriseIso, displayForecast.timezone, intlLocale)}–${formatTimeIsoHHMM(activeEphemeris.sunsetIso, displayForecast.timezone, intlLocale)}`
+                : undefined
+            }
+            icon={<Moon className="w-4 h-4 text-amber-500 dark:text-amber-300" aria-hidden="true" />}
+            defaultOpen={true}
+            keepMounted={true}
+            headerActions={<HelpPopover topic="ephemeris" />}
+          >
+            <EphemerisCard
+              ephemerisByDay={displayForecast.ephemerisByDay}
+              timezone={displayForecast.timezone}
+              embedded={true}
+            />
+          </CollapsibleModule>
+        )}
+
         {/* 6. Quick CTA to Model Comparison & Interactive Map Tab */}
         <section className="space-y-3">
           <div className="rounded-2xl border border-sky-200/90 dark:border-sky-800/80 bg-gradient-to-r from-sky-50 via-white to-sky-50 dark:from-[#0d1f36] dark:via-[#132a47] dark:to-[#0d1f36] p-3 sm:p-3.5 flex flex-col sm:flex-row sm:items-center justify-between gap-2.5 shadow-sm">
@@ -2088,6 +2290,17 @@ export const DailySummaryTab: React.FC<DailySummaryTabProps> = ({
             }
           }}
           onToast={onToast}
+        />
+
+        {/* Local Offline Field Validation (Ground-Truth) Modal */}
+        <GroundTruthModal
+          isOpen={isGroundTruthModalOpen}
+          onClose={() => setIsGroundTruthModalOpen(false)}
+          activeLocation={activeLocation}
+          forecast={forecast}
+          onToast={onToast}
+          onErrorLog={onErrorLog}
+          onCalibrationChange={() => void refreshGroundTruth()}
         />
       </div>
     </ModuleErrorBoundary>

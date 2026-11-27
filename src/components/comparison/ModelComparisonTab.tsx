@@ -6,6 +6,7 @@ import {
   Check,
   ChevronLeft,
   ChevronRight,
+  ClipboardCheck,
   Clock,
   Cloud,
   CloudRain,
@@ -15,6 +16,7 @@ import {
   Layers,
   Maximize2,
   Minimize2,
+  RotateCcw,
   ShieldCheck,
   Sparkles,
   Waves,
@@ -22,6 +24,8 @@ import {
 } from 'lucide-react';
 import { useLocale } from '../../context/LocaleContext';
 import { useUnits } from '../../context/UnitsContext';
+import { getGroundTruthObservations } from '../../db/database';
+import type { GroundTruthObservation } from '../../types/v4';
 import {
   WEATHER_MODELS,
   type ForecastViewMode,
@@ -29,6 +33,12 @@ import {
   type NormalizedForecast,
   type WeatherModelId,
 } from '../../types/weather';
+import {
+  applyCalibratedWeightsToForecast,
+  computeRegionalCalibration,
+  loadUseCalibratedModelPref,
+  saveUseCalibratedModelPref,
+} from '../../utils/groundTruthCalibration';
 import {
   formatLocalHourBadge,
   useCurrentLocalHourIndex,
@@ -48,6 +58,7 @@ import {
   type WaveHeightUnit,
 } from '../../utils/units';
 import { CollapsibleModule } from '../common/CollapsibleModule';
+import { GroundTruthModal } from '../common/GroundTruthModal';
 import { HelpPopover } from '../common/HelpPopover';
 import { ModuleErrorBoundary } from '../common/ModuleErrorBoundary';
 import { ForecastSkeleton } from '../common/SkeletonLoaders';
@@ -223,8 +234,85 @@ export const ModelComparisonTab: React.FC<ModelComparisonTabProps> = ({
   // Fullscreen Windguru 168h Table portal modal
   const [isTableFullscreen, setIsTableFullscreen] = useState<boolean>(false);
   const [isThresholdModalOpen, setIsThresholdModalOpen] = useState<boolean>(false);
+  const [isGroundTruthModalOpen, setIsGroundTruthModalOpen] = useState<boolean>(false);
 
-  const currentLocalHourIndex = useCurrentLocalHourIndex(forecast?.hours, forecast?.timezone);
+  const [gtObservations, setGtObservations] = useState<GroundTruthObservation[]>([]);
+  const [useCalibratedModel, setUseCalibratedModel] = useState<boolean>(() =>
+    loadUseCalibratedModelPref(),
+  );
+
+  const refreshGroundTruth = useCallback(async () => {
+    const list = await getGroundTruthObservations();
+    setGtObservations((prev) => (prev.length === 0 && list.length === 0 ? prev : list));
+    const pref = loadUseCalibratedModelPref();
+    setUseCalibratedModel((prev) => (prev === pref ? prev : pref));
+  }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+    const sync = async () => {
+      const list = await getGroundTruthObservations();
+      if (cancelled) return;
+      setGtObservations((prev) => (prev.length === 0 && list.length === 0 ? prev : list));
+      const pref = loadUseCalibratedModelPref();
+      setUseCalibratedModel((prev) => (prev === pref ? prev : pref));
+    };
+    void sync();
+
+    const handleUpdated = () => {
+      void sync();
+    };
+    if (typeof window !== 'undefined') {
+      window.addEventListener('fieldcast:ground-truth-updated', handleUpdated);
+    }
+    return () => {
+      cancelled = true;
+      if (typeof window !== 'undefined') {
+        window.removeEventListener('fieldcast:ground-truth-updated', handleUpdated);
+      }
+    };
+  }, []);
+
+  const regionalCalibration = useMemo(
+    () =>
+      computeRegionalCalibration(
+        gtObservations,
+        activeLocation.latitude,
+        activeLocation.longitude,
+      ),
+    [gtObservations, activeLocation.latitude, activeLocation.longitude],
+  );
+
+  const isCalibratedActive = useCalibratedModel && regionalCalibration.calibrationEligible;
+
+  const displayForecast = useMemo(() => {
+    if (!forecast) return null;
+    if (isCalibratedActive) {
+      return applyCalibratedWeightsToForecast(forecast, regionalCalibration);
+    }
+    return forecast;
+  }, [forecast, isCalibratedActive, regionalCalibration]);
+
+  const handleResetStandardEnsemble = useCallback(() => {
+    saveUseCalibratedModelPref(false);
+    setUseCalibratedModel(false);
+    if (typeof window !== 'undefined' && typeof window.dispatchEvent === 'function') {
+      window.dispatchEvent(new CustomEvent('fieldcast:ground-truth-updated'));
+    }
+    onToast?.({
+      type: 'info',
+      title: tr('FieldCast Ensemble padrão restaurado', 'Standard FieldCast Ensemble restored'),
+      message: tr(
+        'Pesos uniformes entre os 4 modelos restabelecidos.',
+        'Equal weights across all 4 models restored.',
+      ),
+    });
+  }, [onToast, tr]);
+
+  const currentLocalHourIndex = useCurrentLocalHourIndex(
+    displayForecast?.hours,
+    displayForecast?.timezone,
+  );
   const [manualHourIndex, setManualHourIndex] = useState<number | null>(null);
 
   const [tableVisibleParams, setTableVisibleParams] = useState<ForecastVisibleParams>(() =>
@@ -239,8 +327,8 @@ export const ModelComparisonTab: React.FC<ModelComparisonTabProps> = ({
     });
   }, []);
 
-  const forecastKey = forecast
-    ? `${forecast.locationKey}_${forecast.hours[0]?.timestampUnix ?? 0}`
+  const forecastKey = displayForecast
+    ? `${displayForecast.locationKey}_${displayForecast.hours[0]?.timestampUnix ?? 0}`
     : '';
 
   useEffect(() => {
@@ -260,8 +348,8 @@ export const ModelComparisonTab: React.FC<ModelComparisonTabProps> = ({
     return () => document.removeEventListener('keydown', handleKeyDown);
   }, [isTableFullscreen]);
 
-  const maxSliceLen = forecast ? Math.min(forecast.hours.length, horizonHours) : 0;
-  const safeHourIndex = forecast
+  const maxSliceLen = displayForecast ? Math.min(displayForecast.hours.length, horizonHours) : 0;
+  const safeHourIndex = displayForecast
     ? Math.min(
         Math.max(0, manualHourIndex ?? currentLocalHourIndex),
         Math.max(0, maxSliceLen - 1),
@@ -338,23 +426,23 @@ export const ModelComparisonTab: React.FC<ModelComparisonTabProps> = ({
   );
 
   const windguruForecast: NormalizedForecast | null = useMemo(() => {
-    if (!forecast) {
+    if (!displayForecast) {
       return null;
     }
     if (horizonHours === 24) {
       return {
-        ...forecast,
-        hours: forecast.hours.slice(0, 24),
+        ...displayForecast,
+        hours: displayForecast.hours.slice(0, 24),
       };
     }
-    return forecast;
-  }, [forecast, horizonHours]);
+    return displayForecast;
+  }, [displayForecast, horizonHours]);
 
-  if (isLoading && !forecast) {
+  if (isLoading && !displayForecast) {
     return <ForecastSkeleton />;
   }
 
-  if (!forecast || !windguruForecast) {
+  if (!displayForecast || !windguruForecast) {
     return (
       <div
         data-testid="model-comparison-tab"
@@ -385,26 +473,29 @@ export const ModelComparisonTab: React.FC<ModelComparisonTabProps> = ({
     );
   }
 
-  const activeHour = forecast.hours[safeHourIndex];
-  const confidence = activeHour?.confidence ?? forecast.overallConfidence;
-  const activeThresholds = thresholds ?? forecast.thresholdsUsed;
+  const activeHour = displayForecast.hours[safeHourIndex];
+  const confidence = activeHour?.confidence ?? displayForecast.overallConfidence;
+  const activeThresholds = thresholds ?? displayForecast.thresholdsUsed;
 
   const nativeHourByModel: Record<WeatherModelId, NativeModelHour | undefined> = {
-    ecmwf_ifs025: forecast.nativeByModel.ecmwf_ifs025?.[safeHourIndex],
-    gfs_seamless: forecast.nativeByModel.gfs_seamless?.[safeHourIndex],
-    icon_seamless: forecast.nativeByModel.icon_seamless?.[safeHourIndex],
-    gem_seamless: forecast.nativeByModel.gem_seamless?.[safeHourIndex],
+    ecmwf_ifs025: displayForecast.nativeByModel.ecmwf_ifs025?.[safeHourIndex],
+    gfs_seamless: displayForecast.nativeByModel.gfs_seamless?.[safeHourIndex],
+    icon_seamless: displayForecast.nativeByModel.icon_seamless?.[safeHourIndex],
+    gem_seamless: displayForecast.nativeByModel.gem_seamless?.[safeHourIndex],
   };
 
   const activeTimestampText = activeHour
-    ? formatMatrixTimestamp(activeHour.timestampUnix, forecast.timezone, intlLocale)
+    ? formatMatrixTimestamp(activeHour.timestampUnix, displayForecast.timezone, intlLocale)
     : tr('Agora', 'Now');
 
-  const currentLocalHHMM = forecast.hours[currentLocalHourIndex]
-    ? formatLocalHourBadge(forecast.hours[currentLocalHourIndex]!.timestampUnix, forecast.timezone)
+  const currentLocalHHMM = displayForecast.hours[currentLocalHourIndex]
+    ? formatLocalHourBadge(
+        displayForecast.hours[currentLocalHourIndex]!.timestampUnix,
+        displayForecast.timezone,
+      )
     : '00:00';
   const activeStepHHMM = activeHour
-    ? formatLocalHourBadge(activeHour.timestampUnix, forecast.timezone)
+    ? formatLocalHourBadge(activeHour.timestampUnix, displayForecast.timezone)
     : currentLocalHHMM;
   const isMatrixAtCurrentHour =
     manualHourIndex === null || safeHourIndex === currentLocalHourIndex;
@@ -433,20 +524,61 @@ export const ModelComparisonTab: React.FC<ModelComparisonTabProps> = ({
       onReset={onReloadForecast}
       onErrorLog={onErrorLog}
     >
-      <div data-testid="model-comparison-tab" className="space-y-4 sm:space-y-5">
-        {/* 1. Model Selector + Horizon Selector (24h, 48h, 72h, 168h) */}
-        <section
-          aria-label={tr(
-            'Seletor Multi-Modelo e Horizonte Temporal',
-            'Multi-Model Selector & Time Horizon',
-          )}
-          className="rounded-2xl border border-sky-200/85 dark:border-sky-800/75 bg-white dark:bg-[#132a47] p-4 shadow-sm space-y-3"
+      <div data-testid="model-comparison-tab" className="space-y-3 sm:space-y-4">
+        {/* 1. Compact Model Selector + Horizon Selector (Collapsible) */}
+        <CollapsibleModule
+          testId="comparison-model-bar-module"
+          title={tr('Modelo & Horizonte', 'Model & Horizon')}
+          icon={<Layers className="w-4 h-4 text-[#0080cd] dark:text-sky-400" aria-hidden="true" />}
+          defaultOpen={true}
+          keepMounted={true}
+          bodyClassName="px-3 pb-2.5 pt-0.5 sm:px-3.5 sm:pb-3"
+          badge={
+            isCalibratedActive ? (
+              <span
+                data-testid="calibrated-model-active-badge"
+                className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-extrabold bg-emerald-50 dark:bg-emerald-950/60 text-emerald-800 dark:text-emerald-200 border border-emerald-300 dark:border-emerald-700"
+              >
+                <Sparkles className="w-3 h-3 shrink-0" aria-hidden="true" />
+                <span>{tr('Calibrado Local', 'Locally Calibrated')}</span>
+              </span>
+            ) : undefined
+          }
+          headerActions={
+            <div className="flex items-center gap-1.5">
+              {isCalibratedActive && (
+                <button
+                  type="button"
+                  data-testid="reset-standard-ensemble-btn"
+                  onClick={handleResetStandardEnsemble}
+                  title={tr(
+                    'Voltar ao FieldCast Ensemble padrão',
+                    'Switch back to standard FieldCast Ensemble',
+                  )}
+                  className="min-h-[44px] px-2.5 py-1 rounded-xl text-[11px] font-bold inline-flex items-center gap-1 bg-emerald-50 dark:bg-emerald-950/60 hover:bg-emerald-100 dark:hover:bg-emerald-900/50 text-emerald-800 dark:text-emerald-200 border border-emerald-300 dark:border-emerald-700 transition-colors"
+                >
+                  <RotateCcw className="w-3.5 h-3.5 shrink-0" aria-hidden="true" />
+                  <span className="hidden sm:inline">{tr('Padrão', 'Default')}</span>
+                </button>
+              )}
+              <button
+                type="button"
+                data-testid="open-ground-truth-btn"
+                onClick={() => setIsGroundTruthModalOpen(true)}
+                className="min-h-[44px] px-2.5 py-1 rounded-xl text-xs font-extrabold inline-flex items-center gap-1.5 bg-[#f4f8fb] dark:bg-[#0d1f36] hover:bg-sky-50 dark:hover:bg-sky-900/50 text-[#0070b8] dark:text-sky-200 border border-sky-200 dark:border-sky-700 transition-colors focus:outline-none focus:ring-2 focus:ring-sky-500"
+              >
+                <ClipboardCheck className="w-3.5 h-3.5 text-[#0080cd] dark:text-sky-400 shrink-0" aria-hidden="true" />
+                <span>{tr('Validar Tempo', 'Validate Weather')}</span>
+              </button>
+              <HelpPopover topic="ensemble_vs_native" className="shrink-0" />
+            </div>
+          }
         >
-          <div className="flex flex-col xl:flex-row xl:items-center justify-between gap-3">
-            {/* Model Pills */}
+          <div className="flex flex-col xl:flex-row xl:items-center justify-between gap-2">
+            {/* Compact Single-Line Model Pills */}
             <div
               data-testid="comparison-model-selector"
-              className="flex items-center gap-1.5 overflow-x-auto scrollbar-thin pb-1 xl:pb-0 min-w-0"
+              className="flex items-center gap-1 overflow-x-auto scrollbar-thin pb-0.5 xl:pb-0 min-w-0"
             >
               {COMPARISON_VIEW_MODES.map((m) => {
                 const isSelected = viewMode === m.id;
@@ -467,48 +599,39 @@ export const ModelComparisonTab: React.FC<ModelComparisonTabProps> = ({
                     data-testid={`comparison-model-pill-${m.id}`}
                     onClick={() => setViewMode(m.id)}
                     aria-pressed={isSelected}
-                    className={`min-h-[44px] min-w-[44px] px-3 py-1.5 rounded-xl text-left inline-flex items-center gap-2 shrink-0 border transition-all focus:outline-none focus:ring-2 focus:ring-sky-500 ${
+                    title={`${m.label} — ${sublabel}`}
+                    className={`min-h-[44px] min-w-[44px] px-2.5 py-1 rounded-xl text-xs font-bold inline-flex items-center gap-1.5 shrink-0 border transition-all focus:outline-none focus:ring-2 focus:ring-sky-500 ${
                       isSelected
                         ? 'bg-[#0080cd] text-white border-[#0080cd] shadow-sm'
                         : 'bg-[#f4f8fb] dark:bg-[#0d1f36] text-slate-700 dark:text-sky-200 border-slate-200 dark:border-sky-800 hover:bg-sky-50 dark:hover:bg-sky-900/50'
                     }`}
                   >
                     {m.id === 'fieldcast' ? (
-                      <Sparkles className="w-4 h-4 shrink-0" aria-hidden="true" />
+                      <Sparkles className="w-3.5 h-3.5 shrink-0" aria-hidden="true" />
                     ) : m.id === 'spaghetti' ? (
-                      <GitCompare className="w-4 h-4 shrink-0" aria-hidden="true" />
+                      <GitCompare className="w-3.5 h-3.5 shrink-0" aria-hidden="true" />
                     ) : (
-                      <Layers className="w-4 h-4 shrink-0" aria-hidden="true" />
+                      <Layers className="w-3.5 h-3.5 shrink-0" aria-hidden="true" />
                     )}
-                    <div>
-                      <span className="block text-xs font-extrabold leading-tight">{m.label}</span>
-                      <span
-                        className={`block text-[10px] leading-tight ${
-                          isSelected ? 'text-sky-100' : 'text-slate-500 dark:text-sky-300/75'
-                        }`}
-                      >
-                        {sublabel}
-                      </span>
-                    </div>
+                    <span className="leading-tight whitespace-nowrap">{m.label}</span>
                   </button>
                 );
               })}
-              <HelpPopover topic="ensemble_vs_native" className="shrink-0" />
             </div>
 
-            {/* Vertical Curve Toggle + Horizon Selector (24h, 48h, 72h, 168h) */}
-            <div className="flex flex-wrap items-center justify-between xl:justify-end gap-2">
+            {/* Vertical Curve Toggle + Compact Horizon Selector (24h, 48h, 72h, 168h) */}
+            <div className="flex flex-wrap items-center justify-between xl:justify-end gap-1.5">
               <button
                 type="button"
                 onClick={() => setShowInterpolatedProfile((prev) => !prev)}
                 aria-pressed={showInterpolatedProfile}
-                className={`min-h-[44px] min-w-[44px] px-3 py-1.5 rounded-xl text-xs font-bold inline-flex items-center gap-1.5 border transition-colors focus:outline-none focus:ring-2 focus:ring-sky-500 ${
+                className={`min-h-[44px] min-w-[44px] px-2.5 py-1 rounded-xl text-xs font-bold inline-flex items-center gap-1.5 border transition-colors focus:outline-none focus:ring-2 focus:ring-sky-500 ${
                   showInterpolatedProfile
                     ? 'bg-sky-600 text-white border-sky-500 shadow-sm'
                     : 'bg-[#f4f8fb] dark:bg-[#0d1f36] text-slate-700 dark:text-sky-200 border-slate-200 dark:border-sky-800 hover:bg-sky-50'
                 }`}
               >
-                <Activity className="w-4 h-4 shrink-0" aria-hidden="true" />
+                <Activity className="w-3.5 h-3.5 shrink-0" aria-hidden="true" />
                 <span>
                   {tr(
                     `Curva ${formatAltLabel(10, units.wave)}–${formatAltLabel(120, units.wave)}`,
@@ -521,9 +644,9 @@ export const ModelComparisonTab: React.FC<ModelComparisonTabProps> = ({
                 role="group"
                 data-testid="comparison-horizon-selector"
                 aria-label={tr('Horizonte temporal da comparação', 'Comparison time horizon')}
-                className="inline-flex items-center gap-1 rounded-xl border border-sky-200/80 dark:border-sky-800 bg-[#f4f8fb] dark:bg-[#0d1f36] p-1"
+                className="inline-flex items-center gap-0.5 rounded-xl border border-sky-200/80 dark:border-sky-800 bg-[#f4f8fb] dark:bg-[#0d1f36] p-0.5"
               >
-                <Clock className="w-4 h-4 text-[#0080cd] ml-2 hidden sm:inline" aria-hidden="true" />
+                <Clock className="w-3.5 h-3.5 text-[#0080cd] ml-1.5 mr-0.5 hidden sm:inline" aria-hidden="true" />
                 {COMPARISON_HORIZONS.map((h) => {
                   const active = horizonHours === h.hours;
                   return (
@@ -533,7 +656,7 @@ export const ModelComparisonTab: React.FC<ModelComparisonTabProps> = ({
                       data-testid={`horizon-btn-${h.hours}h`}
                       onClick={() => setHorizonHours(h.hours)}
                       aria-pressed={active}
-                      className={`min-h-[44px] min-w-[44px] px-3 py-1.5 rounded-lg text-xs font-extrabold transition-colors focus:outline-none focus:ring-2 focus:ring-sky-500 ${
+                      className={`min-h-[44px] min-w-[44px] px-2.5 py-1 rounded-lg text-xs font-extrabold transition-colors focus:outline-none focus:ring-2 focus:ring-sky-500 ${
                         active
                           ? 'bg-[#0080cd] text-white shadow-sm'
                           : 'text-slate-700 dark:text-sky-200 hover:bg-sky-100/80 dark:hover:bg-sky-900/50'
@@ -546,7 +669,7 @@ export const ModelComparisonTab: React.FC<ModelComparisonTabProps> = ({
               </div>
             </div>
           </div>
-        </section>
+        </CollapsibleModule>
 
         {/* 2. Model Comparison Matrix Card (Collapsible) */}
         <CollapsibleModule
@@ -571,6 +694,13 @@ export const ModelComparisonTab: React.FC<ModelComparisonTabProps> = ({
               <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[11px] font-semibold bg-[#f4f8fb] dark:bg-[#0d1f36] text-slate-700 dark:text-sky-200 border border-slate-200/80 dark:border-sky-800">
                 <span>{tr('Dispersão', 'Dispersion')}</span>
                 <HelpPopover topic="model_dispersion" align="left" />
+              </span>
+              <span
+                data-testid="bessel-spread-badge"
+                className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[11px] font-semibold bg-sky-50 dark:bg-[#0d1f36] text-[#0070b8] dark:text-sky-200 border border-sky-200/80 dark:border-sky-800"
+              >
+                <span>{tr('Spread Amostral Bessel (n−1)', 'Bessel Sample Spread (n−1)')}</span>
+                <HelpPopover topic="bessel_robust_stats" align="left" />
               </span>
             </div>
 
@@ -663,8 +793,13 @@ export const ModelComparisonTab: React.FC<ModelComparisonTabProps> = ({
                         </span>
                       </th>
                     ))}
-                    <th className="py-2.5 px-3 font-bold text-slate-600 dark:text-sky-300 min-w-[130px]">
-                      {tr('Dispersão (Spread)', 'Dispersion (Spread)')}
+                    <th className="py-2.5 px-3 font-bold text-slate-600 dark:text-sky-300 min-w-[145px]">
+                      <span className="inline-flex items-center gap-1">
+                        <span>{tr('Dispersão (Spread)', 'Dispersion (Spread)')}</span>
+                        <span className="text-[10px] font-mono text-[#0070b8] dark:text-sky-400">
+                          (n−1)
+                        </span>
+                      </span>
                     </th>
                   </tr>
                 </thead>
@@ -689,7 +824,7 @@ export const ModelComparisonTab: React.FC<ModelComparisonTabProps> = ({
                       {formatSpreadRange(
                         activeHour.temperature2mC.min,
                         activeHour.temperature2mC.max,
-                        activeHour.temperature2mC.stdDev,
+                        activeHour.temperature2mC.sampleStdDev ?? activeHour.temperature2mC.stdDev,
                         getTempUnitLabel(units.temperature),
                         1,
                         (v) => convertTemperature(v, units.temperature) ?? v,
@@ -731,7 +866,8 @@ export const ModelComparisonTab: React.FC<ModelComparisonTabProps> = ({
                       {formatSpreadRange(
                         activeHour.precipitationMm.min,
                         activeHour.precipitationMm.max,
-                        activeHour.precipitationMm.stdDev,
+                        activeHour.precipitationMm.sampleStdDev ??
+                          activeHour.precipitationMm.stdDev,
                         getPrecipUnitLabel(units.precipitation),
                         1,
                         (v) => convertPrecipitation(v, units.precipitation) ?? v,
@@ -762,7 +898,7 @@ export const ModelComparisonTab: React.FC<ModelComparisonTabProps> = ({
                       {formatSpreadRange(
                         activeHour.windSpeed10m.min,
                         activeHour.windSpeed10m.max,
-                        activeHour.windSpeed10m.stdDev,
+                        activeHour.windSpeed10m.sampleStdDev ?? activeHour.windSpeed10m.stdDev,
                         getWindUnitLabel(units.wind),
                         units.wind === 'ms' ? 1 : 0,
                         (v) => convertWindSpeed(v, units.wind) ?? v,
@@ -802,7 +938,7 @@ export const ModelComparisonTab: React.FC<ModelComparisonTabProps> = ({
                         ? formatSpreadRange(
                             activeHour.windSpeed80m.min,
                             activeHour.windSpeed80m.max,
-                            activeHour.windSpeed80m.stdDev,
+                            activeHour.windSpeed80m.sampleStdDev ?? activeHour.windSpeed80m.stdDev,
                             getWindUnitLabel(units.wind),
                             units.wind === 'ms' ? 1 : 0,
                             (v) => convertWindSpeed(v, units.wind) ?? v,
@@ -810,7 +946,8 @@ export const ModelComparisonTab: React.FC<ModelComparisonTabProps> = ({
                         : formatSpreadRange(
                             activeHour.windSpeed100m.min,
                             activeHour.windSpeed100m.max,
-                            activeHour.windSpeed100m.stdDev,
+                            activeHour.windSpeed100m.sampleStdDev ??
+                              activeHour.windSpeed100m.stdDev,
                             getWindUnitLabel(units.wind),
                             units.wind === 'ms' ? 1 : 0,
                             (v) => convertWindSpeed(v, units.wind) ?? v,
@@ -838,7 +975,7 @@ export const ModelComparisonTab: React.FC<ModelComparisonTabProps> = ({
                       {formatSpreadRange(
                         activeHour.windGusts10m.min,
                         activeHour.windGusts10m.max,
-                        activeHour.windGusts10m.stdDev,
+                        activeHour.windGusts10m.sampleStdDev ?? activeHour.windGusts10m.stdDev,
                         getWindUnitLabel(units.wind),
                         units.wind === 'ms' ? 1 : 0,
                         (v) => convertWindSpeed(v, units.wind) ?? v,
@@ -868,7 +1005,8 @@ export const ModelComparisonTab: React.FC<ModelComparisonTabProps> = ({
                       {formatSpreadRange(
                         activeHour.surfacePressureHpa.min,
                         activeHour.surfacePressureHpa.max,
-                        activeHour.surfacePressureHpa.stdDev,
+                        activeHour.surfacePressureHpa.sampleStdDev ??
+                          activeHour.surfacePressureHpa.stdDev,
                         getPressureUnitLabel(units.pressure),
                         units.pressure === 'inhg' ? 2 : 1,
                         (v) => convertPressure(v, units.pressure) ?? v,
@@ -945,59 +1083,47 @@ export const ModelComparisonTab: React.FC<ModelComparisonTabProps> = ({
           </div>
         </CollapsibleModule>
 
-        {/* 3. On-Demand Plot Toggle Controls */}
-        <section
-          data-testid="comparison-plots-toggles"
-          aria-label={tr(
-            'Controles de Gráficos Analíticos Sob Demanda',
-            'On-Demand Analytical Chart Controls',
+        {/* 3. Compact On-Demand Plot Toggle Controls (Collapsible) */}
+        <CollapsibleModule
+          testId="comparison-plots-module"
+          title={tr(
+            `Gráficos Analíticos Sob Demanda (${horizonHours}h)`,
+            `On-Demand Analytical Charts (${horizonHours}h)`,
           )}
-          className="rounded-2xl border border-sky-200/85 dark:border-sky-800/75 bg-white dark:bg-[#132a47] p-4 shadow-sm space-y-3"
+          icon={<BarChart3 className="w-4 h-4 text-[#0080cd] dark:text-sky-400" aria-hidden="true" />}
+          defaultOpen={true}
+          keepMounted={true}
+          bodyClassName="px-3 pb-2.5 pt-0.5 sm:px-3.5 sm:pb-3"
         >
-          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
-            <div className="flex items-center gap-2.5">
-              <div className="p-2 rounded-xl bg-sky-50 dark:bg-sky-900/60 text-[#0080cd] dark:text-sky-300 border border-sky-200/80 dark:border-sky-700/60">
-                <BarChart3 className="w-4 h-4" aria-hidden="true" />
-              </div>
-              <div>
-                <h2 className="text-sm font-extrabold text-slate-900 dark:text-white">
-                  {tr(
-                    `Gráficos Analíticos Sob Demanda (${horizonHours}h)`,
-                    `On-Demand Analytical Charts (${horizonHours}h)`,
-                  )}
-                </h2>
-                <p className="text-xs text-slate-500 dark:text-sky-200/80">
-                  {tr(
-                    'Habilite apenas as curvas meteorológicas que deseja inspecionar',
-                    'Enable only the meteorological curves you want to inspect',
-                  )}
-                </p>
-              </div>
-            </div>
-
+          <div
+            data-testid="comparison-plots-toggles"
+            aria-label={tr(
+              'Controles de Gráficos Analíticos Sob Demanda',
+              'On-Demand Analytical Chart Controls',
+            )}
+            className="flex flex-wrap items-center gap-1.5"
+          >
             {/* Master Toggle */}
             <button
               type="button"
               data-testid="master-plots-toggle"
               onClick={handleMasterPlotsToggle}
               aria-pressed={showAnalyticalPlots}
-              className={`min-h-[44px] min-w-[44px] px-4 py-2 rounded-xl text-xs font-extrabold inline-flex items-center justify-center gap-2 border shrink-0 transition-all focus:outline-none focus:ring-2 focus:ring-sky-500 ${
+              className={`min-h-[44px] min-w-[44px] px-3 py-1.5 rounded-xl text-xs font-extrabold inline-flex items-center justify-center gap-1.5 border shrink-0 transition-all focus:outline-none focus:ring-2 focus:ring-sky-500 ${
                 showAnalyticalPlots
                   ? 'bg-[#0080cd] text-white border-[#0080cd] shadow-sm'
                   : 'bg-[#f4f8fb] dark:bg-[#0d1f36] text-slate-800 dark:text-sky-100 border-sky-200 dark:border-sky-700 hover:bg-sky-50'
               }`}
             >
               {showAnalyticalPlots ? (
-                <Eye className="w-4 h-4" aria-hidden="true" />
+                <Eye className="w-3.5 h-3.5" aria-hidden="true" />
               ) : (
-                <EyeOff className="w-4 h-4 text-[#0080cd] dark:text-sky-400" aria-hidden="true" />
+                <EyeOff className="w-3.5 h-3.5 text-[#0080cd] dark:text-sky-400" aria-hidden="true" />
               )}
-              <span>{tr('Exibir Gráficos Analíticos', 'Show Analytical Charts')}</span>
+              <span>{tr('Exibir Gráficos', 'Show Charts')}</span>
             </button>
-          </div>
 
-          {/* Per-Plot Toggle Buttons */}
-          <div className="flex flex-wrap items-center gap-2 pt-0.5">
+            {/* Per-Plot Toggle Buttons */}
             {(
               [
                 {
@@ -1030,28 +1156,28 @@ export const ModelComparisonTab: React.FC<ModelComparisonTabProps> = ({
                   data-testid={`plot-toggle-${key}`}
                   onClick={() => handleTogglePlotGroup(key)}
                   aria-pressed={isActive}
-                  className={`min-h-[44px] min-w-[44px] px-3.5 py-2 rounded-xl text-xs font-bold inline-flex items-center gap-2 border transition-all focus:outline-none focus:ring-2 focus:ring-sky-500 ${
+                  className={`min-h-[44px] min-w-[44px] px-2.5 py-1.5 rounded-xl text-xs font-bold inline-flex items-center gap-1.5 border transition-all focus:outline-none focus:ring-2 focus:ring-sky-500 ${
                     isActive
                       ? 'bg-sky-50 dark:bg-sky-900/70 text-[#0070b8] dark:text-sky-100 border-sky-400 dark:border-sky-500 shadow-xs'
                       : 'bg-white dark:bg-[#0d1f36]/65 text-slate-600 dark:text-sky-200/80 border-slate-200 dark:border-sky-800 hover:bg-sky-50/70'
                   }`}
                 >
                   {isActive ? (
-                    <Check className="w-4 h-4 text-[#0080cd] dark:text-sky-300" aria-hidden="true" />
+                    <Check className="w-3.5 h-3.5 text-[#0080cd] dark:text-sky-300" aria-hidden="true" />
                   ) : (
-                    <Icon className="w-4 h-4 text-slate-400 dark:text-sky-400/75" aria-hidden="true" />
+                    <Icon className="w-3.5 h-3.5 text-slate-400 dark:text-sky-400/75" aria-hidden="true" />
                   )}
                   <span>{label}</span>
                 </button>
               );
             })}
           </div>
-        </section>
+        </CollapsibleModule>
 
         {/* 4. On-Demand ForecastCharts (Rendered ONLY when requested) */}
         {showAnalyticalPlots && (
           <ForecastCharts
-            forecast={forecast}
+            forecast={displayForecast}
             viewMode={viewMode}
             showInterpolatedProfile={showInterpolatedProfile}
             horizonHours={horizonHours}
@@ -1071,8 +1197,8 @@ export const ModelComparisonTab: React.FC<ModelComparisonTabProps> = ({
           <div className="flex flex-wrap items-center justify-between gap-2 px-1">
             <span className="text-xs font-bold text-slate-600 dark:text-sky-200">
               {tr(
-                `Grade Horária Multi-Modelo Estilo Windguru (${Math.min(forecast.hours.length, horizonHours)}h)`,
-                `Multi-Model Windguru-Style Hourly Grid (${Math.min(forecast.hours.length, horizonHours)}h)`,
+                `Grade Horária Multi-Modelo Estilo Windguru (${Math.min(displayForecast.hours.length, horizonHours)}h)`,
+                `Multi-Model Windguru-Style Hourly Grid (${Math.min(displayForecast.hours.length, horizonHours)}h)`,
               )}
             </span>
             <button
@@ -1113,8 +1239,8 @@ export const ModelComparisonTab: React.FC<ModelComparisonTabProps> = ({
                   <div className="flex flex-wrap items-center gap-2">
                     <h3 className="text-sm sm:text-base font-extrabold text-slate-900 dark:text-white">
                       {tr(
-                        `Tabela Multi-Modelo (${Math.min(forecast.hours.length, horizonHours)}h) — ${activeLocation.name}`,
-                        `Multi-Model Table (${Math.min(forecast.hours.length, horizonHours)}h) — ${activeLocation.name}`,
+                        `Tabela Multi-Modelo (${Math.min(displayForecast.hours.length, horizonHours)}h) — ${activeLocation.name}`,
+                        `Multi-Model Table (${Math.min(displayForecast.hours.length, horizonHours)}h) — ${activeLocation.name}`,
                       )}
                     </h3>
                     <div className="inline-flex items-center gap-1">
@@ -1164,6 +1290,17 @@ export const ModelComparisonTab: React.FC<ModelComparisonTabProps> = ({
             }
           }}
           onToast={onToast}
+        />
+
+        {/* Local Offline Field Validation (Ground-Truth) Modal */}
+        <GroundTruthModal
+          isOpen={isGroundTruthModalOpen}
+          onClose={() => setIsGroundTruthModalOpen(false)}
+          activeLocation={activeLocation}
+          forecast={forecast}
+          onToast={onToast}
+          onErrorLog={onErrorLog}
+          onCalibrationChange={() => void refreshGroundTruth()}
         />
       </div>
     </ModuleErrorBoundary>

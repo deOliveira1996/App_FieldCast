@@ -102,7 +102,7 @@ const TOPIC_BADGES: Record<HelpTopicId, string> = {
   report_era5_hybrid: 'Reanálise ERA5 + Híbrido',
   report_16d_projection: 'Horizonte Estendido 16 Dias',
   route_planning_4d: 'Rota 4D (GPX/KML/KMZ + ETA)',
-  goes_satellite: 'Satélite IR / Vapor d’Água',
+  goes_satellite: 'GOES-East IR / Vapor d’Água',
   ground_truth_validation: 'Campo + Calibração Bayesiana',
   bessel_robust_stats: 'Bessel (n−1) • MAD • Theil-Sen',
   tide_alerts_dhn: 'Maré MSL ~8 km (≠ DHN)',
@@ -134,7 +134,7 @@ const TOPIC_BADGES_EN: Record<HelpTopicId, string> = {
   report_era5_hybrid: 'ERA5 Reanalysis + Hybrid',
   report_16d_projection: 'Extended 16-Day Horizon',
   route_planning_4d: '4D Route (GPX/KML/KMZ + ETA)',
-  goes_satellite: 'GOES Satellite IR / Water Vapor',
+  goes_satellite: 'GOES-East IR / Water Vapor',
   ground_truth_validation: 'Field Truth + Bayesian Skill',
   bessel_robust_stats: 'Bessel (n−1) • MAD • Theil-Sen',
   tide_alerts_dhn: 'MSL Tide ~8 km (≠ DHN)',
@@ -156,6 +156,49 @@ const FIELD_EXTRA_ENTRIES_PT: GlossaryEntry[] = [
       '4. Exporte sem Servidor: Exporte relatórios e trilhas em PDF, DOCX, CSV, JSON, GPX ou GeoJSON diretamente pelo dispositivo.',
     ],
     tip: 'Em ambiente sob sol forte, alterne para o Tema Claro (Alto Contraste Solar) no cabeçalho para leitura imediata.',
+  },
+  {
+    id: 'manual_v43_route_goes',
+    category: 'campo',
+    title: 'Manual V4.3: Planejamento de Rotas 4D & Satélite GOES-East em Tempo Real',
+    badge: 'Rota 4D • GOES-East Tempo Real',
+    summary:
+      'Guia operacional para avaliar travessias costeiras ou voos em cada checkpoint (espaço + tempo ETA + altitude) e acompanhar nuvens convectivas via GOES-East.',
+    bullets: [
+      'Importação de Trilhas Offline: Carregue arquivos GPX, KML, KMZ, GeoJSON ou CSV na aba "Rotas 4D" (ou marque pontos no mapa). Trajetos longos são reamostrados automaticamente em até 18 checkpoints preservando partida e chegada.',
+      'Perfil Náutico & Aéreo (10m–1000m): Calcula vento relativo ao rumo (proa, través e popa), ondas Hs, corrente marinha, maré estimada MSL (~8 km — NÃO substitui tábuas oficiais DHN/Marinha) e Wind Shear em altitude (NÃO substitui briefings oficiais REDEMET/DECEA).',
+      'Satélite Geoestacionário GOES-East em Tempo Real: Na aba "Mapa & Radar", ative a camada GOES-East (Infravermelho / Vapor d’Água) para monitorar frentes frias e topos convectivos mesmo sobre o oceano ou longe de radares Doppler.',
+    ],
+    tip: 'Compare diferentes horários de partida na aba Rotas 4D e exporte o Briefing 4D (PDF/DOCX/HTML/CSV) antes de perder sinal.',
+  },
+  {
+    id: 'manual_v43_ground_truth_p2p',
+    category: 'confianca',
+    title: 'Manual V4.3: Validação Local (Ground-Truth), Calibração Bayesiana & Troca JSON',
+    badge: 'Ground-Truth • Troca P2P JSON',
+    summary:
+      'Como registrar condições reais em campo, auditar o desempenho dos 4 modelos na sua região e compartilhar datasets offline com sua equipe.',
+    bullets: [
+      'Check-in Rápido ("Validar Tempo"): Vincula automaticamente as coordenadas ativas e pareia sua observação (chuva, sensação de vento, medições opcionais e foto estritamente opcional) com ECMWF, GFS, ICON e GEM em t0.',
+      'Aviso de Divergência em Tempo Real (t0): Se um check-in recente (≤ 90 min, ≤ 20 km) contradisser a previsão atual, o Resumo Diário exibe um banner visual apenas para a hora atual, preservando intactas todas as horas futuras.',
+      'Calibração Bayesiana Conservadora (n ≥ 10): Após 10 registros na região (raio 35 km), desbloqueia o modo opcional "Usar Modelo Calibrado Localmente" com encolhimento n / (n + 10) e pesos restritos a [10%–50%] — evitando sobreajuste.',
+      'Troca Offline Peer-to-Peer (.json): Exporte seu conjunto em formato validado (fieldcast-gt-v1) e mescle arquivos recebidos de colegas diretamente no aparelho, sem backend e sem duplicar registros.',
+    ],
+    tip: 'O consenso uniforme FieldCast Ensemble permanece como padrão; você pode alternar para "Calibrado Local" e voltar ao padrão com 1 clique.',
+  },
+  {
+    id: 'manual_v43_stats_alerts',
+    category: 'alertas',
+    title: 'Manual V4.3: Estatística Robusta (Bessel n−1, MAD, Theil-Sen), Marés & Alertas Android',
+    badge: 'Bessel (n−1) • Maré DHN • Android',
+    summary:
+      'Referência rápida sobre o rigor estatístico dos relatórios e matriz comparativa, alertas de maré MSL e vigília em segundo plano no Android.',
+    bullets: [
+      'Dispersão de Bessel (n−1), MAD Z-Robusto & Theil-Sen: O desvio-padrão amostral (n−1) corrige o viés entre os 4 modelos; MAD (Desvio Absoluto Mediano), Z-Robusto e inclinação Theil-Sen resistem a picos extremos isolados de chuva ou rajada.',
+      'Alertas de Maré MSL (~8 km) — Aviso Obrigatório DHN: Configure alertas de maré baixa ou alta em Configurações; pontos continentais ignoram a regra com segurança. A estimativa MSL (~8 km) NÃO substitui tábuas oficiais da DHN / Marinha.',
+      'Alertas Android em Segundo Plano & Recorrência: Defina se cada regra dispara 1x por janela, N vezes na janela ou a cada K horas; eventos extremos prioritários podem reforçar o aviso ao menos 2x ao dia com notificações nativas em segundo plano.',
+    ],
+    tip: 'No Android, libere Notificações, Alarmes Exatos e isenção de otimização de bateria em Configurações para máxima pontualidade.',
   },
   {
     id: 'circular_math',
@@ -188,6 +231,49 @@ const FIELD_EXTRA_ENTRIES_EN: GlossaryEntry[] = [
       '4. Server-Free Exports: Export reports and tracks as PDF, DOCX, CSV, JSON, GPX, or GeoJSON straight from your device.',
     ],
     tip: 'Under bright sunlight, switch to the Light High-Contrast theme in the header for crisp visibility.',
+  },
+  {
+    id: 'manual_v43_route_goes',
+    category: 'campo',
+    title: 'V4.3 Manual: 4D Route Planning & GOES-East Real-Time Satellite',
+    badge: '4D Route • Real-Time GOES-East',
+    summary:
+      'Operational walkthrough for evaluating coastal crossings or UAV/aerial legs at each checkpoint ETA and tracking convective storms via GOES-East.',
+    bullets: [
+      'Offline Track Import: Load GPX, KML, KMZ, GeoJSON, or CSV files in the "4D Routes" tab (or drop pins on the map). Long tracks automatically resample up to 18 checkpoints while preserving exact origin and destination.',
+      'Marine & Aerial (10m–1000m) Profiles: Evaluates headwind/crosswind/tailwind relative to leg bearing, Hs waves, currents, estimated MSL tide (~8 km — does NOT replace official DHN/Navy tide tables), and altitude Wind Shear (does NOT replace official REDEMET/DECEA briefings).',
+      'Real-Time GOES-East Satellite: Enable GOES-East IR / Water Vapor overlays in "Map & Radar" to track cold cloud tops and frontal bands over open oceans and inland regions outside Doppler radar range.',
+    ],
+    tip: 'Compare departure times in 4D Routes and export the 4D Briefing (PDF/DOCX/HTML/CSV) before heading offline.',
+  },
+  {
+    id: 'manual_v43_ground_truth_p2p',
+    category: 'confianca',
+    title: 'V4.3 Manual: Local Ground-Truth Validation, Bayesian Calibration & Peer JSON Sharing',
+    badge: 'Ground-Truth • Peer JSON Share',
+    summary:
+      'How to log observed weather in the field, audit regional NWP model skill, and merge offline datasets across team devices.',
+    bullets: [
+      'Quick Check-In ("Validate Weather"): Auto-binds your active GPS/location coordinates and pairs your report (rain class, wind feel, optional measurements, and strictly optional photo) with ECMWF, GFS, ICON, and GEM at t0.',
+      'Live Current-Hour Divergence Banner (t0): Recent local check-ins (≤ 90 min, ≤ 20 km) that contradict t0 show an immediate visual notice on the Daily Summary while keeping all future forecast hours untouched.',
+      'Conservative Bayesian Calibration (n ≥ 10): Collecting 10+ regional records (35 km radius) unlocks the optional "Use Locally Calibrated Model" toggle with Bayesian shrinkage n / (n + 10) clamped to [10%–50%] to prevent overfitting.',
+      'Offline Peer-to-Peer JSON Exchange: Export validated packages (fieldcast-gt-v1) and merge teammate JSON files locally with automatic deduplication and zero backend.',
+    ],
+    tip: 'Standard equal-weight FieldCast Ensemble stays the default; switch between "Locally Calibrated" and standard consensus in one tap.',
+  },
+  {
+    id: 'manual_v43_stats_alerts',
+    category: 'alertas',
+    title: 'V4.3 Manual: Robust Stats (Bessel n−1, MAD, Theil-Sen), Tide Alerts & Android Background',
+    badge: 'Bessel (n−1) • DHN Tide • Android',
+    summary:
+      'Quick reference on V4.3 statistical robustness in comparison matrices/reports, coastal MSL tide alerts, and native Android background scheduling.',
+    bullets: [
+      'Bessel (n−1), MAD Robust Z-Score & Theil-Sen Slope: Sample standard deviation (n−1) removes small-sample bias across the 4 NWP models; Median Absolute Deviation (MAD), Robust-Z, and Theil-Sen slopes stay stable against isolated rainfall or gust outliers.',
+      'Estimated MSL Tide Alerts (~8 km) — Mandatory DHN Notice: Configure low/high tide thresholds in Settings; inland coordinates safely skip tide rules. MSL (~8 km) is guidance only and does NOT replace official DHN / Navy port tide tables.',
+      'Android Background Alerts & Recurrence: Configure once-per-window, N-times-per-window, or every-K-hours recurrence; priority extreme events can re-notify at least 2x/day via native Android background workers.',
+    ],
+    tip: 'On Android, allow Notifications, Exact Alarms, and Battery Optimization exemption in Settings for reliable background alerts.',
   },
   {
     id: 'circular_math',
@@ -475,8 +561,8 @@ export const GlossaryModal: React.FC<GlossaryModalProps> = ({
               value={searchQuery}
               onChange={(e) => setSearchQuery(e.target.value)}
               placeholder={tr(
-                'Buscar termo ou guia (ex.: Cisalhamento, Ensemble, Barômetro, Swell, Alerta, Offline)...',
-                'Search term or guide (e.g., Shear, Ensemble, Barometer, Swell, Alert, Offline)...',
+                'Buscar termo ou manual (ex.: Rota 4D, GOES, Maré DHN, Bessel, Ground-Truth, Android)...',
+                'Search term or manual (e.g., 4D Route, GOES, DHN Tide, Bessel, Ground-Truth, Android)...',
               )}
               aria-label={tr('Filtrar termos do glossário', 'Filter glossary terms')}
               className="w-full min-h-[44px] pl-10 pr-4 py-2 rounded-xl border border-slate-300 dark:border-slate-700 bg-slate-50 dark:bg-slate-950 text-sm text-slate-900 dark:text-slate-100 placeholder:text-slate-400 focus:outline-none focus:ring-2 focus:ring-sky-500"
