@@ -19,6 +19,7 @@ export interface WeatherModelOverlayLayerProps {
   animateFlow?: boolean;
   showWindStreamlines?: boolean;
   temperatureUnit?: 'c' | 'f';
+  precipitationUnit?: 'mm' | 'in';
   onLayerError?: (error: Error) => void;
 }
 
@@ -104,6 +105,7 @@ export const WeatherModelOverlayLayer: React.FC<WeatherModelOverlayLayerProps> =
   animateFlow = true,
   showWindStreamlines,
   temperatureUnit = 'c',
+  precipitationUnit = 'mm',
   onLayerError,
 }) => {
   const map = useMap();
@@ -130,6 +132,8 @@ export const WeatherModelOverlayLayer: React.FC<WeatherModelOverlayLayerProps> =
   shouldRenderStreamlinesRef.current = shouldRenderStreamlines;
   const temperatureUnitRef = useRef(temperatureUnit);
   temperatureUnitRef.current = temperatureUnit;
+  const precipitationUnitRef = useRef(precipitationUnit);
+  precipitationUnitRef.current = precipitationUnit;
 
   const syncAndRedrawRef = useRef<(() => void) | null>(null);
 
@@ -256,16 +260,19 @@ export const WeatherModelOverlayLayer: React.FC<WeatherModelOverlayLayerProps> =
         const currentPoints = pointsRef.current;
         const currentOpacity = opacityRef.current;
         const currentTempUnit = temperatureUnitRef.current;
+        const currentPrecipUnit = precipitationUnitRef.current;
 
         canvas.dataset.weatherModel = modelModeRef.current;
         canvas.dataset.weatherLayer = currentLayerId;
 
+        const domWidth = container.clientWidth || 0;
+        const domHeight = container.clientHeight || 0;
         const size =
           typeof map.getSize === 'function'
             ? map.getSize()
-            : L.point(container.clientWidth || 640, container.clientHeight || 360);
-        const width = Math.max(1, size.x || container.clientWidth || 640);
-        const height = Math.max(1, size.y || container.clientHeight || 360);
+            : L.point(domWidth || 640, domHeight || 360);
+        const width = Math.max(1, (domWidth > 0 ? domWidth : size.x) || 640);
+        const height = Math.max(1, (domHeight > 0 ? domHeight : size.y) || 360);
 
         canvas.style.width = `${width}px`;
         canvas.style.height = `${height}px`;
@@ -390,10 +397,14 @@ export const WeatherModelOverlayLayer: React.FC<WeatherModelOverlayLayerProps> =
                   currentTempUnit === 'f'
                     ? `${Math.round((sample.value * 9) / 5 + 32)}°`
                     : `${Math.round(sample.value)}°`;
+                const rainDisplay =
+                  currentPrecipUnit === 'in'
+                    ? `${(sample.value / 25.4).toFixed(2)}`
+                    : `${sample.value.toFixed(1)}`;
                 const text =
                   currentLayerId === 'temperature'
                     ? tempDisplay
-                    : `${sample.value.toFixed(1)}`;
+                    : rainDisplay;
                 offscreenCtx.save();
                 offscreenCtx.font = '700 10px system-ui, -apple-system, sans-serif';
                 offscreenCtx.textAlign = 'center';
@@ -558,12 +569,38 @@ export const WeatherModelOverlayLayer: React.FC<WeatherModelOverlayLayerProps> =
     syncAnimationLoop();
 
     const handleMapTransform = () => {
+      if (isDisposed) return;
       syncCanvasPosition();
       rebuildOffscreenStaticField();
+      syncAnimationLoop();
     };
 
     if (typeof map.on === 'function') {
       map.on('move moveend zoom zoomend viewreset resize', handleMapTransform);
+    }
+
+    let resizeObserver: ResizeObserver | null = null;
+    let resizeRafId: number | null = null;
+    if (typeof ResizeObserver !== 'undefined') {
+      try {
+        resizeObserver = new ResizeObserver(() => {
+          if (isDisposed) return;
+          if (resizeRafId !== null && typeof window !== 'undefined') {
+            window.cancelAnimationFrame(resizeRafId);
+          }
+          if (typeof window !== 'undefined' && typeof window.requestAnimationFrame === 'function') {
+            resizeRafId = window.requestAnimationFrame(() => {
+              resizeRafId = null;
+              handleMapTransform();
+            });
+          } else {
+            handleMapTransform();
+          }
+        });
+        resizeObserver.observe(container);
+      } catch {
+        resizeObserver = null;
+      }
     }
 
     return () => {
@@ -571,6 +608,13 @@ export const WeatherModelOverlayLayer: React.FC<WeatherModelOverlayLayerProps> =
       syncAndRedrawRef.current = null;
       if (rafId !== null && typeof window !== 'undefined') {
         window.cancelAnimationFrame(rafId);
+      }
+      if (resizeRafId !== null && typeof window !== 'undefined') {
+        window.cancelAnimationFrame(resizeRafId);
+      }
+      if (resizeObserver) {
+        resizeObserver.disconnect();
+        resizeObserver = null;
       }
       if (typeof map.off === 'function') {
         map.off('move moveend zoom zoomend viewreset resize', handleMapTransform);
@@ -594,6 +638,7 @@ export const WeatherModelOverlayLayer: React.FC<WeatherModelOverlayLayerProps> =
     modelMode,
     opacity,
     points,
+    precipitationUnit,
     selectedHourIdx,
     shouldRenderStreamlines,
     temperatureUnit,
