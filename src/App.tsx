@@ -14,6 +14,7 @@ import { FieldDataTab } from './components/field';
 import { AppShell, type AppTabId } from './components/layout';
 import { MapRadarTab } from './components/map';
 import { NavigationTab } from './components/navigation';
+import { RoutePlanningTab } from './components/planner/RoutePlanningTab';
 import { SettingsTab } from './components/settings';
 import { DailySummaryTab } from './components/summary';
 import {
@@ -65,6 +66,7 @@ import {
   dispatchSystemNotification,
   evaluateForecastNotificationTriggers,
   loadNotificationPreferences,
+  syncNativeBackgroundAlertSchedule,
 } from './services/notificationService';
 import { probeRainViewerHealth } from './services/rainViewerService';
 import { detectRuntimePlatform } from './services/platform';
@@ -586,6 +588,7 @@ function AppContent(): React.ReactElement {
     };
     void loadForecastForCoordinates(coords.latitude, coords.longitude, {
       silent: true,
+      forceNetwork: resolution.tierResolved === 1,
     });
   };
 
@@ -1197,6 +1200,27 @@ function AppContent(): React.ReactElement {
     }
   }, [addToast, forecast, notificationPrefs]);
 
+  // Sincronização não-bloqueante de agenda de alertas e monitor periódico Android em segundo plano
+  useEffect(() => {
+    void syncNativeBackgroundAlertSchedule(
+      notificationPrefs,
+      forecast,
+      activeLocation.name,
+      {
+        latitude: activeLocation.latitude,
+        longitude: activeLocation.longitude,
+      },
+    ).catch(() => {
+      // No-op seguro na Web ou quando plugin nativo estiver indisponível
+    });
+  }, [
+    activeLocation.latitude,
+    activeLocation.longitude,
+    activeLocation.name,
+    forecast,
+    notificationPrefs,
+  ]);
+
   const handleActivateAlertTemplate = useCallback(
     (template: NotificationRuleTemplate, updatedPrefs: UserNotificationPreferences) => {
       setNotificationPrefs(updatedPrefs);
@@ -1344,6 +1368,21 @@ function AppContent(): React.ReactElement {
               isDark={isDark}
               viewMode={viewMode}
               onViewModeChange={setViewMode}
+              onToast={addToast}
+              onErrorLog={handleErrorLog}
+            />
+          </ModuleErrorBoundary>
+        )}
+
+        {activeTab === 'planner' && (
+          <ModuleErrorBoundary
+            moduleName="Módulo de Planejamento de Rotas 4D"
+            onErrorLog={handleErrorLog}
+          >
+            <RoutePlanningTab
+              activeLocation={activeLocation}
+              forecast={forecast}
+              isDark={isDark}
               onToast={addToast}
               onErrorLog={handleErrorLog}
             />

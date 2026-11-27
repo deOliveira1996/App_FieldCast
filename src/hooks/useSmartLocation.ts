@@ -326,25 +326,47 @@ export function useSmartLocation(options?: UseSmartLocationOptions): UseSmartLoc
 
   const optionsRef = useRef(options);
   optionsRef.current = options;
+  const manualSelectionVersionRef = useRef<number>(0);
+  const resolveGenerationRef = useRef<number>(0);
 
-  const resolveLocation = useCallback(async (): Promise<SmartLocationResolution> => {
-    setIsLocating(true);
-    setError(null);
-    try {
-      const res = await resolveCascadingLocation(optionsRef.current);
-      setActiveLocation(res.coordinates);
-      setGpsStatus(res.gpsStatus);
-      setTierResolved(res.tierResolved);
-      return res;
-    } catch (err) {
-      const msg =
-        err instanceof Error ? err.message : 'Falha na resolução de geolocalização em cascata.';
-      setError(msg);
-      throw err;
-    } finally {
-      setIsLocating(false);
-    }
-  }, []);
+  const runResolveLocation = useCallback(
+    async (isStartupAuto: boolean): Promise<SmartLocationResolution> => {
+      const generation = ++resolveGenerationRef.current;
+      const manualVersionAtStart = manualSelectionVersionRef.current;
+      setIsLocating(true);
+      setError(null);
+      try {
+        const res = await resolveCascadingLocation(optionsRef.current);
+        const supersededByManual =
+          isStartupAuto && manualSelectionVersionRef.current !== manualVersionAtStart;
+        const supersededByNewerRequest = generation !== resolveGenerationRef.current;
+
+        if (!supersededByManual && !supersededByNewerRequest) {
+          setActiveLocation(res.coordinates);
+          setGpsStatus(res.gpsStatus);
+          setTierResolved(res.tierResolved);
+        }
+        return res;
+      } catch (err) {
+        const msg =
+          err instanceof Error ? err.message : 'Falha na resolução de geolocalização em cascata.';
+        if (generation === resolveGenerationRef.current) {
+          setError(msg);
+        }
+        throw err;
+      } finally {
+        if (generation === resolveGenerationRef.current) {
+          setIsLocating(false);
+        }
+      }
+    },
+    [],
+  );
+
+  const resolveLocation = useCallback(
+    async (): Promise<SmartLocationResolution> => runResolveLocation(false),
+    [runResolveLocation],
+  );
 
   const setManualLocation = useCallback(
     (coords: {
@@ -354,6 +376,8 @@ export function useSmartLocation(options?: UseSmartLocationOptions): UseSmartLoc
       origin?: LocationOrigin;
       accuracyM?: number | null;
     }): ActiveCoordinates => {
+      manualSelectionVersionRef.current += 1;
+      resolveGenerationRef.current += 1;
       const origin: LocationOrigin = coords.origin ?? 'saved';
       const updated: ActiveCoordinates = {
         latitude: coords.latitude,
@@ -365,6 +389,7 @@ export function useSmartLocation(options?: UseSmartLocationOptions): UseSmartLoc
         updatedAtIso: new Date().toISOString(),
       };
       setActiveLocation(updated);
+      setIsLocating(false);
       if (origin === 'gps') {
         setGpsStatus('granted');
         setTierResolved(1);
@@ -392,9 +417,10 @@ export function useSmartLocation(options?: UseSmartLocationOptions): UseSmartLoc
   useEffect(() => {
     if (options?.autoResolveOnMount !== false) {
       let cancelled = false;
-      void resolveLocation()
+      const manualVersionAtMount = manualSelectionVersionRef.current;
+      void runResolveLocation(true)
         .then((res) => {
-          if (!cancelled) {
+          if (!cancelled && manualSelectionVersionRef.current === manualVersionAtMount) {
             optionsRef.current?.onAutoResolved?.(res);
           }
         })
@@ -406,7 +432,7 @@ export function useSmartLocation(options?: UseSmartLocationOptions): UseSmartLoc
       };
     }
     return undefined;
-  }, [options?.autoResolveOnMount, resolveLocation]);
+  }, [options?.autoResolveOnMount, runResolveLocation]);
 
   return {
     activeLocation,

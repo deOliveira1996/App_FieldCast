@@ -21,6 +21,7 @@ import {
   Moon,
   Plane,
   RefreshCw,
+  Route,
   Search,
   Settings,
   Sun,
@@ -165,6 +166,7 @@ interface NavTabDefinition {
 const MOBILE_PRIMARY_TAB_IDS: ReadonlyArray<AppTabId> = [
   'forecast',
   'comparison',
+  'planner',
   'map',
   'field',
 ];
@@ -340,6 +342,16 @@ export const AppShell: React.FC<AppShellProps> = ({
       Icon: Plane,
     },
     {
+      id: 'planner',
+      label: tr('Planejamento', 'Route Planner'),
+      mobileLabel: tr('Rotas', 'Routes'),
+      description: tr(
+        'Planejamento de rotas 4D (náutico e aéreo/VANT) com ETA',
+        '4D route planning (coastal and aerial/UAV) with ETA',
+      ),
+      Icon: Route,
+    },
+    {
       id: 'map',
       label: tr('Mapa', 'Map & Radar'),
       mobileLabel: tr('Mapa', 'Map'),
@@ -406,7 +418,7 @@ export const AppShell: React.FC<AppShellProps> = ({
             {/* Brand Logo */}
             <div className="flex items-center gap-2 shrink-0">
               <img
-                src="/icon.svg"
+                src={`${import.meta.env.BASE_URL}icon.svg`}
                 alt="FieldCast"
                 className="w-8 h-8 rounded-xl shadow-sm border border-white/25 bg-white/10"
               />
@@ -638,18 +650,22 @@ export const AppShell: React.FC<AppShellProps> = ({
                 )}
               </div>
 
-              {/* Desktop Primary Navigation (All 7 Tabs) */}
+              {/* Desktop Primary Navigation (All 8 Tabs) */}
               <nav
                 aria-label={tr('Navegação Principal Desktop', 'Desktop Primary Navigation')}
                 className="hidden md:flex flex-col gap-1.5 min-w-0"
               >
                 {tabs.map(({ id, label, Icon, badgeCount }) => {
                   const isActive = activeTab === id;
+                  const desktopTestId =
+                    id === 'planner' && !viewport.isMobile
+                      ? 'nav-tab-planner'
+                      : `desktop-tab-${id}`;
                   return (
                     <button
                       key={id}
                       type="button"
-                      data-testid={`desktop-tab-${id}`}
+                      data-testid={desktopTestId}
                       onClick={() => onTabChange(id)}
                       aria-current={isActive ? 'page' : undefined}
                       title={label}
@@ -698,18 +714,23 @@ export const AppShell: React.FC<AppShellProps> = ({
           </main>
         </div>
 
-        {/* Mobile Fixed Bottom Tab Bar (4 Quick Tabs + Menu Drawer Button >= 48x44px) */}
+        {/* Mobile Fixed Bottom Tab Bar (5 Quick Tabs + Menu Drawer Button >= 48x44px) */}
         <nav
           aria-label={tr('Navegação Principal Mobile', 'Mobile Primary Navigation')}
-          className="md:hidden fixed bottom-0 inset-x-0 z-40 max-w-[100vw] border-t border-sky-200 dark:border-sky-800/70 bg-white/95 dark:bg-[#0f243d]/95 backdrop-blur-md px-2 pt-2 pb-[max(0.65rem,env(safe-area-inset-bottom,0px))] shadow-xl"
+          className="md:hidden fixed bottom-0 inset-x-0 z-40 max-w-[100vw] border-t border-sky-200 dark:border-sky-800/70 bg-white/95 dark:bg-[#0f243d]/95 backdrop-blur-md px-1.5 pt-2 pb-[max(0.65rem,env(safe-area-inset-bottom,0px))] shadow-xl"
         >
-          <div className="grid grid-cols-5 gap-1.5 max-w-lg mx-auto min-w-0">
+          <div className="grid grid-cols-6 gap-1 max-w-lg mx-auto min-w-0">
             {mobilePrimaryTabs.map(({ id, label, mobileLabel, Icon, badgeCount }) => {
               const isActive = activeTab === id && !isMobileDrawerOpen;
+              const mobileTestId =
+                id === 'planner' && viewport.isMobile
+                  ? 'nav-tab-planner'
+                  : `mobile-tab-${id}`;
               return (
                 <button
                   key={id}
                   type="button"
+                  data-testid={mobileTestId}
                   aria-label={label}
                   onClick={() => {
                     setIsMobileDrawerOpen(false);
@@ -808,10 +829,10 @@ export const AppShell: React.FC<AppShellProps> = ({
                   </button>
                 </div>
 
-                {/* All 7 Modular Tabs */}
+                {/* All 8 Modular Tabs */}
                 <div className="space-y-1.5">
                   <span className="block text-[11px] font-extrabold uppercase tracking-wider text-sky-700 dark:text-sky-300 px-1">
-                    {tr('Todas as Seções (7)', 'All Sections (7)')}
+                    {tr('Todas as Seções (8)', 'All Sections (8)')}
                   </span>
                   <div className="flex flex-col gap-1.5">
                     {tabs.map(({ id, label, description, Icon, badgeCount }) => {

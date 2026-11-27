@@ -1,6 +1,8 @@
 import React, { useCallback, useEffect, useState } from 'react';
 import {
+  AlarmClock,
   AlertTriangle,
+  BatteryCharging,
   Bell,
   BellRing,
   CheckCircle2,
@@ -11,25 +13,34 @@ import {
   Navigation,
   Pencil,
   Plus,
+  Repeat,
   RotateCcw,
   Save,
   Send,
   Settings,
   ShieldCheck,
   Sliders,
+  Smartphone,
   Sun,
   Trash2,
+  Waves,
   X,
 } from 'lucide-react';
 import { useLocale } from '../../context/LocaleContext';
 import { useUnits } from '../../context/UnitsContext';
 import { useTheme, type ThemeMode } from '../../hooks/useTheme';
 import {
+  DHN_TIDE_DISCLAIMER_EN,
+  DHN_TIDE_DISCLAIMER_PT,
   dispatchSystemNotification,
+  getNativeBackgroundAlertStatus,
   getSystemNotificationPermissionState,
   loadNotificationPreferences,
+  openNativeExactAlarmSettings,
+  requestNativeBatteryExemption,
   requestSystemNotificationPermission,
   saveNotificationPreferences,
+  type NativeBackgroundAlertStatus,
 } from '../../services/notificationService';
 import {
   getBackgroundTrackingConsent,
@@ -43,6 +54,7 @@ import type {
   CustomNotificationConditions,
   CustomNotificationRule,
   DailyFieldThresholdKey,
+  NotificationRecurrenceConfig,
   UserNotificationPreferences,
 } from '../../types/v4';
 import {
@@ -121,7 +133,12 @@ interface RuleBuilderDraft {
   maxGustKmh: string;
   maxCloudCoverPct: string;
   maxWaveM: string;
+  minTideMslM: string;
+  maxTideMslM: string;
   maxKpIndex: string;
+  recurrenceMode: NotificationRecurrenceConfig['mode'];
+  recurrenceMaxTriggers: string;
+  recurrenceIntervalHours: string;
   customTitle: string;
   customMessage: string;
 }
@@ -138,7 +155,12 @@ const INITIAL_RULE_DRAFT: RuleBuilderDraft = {
   maxGustKmh: '',
   maxCloudCoverPct: '',
   maxWaveM: '',
+  minTideMslM: '',
+  maxTideMslM: '',
   maxKpIndex: '',
+  recurrenceMode: 'once',
+  recurrenceMaxTriggers: '2',
+  recurrenceIntervalHours: '3',
   customTitle: '',
   customMessage: '',
 };
@@ -151,6 +173,8 @@ type RuleConditionKey =
   | 'maxGustKmh'
   | 'maxCloudCoverPct'
   | 'maxWaveM'
+  | 'minTideMslM'
+  | 'maxTideMslM'
   | 'maxKpIndex';
 
 const DEFAULT_ENABLED_RULE_FIELDS: Record<RuleConditionKey, boolean> = {
@@ -161,6 +185,8 @@ const DEFAULT_ENABLED_RULE_FIELDS: Record<RuleConditionKey, boolean> = {
   maxGustKmh: false,
   maxCloudCoverPct: false,
   maxWaveM: false,
+  minTideMslM: false,
+  maxTideMslM: false,
   maxKpIndex: false,
 };
 
@@ -187,7 +213,7 @@ function formatRuleConditionChips(
   const fmtWind = (kmh: number) =>
     units ? Number((convertWindSpeed(kmh, units.wind) ?? kmh).toFixed(1)) : kmh;
   const fmtWave = (m: number) =>
-    units ? Number((convertWaveHeight(m, units.wave) ?? m).toFixed(1)) : m;
+    units ? Number((convertWaveHeight(m, units.wave) ?? m).toFixed(2)) : m;
 
   if (conditions.minTempC !== undefined && conditions.minTempC !== null) {
     chips.push(`Temp < ${fmtTemp(conditions.minTempC)} ${tempLabel}`);
@@ -210,10 +236,33 @@ function formatRuleConditionChips(
   if (conditions.maxWaveM !== undefined && conditions.maxWaveM !== null) {
     chips.push(`Onda >= ${fmtWave(conditions.maxWaveM)} ${waveLabel}`);
   }
+  if (conditions.minTideMslM !== undefined && conditions.minTideMslM !== null) {
+    chips.push(`Maré MSL <= ${fmtWave(conditions.minTideMslM)} ${waveLabel}`);
+  }
+  if (conditions.maxTideMslM !== undefined && conditions.maxTideMslM !== null) {
+    chips.push(`Maré MSL >= ${fmtWave(conditions.maxTideMslM)} ${waveLabel}`);
+  }
   if (conditions.maxKpIndex !== undefined && conditions.maxKpIndex !== null) {
     chips.push(`Kp >= ${conditions.maxKpIndex}`);
   }
   return chips;
+}
+
+function formatRuleRecurrenceLabel(
+  recurrence: NotificationRecurrenceConfig | undefined,
+  tr: (pt: string, en: string) => string,
+): string {
+  const mode = recurrence?.mode ?? 'once';
+  if (mode === 'times_per_window') {
+    const count = recurrence?.maxTriggersPerWindow ?? 2;
+    return tr(`${count}x na janela`, `${count}x per window`);
+  }
+  if (mode === 'interval_hours') {
+    const hours = recurrence?.intervalHours ?? 2;
+    const maxCount = recurrence?.maxTriggersPerWindow ?? 6;
+    return tr(`A cada ${hours}h (máx ${maxCount}x)`, `Every ${hours}h (max ${maxCount}x)`);
+  }
+  return tr('1x na janela', '1x per window');
 }
 
 export function SettingsTab({
@@ -247,6 +296,12 @@ export function SettingsTab({
   const [permissionState, setPermissionState] = useState<
     'granted' | 'denied' | 'default' | 'unsupported'
   >('default');
+  const [bgStatus, setBgStatus] = useState<NativeBackgroundAlertStatus>({
+    supported: false,
+    notificationsGranted: false,
+    exactAlarmAllowed: false,
+    ignoringBatteryOptimizations: false,
+  });
   const [statusFeedback, setStatusFeedback] = useState<string | null>(null);
 
   const [ruleDraft, setRuleDraft] = useState<RuleBuilderDraft>(INITIAL_RULE_DRAFT);
@@ -287,11 +342,24 @@ export function SettingsTab({
     };
   }, [onNotificationPreferencesChange]);
 
+  const refreshNativeBgStatus = useCallback(async () => {
+    const [permRes, nativeBg] = await Promise.all([
+      getSystemNotificationPermissionState(),
+      getNativeBackgroundAlertStatus(),
+    ]);
+    setPermissionState(permRes);
+    setBgStatus(nativeBg);
+  }, []);
+
   useEffect(() => {
     let mounted = true;
-    void getSystemNotificationPermissionState().then((res) => {
+    void Promise.all([
+      getSystemNotificationPermissionState(),
+      getNativeBackgroundAlertStatus(),
+    ]).then(([permRes, nativeBg]) => {
       if (mounted) {
-        setPermissionState(res);
+        setPermissionState(permRes);
+        setBgStatus(nativeBg);
       }
     });
     return () => {
@@ -347,6 +415,7 @@ export function SettingsTab({
       async () => {
         const result = await requestSystemNotificationPermission();
         setPermissionState(result);
+        void refreshNativeBgStatus();
 
         if (result === 'granted') {
           if (!prefs.masterEnabled) {
@@ -385,7 +454,7 @@ export function SettingsTab({
         onErrorLog,
       },
     );
-  }, [onErrorLog, onToast, persistPrefs, prefs]);
+  }, [onErrorLog, onToast, persistPrefs, prefs, refreshNativeBgStatus]);
 
   const handleToggleExtremeEventsAuto = useCallback(() => {
     const nextVal = !prefs.extremeEventsAutoEnabled;
@@ -400,6 +469,107 @@ export function SettingsTab({
         : 'Eventos Extremos Automáticos desativados',
     });
   }, [onToast, persistPrefs, prefs]);
+
+  const handleChangeExtremeRecurrence = useCallback(
+    (field: 'minPerDay' | 'urgentIntervalMinutes', value: number) => {
+      if (!Number.isFinite(value)) return;
+      const current = prefs.extremeAlertsRecurrence ?? {
+        enabled: true,
+        minPerDay: 2,
+        urgentIntervalMinutes: 180,
+      };
+      const nextConfig = {
+        enabled: true,
+        minPerDay:
+          field === 'minPerDay'
+            ? Math.max(2, Math.min(12, Math.floor(value)))
+            : Math.max(2, current.minPerDay),
+        urgentIntervalMinutes:
+          field === 'urgentIntervalMinutes'
+            ? Math.max(15, Math.min(360, Math.floor(value)))
+            : Math.max(15, current.urgentIntervalMinutes),
+      };
+      persistPrefs({
+        ...prefs,
+        extremeAlertsRecurrence: nextConfig,
+      });
+    },
+    [persistPrefs, prefs],
+  );
+
+  const handleToggleBackgroundSyncEnabled = useCallback(() => {
+    const nextEnabled = prefs.backgroundSyncEnabled === false;
+    persistPrefs({
+      ...prefs,
+      backgroundSyncEnabled: nextEnabled,
+    });
+    onToast?.({
+      type: nextEnabled ? 'success' : 'info',
+      title: nextEnabled
+        ? tr('Monitoramento em segundo plano ativado', 'Background monitoring enabled')
+        : tr('Monitoramento em segundo plano pausado', 'Background monitoring paused'),
+    });
+  }, [onToast, persistPrefs, prefs, tr]);
+
+  const handleOpenExactAlarmSettings = useCallback(() => {
+    void safeAction(
+      async () => {
+        const opened = await openNativeExactAlarmSettings();
+        await refreshNativeBgStatus();
+        onToast?.({
+          type: opened ? 'info' : 'warning',
+          title: opened
+            ? tr('Configurações de Alarmes Exatos abertas', 'Exact Alarm settings opened')
+            : tr('Disponível apenas no APK Android', 'Available on Android APK only'),
+          message: opened
+            ? tr(
+                'Autorize "Alarmes e lembretes" para entregas pontuais em modo economia.',
+                'Allow "Alarms & reminders" for timely alerts during Doze mode.',
+              )
+            : tr(
+                'No navegador Web/PWA, os alertas são avaliados enquanto o app está aberto.',
+                'In Web/PWA browsers, alerts run while the app tab is open.',
+              ),
+        });
+      },
+      {
+        actionKey: 'settings-open-exact-alarm',
+        moduleName: 'SettingsTab',
+        onToast,
+        onErrorLog,
+      },
+    );
+  }, [onErrorLog, onToast, refreshNativeBgStatus, tr]);
+
+  const handleRequestBatteryExemption = useCallback(() => {
+    void safeAction(
+      async () => {
+        const requested = await requestNativeBatteryExemption();
+        await refreshNativeBgStatus();
+        onToast?.({
+          type: requested ? 'info' : 'warning',
+          title: requested
+            ? tr('Isenção de bateria solicitada', 'Battery exemption requested')
+            : tr('Disponível apenas no APK Android', 'Available on Android APK only'),
+          message: requested
+            ? tr(
+                'Permita que o FieldCast opere sem restrição de bateria para alertas com o app fechado.',
+                'Allow unrestricted battery usage so FieldCast can fire alerts while closed.',
+              )
+            : tr(
+                'No modo Web/PWA não há otimização Doze do Android.',
+                'Web/PWA mode does not require Android Doze battery exemption.',
+              ),
+        });
+      },
+      {
+        actionKey: 'settings-request-battery-exemption',
+        moduleName: 'SettingsTab',
+        onToast,
+        onErrorLog,
+      },
+    );
+  }, [onErrorLog, onToast, refreshNativeBgStatus, tr]);
 
   const handleToggleGlobalWindow = useCallback(() => {
     const nextVal = !prefs.globalActiveWindow.enabled;
@@ -465,10 +635,14 @@ export function SettingsTab({
   const handleStartEditRule = useCallback(
     (rule: CustomNotificationRule) => {
       const c = rule.conditions;
-      const fmtVal = (val: number | null | undefined, convertFn?: (n: number) => number | null) => {
+      const fmtVal = (
+        val: number | null | undefined,
+        convertFn?: (n: number) => number | null,
+        decimals = 1,
+      ) => {
         if (val === undefined || val === null) return '';
         const converted = convertFn ? convertFn(val) : val;
-        return converted !== null ? String(Number(converted.toFixed(1))) : '';
+        return converted !== null ? String(Number(converted.toFixed(decimals))) : '';
       };
 
       setEditingRuleId(rule.id);
@@ -484,7 +658,12 @@ export function SettingsTab({
         maxGustKmh: fmtVal(c.maxGustKmh, (n) => convertWindSpeed(n, units.wind)),
         maxCloudCoverPct: fmtVal(c.maxCloudCoverPct),
         maxWaveM: fmtVal(c.maxWaveM, (n) => convertWaveHeight(n, units.wave)),
+        minTideMslM: fmtVal(c.minTideMslM, (n) => convertWaveHeight(n, units.wave), 2),
+        maxTideMslM: fmtVal(c.maxTideMslM, (n) => convertWaveHeight(n, units.wave), 2),
         maxKpIndex: fmtVal(c.maxKpIndex),
+        recurrenceMode: rule.recurrence?.mode ?? 'once',
+        recurrenceMaxTriggers: String(rule.recurrence?.maxTriggersPerWindow ?? 2),
+        recurrenceIntervalHours: String(rule.recurrence?.intervalHours ?? 3),
         customTitle: rule.customTitle,
         customMessage: rule.customMessage,
       });
@@ -497,6 +676,8 @@ export function SettingsTab({
         maxGustKmh: c.maxGustKmh !== undefined && c.maxGustKmh !== null,
         maxCloudCoverPct: c.maxCloudCoverPct !== undefined && c.maxCloudCoverPct !== null,
         maxWaveM: c.maxWaveM !== undefined && c.maxWaveM !== null,
+        minTideMslM: c.minTideMslM !== undefined && c.minTideMslM !== null,
+        maxTideMslM: c.maxTideMslM !== undefined && c.maxTideMslM !== null,
         maxKpIndex: c.maxKpIndex !== undefined && c.maxKpIndex !== null,
       });
 
@@ -531,6 +712,8 @@ export function SettingsTab({
           const maxWindRaw = readNum('maxWindKmh', ruleDraft.maxWindKmh);
           const maxGustRaw = readNum('maxGustKmh', ruleDraft.maxGustKmh);
           const maxWaveRaw = readNum('maxWaveM', ruleDraft.maxWaveM);
+          const minTideRaw = readNum('minTideMslM', ruleDraft.minTideMslM);
+          const maxTideRaw = readNum('maxTideMslM', ruleDraft.maxTideMslM);
 
           const conditions: CustomNotificationConditions = {
             minTempC:
@@ -553,8 +736,37 @@ export function SettingsTab({
             maxCloudCoverPct: readNum('maxCloudCoverPct', ruleDraft.maxCloudCoverPct),
             maxWaveM:
               maxWaveRaw !== null ? Number(waveHeightToM(maxWaveRaw, units.wave).toFixed(2)) : null,
+            minTideMslM:
+              minTideRaw !== null ? Number(waveHeightToM(minTideRaw, units.wave).toFixed(2)) : null,
+            maxTideMslM:
+              maxTideRaw !== null ? Number(waveHeightToM(maxTideRaw, units.wave).toFixed(2)) : null,
             maxKpIndex: readNum('maxKpIndex', ruleDraft.maxKpIndex),
           };
+
+          const parsedMaxTriggers = parseOptionalInputNumber(ruleDraft.recurrenceMaxTriggers);
+          const parsedIntervalHours = parseOptionalInputNumber(ruleDraft.recurrenceIntervalHours);
+          const nextRecurrence: NotificationRecurrenceConfig =
+            ruleDraft.recurrenceMode === 'once'
+              ? { mode: 'once', maxTriggersPerWindow: 1 }
+              : ruleDraft.recurrenceMode === 'times_per_window'
+                ? {
+                    mode: 'times_per_window',
+                    maxTriggersPerWindow: Math.max(
+                      1,
+                      Math.min(24, Math.floor(parsedMaxTriggers ?? 2)),
+                    ),
+                  }
+                : {
+                    mode: 'interval_hours',
+                    maxTriggersPerWindow: Math.max(
+                      1,
+                      Math.min(24, Math.floor(parsedMaxTriggers ?? 6)),
+                    ),
+                    intervalHours: Math.max(
+                      1,
+                      Math.min(24, Math.floor(parsedIntervalHours ?? 3)),
+                    ),
+                  };
 
           const resolvedName =
             ruleDraft.name.trim() ||
@@ -584,6 +796,7 @@ export function SettingsTab({
               name: resolvedName,
               conditions,
               timeWindow: nextTimeWindow,
+              recurrence: nextRecurrence,
               customTitle: resolvedTitle,
               customMessage: resolvedMessage,
             };
@@ -620,6 +833,7 @@ export function SettingsTab({
             enabled: true,
             conditions,
             timeWindow: nextTimeWindow,
+            recurrence: nextRecurrence,
             customTitle: resolvedTitle,
             customMessage: resolvedMessage,
             createdAtIso: new Date().toISOString(),
@@ -1079,39 +1293,245 @@ export function SettingsTab({
             </button>
           </div>
 
-          {/* Toggle Eventos Extremos Automáticos */}
-          <div className="flex flex-wrap items-center justify-between gap-4 rounded-xl border border-amber-200/80 bg-amber-50/50 p-4 dark:border-amber-800/50 dark:bg-amber-950/20">
-            <div className="max-w-xl">
-              <div className="flex items-center gap-2">
-                <AlertTriangle
-                  className="h-4 w-4 text-amber-600 dark:text-amber-400"
-                  aria-hidden="true"
-                />
-                <p className="text-sm font-semibold text-slate-900 dark:text-slate-100">
-                  Avisar Automaticamente Eventos Extremos
+          {/* Toggle Eventos Extremos Automáticos + Frequência Diária (>= 2x/dia) */}
+          <div className="space-y-3 rounded-xl border border-amber-200/80 bg-amber-50/50 p-4 dark:border-amber-800/50 dark:bg-amber-950/20">
+            <div className="flex flex-wrap items-center justify-between gap-4">
+              <div className="max-w-xl">
+                <div className="flex items-center gap-2">
+                  <AlertTriangle
+                    className="h-4 w-4 text-amber-600 dark:text-amber-400"
+                    aria-hidden="true"
+                  />
+                  <p className="text-sm font-semibold text-slate-900 dark:text-slate-100">
+                    {tr('Avisar Automaticamente Eventos Extremos', 'Auto-Alert Extreme Events')}
+                  </p>
+                </div>
+                <p className="mt-1 text-xs text-slate-600 dark:text-slate-400">
+                  {tr(
+                    'Emite alertas severos (tempestades elétricas, vendavais, ressaca costeira, queda barométrica e tempestade geomagnética Kp >= 5) sempre com atribuição explícita da fonte oficial (Open-Meteo, NOAA SWPC; cota MSL ~8 km não substitui DHN/Marinha).',
+                    'Dispatches severe hazard warnings (thunderstorms, gales, coastal swell, pressure drops, and Kp >= 5 geomagnetic storms) with official source attribution (Open-Meteo, NOAA SWPC; ~8 km MSL does not replace DHN/Navy tables).',
+                  )}
                 </p>
               </div>
-              <p className="mt-1 text-xs text-slate-600 dark:text-slate-400">
-                Emite alertas severos (tempestades elétricas, vendavais, ressaca costeira, queda
-                barométrica e tempestade geomagnética Kp &ge; 5) sempre com atribuição explícita da
-                fonte oficial (Open-Meteo, NOAA SWPC; cota MSL ~8 km não substitui DHN/Marinha).
-              </p>
+
+              <button
+                type="button"
+                role="switch"
+                aria-checked={prefs.extremeEventsAutoEnabled}
+                data-testid="extreme-events-auto-toggle"
+                onClick={handleToggleExtremeEventsAuto}
+                className={`inline-flex min-h-[44px] min-w-[132px] items-center justify-center rounded-xl px-4 py-2 text-sm font-semibold transition ${
+                  prefs.extremeEventsAutoEnabled
+                    ? 'bg-amber-600 text-white hover:bg-amber-700'
+                    : 'border border-slate-300 bg-white text-slate-700 hover:bg-slate-100 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-200'
+                }`}
+              >
+                {prefs.extremeEventsAutoEnabled ? 'Automático ON' : 'Automático OFF'}
+              </button>
             </div>
 
-            <button
-              type="button"
-              role="switch"
-              aria-checked={prefs.extremeEventsAutoEnabled}
-              data-testid="extreme-events-auto-toggle"
-              onClick={handleToggleExtremeEventsAuto}
-              className={`inline-flex min-h-[44px] min-w-[132px] items-center justify-center rounded-xl px-4 py-2 text-sm font-semibold transition ${
-                prefs.extremeEventsAutoEnabled
-                  ? 'bg-amber-600 text-white hover:bg-amber-700'
-                  : 'border border-slate-300 bg-white text-slate-700 hover:bg-slate-100 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-200'
-              }`}
-            >
-              {prefs.extremeEventsAutoEnabled ? 'Automático ON' : 'Automático OFF'}
-            </button>
+            <div className="grid grid-cols-1 gap-3 border-t border-amber-200/70 pt-3 sm:grid-cols-2 dark:border-amber-800/40">
+              <label className="block text-xs font-medium text-slate-700 dark:text-slate-300">
+                {tr(
+                  'Reforço Diário de Eventos Extremos (mín. 2x/dia)',
+                  'Extreme Events Daily Frequency (min 2x/day)',
+                )}
+                <NumericInput
+                  data-testid="extreme-recurrence-min-per-day"
+                  min={2}
+                  max={12}
+                  step={1}
+                  allowEmpty={false}
+                  fallbackValue={prefs.extremeAlertsRecurrence?.minPerDay ?? 2}
+                  disabled={!prefs.extremeEventsAutoEnabled}
+                  value={prefs.extremeAlertsRecurrence?.minPerDay ?? 2}
+                  onValueChange={(_, num) => {
+                    if (num !== null) {
+                      handleChangeExtremeRecurrence('minPerDay', num);
+                    }
+                  }}
+                  className={`mt-1 ${inputBaseClass} ${!prefs.extremeEventsAutoEnabled ? 'opacity-50' : ''}`}
+                />
+              </label>
+
+              <label className="block text-xs font-medium text-slate-700 dark:text-slate-300">
+                {tr(
+                  'Intervalo entre Reforços Urgentes (minutos)',
+                  'Urgent Reminder Interval (minutes)',
+                )}
+                <NumericInput
+                  data-testid="extreme-recurrence-interval-minutes"
+                  min={15}
+                  max={360}
+                  step={15}
+                  allowEmpty={false}
+                  fallbackValue={prefs.extremeAlertsRecurrence?.urgentIntervalMinutes ?? 180}
+                  disabled={!prefs.extremeEventsAutoEnabled}
+                  value={prefs.extremeAlertsRecurrence?.urgentIntervalMinutes ?? 180}
+                  onValueChange={(_, num) => {
+                    if (num !== null) {
+                      handleChangeExtremeRecurrence('urgentIntervalMinutes', num);
+                    }
+                  }}
+                  className={`mt-1 ${inputBaseClass} ${!prefs.extremeEventsAutoEnabled ? 'opacity-50' : ''}`}
+                />
+              </label>
+            </div>
+          </div>
+
+          {/* Notificações em Segundo Plano (Android Nativo & Diagnóstico Web/PWA) */}
+          <div
+            data-testid="background-alerts-panel"
+            className="space-y-3 rounded-xl border border-sky-200/90 bg-sky-50/40 p-4 dark:border-sky-800/60 dark:bg-sky-950/25"
+          >
+            <div className="flex flex-wrap items-start justify-between gap-3">
+              <div className="max-w-xl space-y-1">
+                <div className="flex items-center gap-2">
+                  <Smartphone
+                    className="h-4 w-4 text-sky-600 dark:text-sky-400"
+                    aria-hidden="true"
+                  />
+                  <h3 className="text-sm font-semibold text-slate-900 dark:text-slate-100">
+                    {tr(
+                      'Notificações em Segundo Plano (Android)',
+                      'Background Notifications (Android)',
+                    )}
+                  </h3>
+                  <HelpPopover topic="background_alerts_android" align="right" />
+                </div>
+                <p className="text-xs text-slate-600 dark:text-slate-400">
+                  {tr(
+                    'Agenda alarmes locais e verificação periódica no Android para disparar alertas meteorológicos e de maré MSL mesmo com o app fechado.',
+                    'Schedules native Android alarms and periodic background checks to fire weather and MSL tide alerts even when the app is closed.',
+                  )}
+                </p>
+              </div>
+
+              <button
+                type="button"
+                role="switch"
+                aria-checked={prefs.backgroundSyncEnabled !== false}
+                data-testid="background-sync-enabled-toggle"
+                onClick={handleToggleBackgroundSyncEnabled}
+                className={`inline-flex min-h-[44px] min-w-[128px] items-center justify-center rounded-xl px-4 py-2 text-xs font-bold transition ${
+                  prefs.backgroundSyncEnabled !== false
+                    ? 'bg-sky-600 text-white hover:bg-sky-700'
+                    : 'border border-slate-300 bg-white text-slate-700 hover:bg-slate-100 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-200'
+                }`}
+              >
+                {prefs.backgroundSyncEnabled !== false
+                  ? tr('Vigília Ativa', 'Watch Active')
+                  : tr('Vigília Pausada', 'Watch Paused')}
+              </button>
+            </div>
+
+            {/* Indicadores de Status Nativo / Web */}
+            <div className="grid grid-cols-1 gap-2 sm:grid-cols-3">
+              <div className="flex items-center justify-between gap-2 rounded-lg border border-slate-200 bg-white/90 px-3 py-2 text-xs dark:border-slate-800 dark:bg-slate-900/80">
+                <span className="font-medium text-slate-700 dark:text-slate-300">
+                  {tr('Permissão Notificações', 'Notification Permission')}
+                </span>
+                <span
+                  className={`rounded-full px-2 py-0.5 text-[11px] font-bold ${
+                    bgStatus.notificationsGranted || permissionState === 'granted'
+                      ? 'bg-emerald-100 text-emerald-800 dark:bg-emerald-950/70 dark:text-emerald-300'
+                      : 'bg-amber-100 text-amber-800 dark:bg-amber-950/70 dark:text-amber-300'
+                  }`}
+                >
+                  {bgStatus.notificationsGranted || permissionState === 'granted'
+                    ? tr('OK', 'OK')
+                    : tr('Pendente', 'Pending')}
+                </span>
+              </div>
+
+              <div className="flex items-center justify-between gap-2 rounded-lg border border-slate-200 bg-white/90 px-3 py-2 text-xs dark:border-slate-800 dark:bg-slate-900/80">
+                <span className="font-medium text-slate-700 dark:text-slate-300">
+                  {tr('Alarmes Exatos', 'Exact Alarms')}
+                </span>
+                <span
+                  className={`rounded-full px-2 py-0.5 text-[11px] font-bold ${
+                    !bgStatus.supported
+                      ? 'bg-slate-200 text-slate-600 dark:bg-slate-800 dark:text-slate-400'
+                      : bgStatus.exactAlarmAllowed
+                        ? 'bg-emerald-100 text-emerald-800 dark:bg-emerald-950/70 dark:text-emerald-300'
+                        : 'bg-amber-100 text-amber-800 dark:bg-amber-950/70 dark:text-amber-300'
+                  }`}
+                >
+                  {!bgStatus.supported
+                    ? tr('Web/PWA', 'Web/PWA')
+                    : bgStatus.exactAlarmAllowed
+                      ? tr('Permitido', 'Allowed')
+                      : tr('Opcional', 'Optional')}
+                </span>
+              </div>
+
+              <div className="flex items-center justify-between gap-2 rounded-lg border border-slate-200 bg-white/90 px-3 py-2 text-xs dark:border-slate-800 dark:bg-slate-900/80">
+                <span className="font-medium text-slate-700 dark:text-slate-300">
+                  {tr('Isenção de Bateria', 'Battery Exemption')}
+                </span>
+                <span
+                  className={`rounded-full px-2 py-0.5 text-[11px] font-bold ${
+                    !bgStatus.supported
+                      ? 'bg-slate-200 text-slate-600 dark:bg-slate-800 dark:text-slate-400'
+                      : bgStatus.ignoringBatteryOptimizations
+                        ? 'bg-emerald-100 text-emerald-800 dark:bg-emerald-950/70 dark:text-emerald-300'
+                        : 'bg-amber-100 text-amber-800 dark:bg-amber-950/70 dark:text-amber-300'
+                  }`}
+                >
+                  {!bgStatus.supported
+                    ? tr('Web/PWA', 'Web/PWA')
+                    : bgStatus.ignoringBatteryOptimizations
+                      ? tr('Isento', 'Exempt')
+                      : tr('Otimizado', 'Optimized')}
+                </span>
+              </div>
+            </div>
+
+            {/* Ações Guiadas */}
+            <div className="flex flex-wrap gap-2">
+              <button
+                type="button"
+                data-testid="bg-alerts-request-permission-btn"
+                onClick={handleAuthorizeDeviceNotifications}
+                className="inline-flex min-h-[44px] items-center justify-center gap-1.5 rounded-xl bg-sky-600 px-3.5 py-2 text-xs font-bold text-white shadow-sm transition hover:bg-sky-700"
+              >
+                <ShieldCheck className="h-4 w-4" aria-hidden="true" />
+                {tr('Permitir Notificações', 'Allow Notifications')}
+              </button>
+
+              <button
+                type="button"
+                data-testid="bg-alerts-exact-alarm-btn"
+                onClick={handleOpenExactAlarmSettings}
+                className="inline-flex min-h-[44px] items-center justify-center gap-1.5 rounded-xl border border-slate-300 bg-white px-3.5 py-2 text-xs font-bold text-slate-800 shadow-sm transition hover:bg-slate-50 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-100 dark:hover:bg-slate-800"
+              >
+                <AlarmClock className="h-4 w-4 text-sky-600 dark:text-sky-400" aria-hidden="true" />
+                {tr('Configurar Alarmes Exatos', 'Exact Alarm Settings')}
+              </button>
+
+              <button
+                type="button"
+                data-testid="bg-alerts-battery-exemption-btn"
+                onClick={handleRequestBatteryExemption}
+                className="inline-flex min-h-[44px] items-center justify-center gap-1.5 rounded-xl border border-slate-300 bg-white px-3.5 py-2 text-xs font-bold text-slate-800 shadow-sm transition hover:bg-slate-50 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-100 dark:hover:bg-slate-800"
+              >
+                <BatteryCharging
+                  className="h-4 w-4 text-emerald-600 dark:text-emerald-400"
+                  aria-hidden="true"
+                />
+                {tr('Isentar Otimização de Bateria', 'Disable Battery Optimization')}
+              </button>
+            </div>
+
+            {!bgStatus.supported && (
+              <p className="rounded-lg border border-slate-200 bg-white/75 px-3 py-2 text-[11px] text-slate-600 dark:border-slate-800 dark:bg-slate-900/60 dark:text-slate-300">
+                <strong>{tr('Modo Navegador (Web/PWA):', 'Browser Mode (Web/PWA):')}</strong>{' '}
+                {tr(
+                  'Sem servidor backend pago, navegadores desktop/mobile avaliam alertas apenas enquanto o aplicativo permanece aberto. Instale o APK Android nativo para monitoramento contínuo via AlarmManager e WorkManager com o app fechado.',
+                  'With our 100% backend-less architecture, desktop/mobile browsers evaluate alerts while the app tab stays open. Install the native Android APK for continuous AlarmManager + WorkManager monitoring while closed.',
+                )}
+              </p>
+            )}
           </div>
 
           {/* Janela Horária Global */}
@@ -1383,6 +1803,20 @@ export function SettingsTab({
                     placeholder: 'Ex.: 1.8',
                   },
                   {
+                    key: 'minTideMslM',
+                    label: `${tr('Maré MSL Mín', 'Min MSL Tide')} (${getWaveUnitLabel(units.wave)})`,
+                    testId: 'rule-min-tide-input',
+                    step: '0.1',
+                    placeholder: units.wave === 'ft' ? 'Ex.: -1.0' : 'Ex.: -0.3',
+                  },
+                  {
+                    key: 'maxTideMslM',
+                    label: `${tr('Maré MSL Máx', 'Max MSL Tide')} (${getWaveUnitLabel(units.wave)})`,
+                    testId: 'rule-max-tide-input',
+                    step: '0.1',
+                    placeholder: units.wave === 'ft' ? 'Ex.: 3.5' : 'Ex.: 1.1',
+                  },
+                  {
                     key: 'maxKpIndex',
                     label: 'Kp Máx (0–9)',
                     testId: 'rule-max-kp',
@@ -1402,6 +1836,11 @@ export function SettingsTab({
                 }>
               ).map((field) => {
                 const isChecked = enabledRuleFields[field.key];
+                const allowsNegative =
+                  field.key === 'minTempC' ||
+                  field.key === 'maxTempC' ||
+                  field.key === 'minTideMslM' ||
+                  field.key === 'maxTideMslM';
                 return (
                   <div
                     key={field.key}
@@ -1430,7 +1869,7 @@ export function SettingsTab({
                       step={Number(field.step)}
                       min={field.min !== undefined ? Number(field.min) : undefined}
                       max={field.max !== undefined ? Number(field.max) : undefined}
-                      allowNegative={field.key === 'minTempC' || field.key === 'maxTempC'}
+                      allowNegative={allowsNegative}
                       allowEmpty={true}
                       data-testid={field.testId}
                       placeholder={field.placeholder}
@@ -1447,6 +1886,97 @@ export function SettingsTab({
                   </div>
                 );
               })}
+            </div>
+
+            {/* Aviso Obrigatório DHN / Marinha do Brasil para Alertas de Maré MSL */}
+            <div
+              data-testid="tide-alerts-dhn-disclaimer"
+              className="mt-3 flex items-start justify-between gap-2 rounded-xl border border-amber-300/80 bg-amber-50/70 px-3.5 py-2.5 text-xs text-amber-950 dark:border-amber-700/60 dark:bg-amber-950/35 dark:text-amber-100"
+            >
+              <div className="flex items-start gap-2">
+                <Waves className="mt-0.5 h-4 w-4 shrink-0 text-amber-600 dark:text-amber-400" aria-hidden="true" />
+                <p>
+                  <strong>{tr('Maré Estimada (MSL ~8 km):', 'Estimated Tide (MSL ~8 km):')}</strong>{' '}
+                  {tr(DHN_TIDE_DISCLAIMER_PT, DHN_TIDE_DISCLAIMER_EN)}{' '}
+                  {tr(
+                    'Coordenadas continentais ignoram limites de maré com segurança.',
+                    'Continental coordinates safely ignore tide thresholds.',
+                  )}
+                </p>
+              </div>
+              <HelpPopover topic="tide_alerts_dhn" align="right" />
+            </div>
+          </div>
+
+          {/* Recorrência da Notificação */}
+          <div className="rounded-xl border border-slate-200 bg-slate-50/60 p-3.5 dark:border-slate-800 dark:bg-slate-950/50">
+            <div className="mb-2 flex items-center gap-2">
+              <Repeat className="h-4 w-4 text-sky-600 dark:text-sky-400" aria-hidden="true" />
+              <span className="text-xs font-bold text-slate-800 dark:text-slate-200">
+                {tr('Recorrência da Notificação', 'Notification Recurrence')}
+              </span>
+            </div>
+            <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
+              <label className="block text-xs font-semibold text-slate-700 dark:text-slate-300">
+                {tr('Modo de Repetição', 'Repeat Mode')}
+                <select
+                  data-testid="rule-recurrence-mode"
+                  value={ruleDraft.recurrenceMode}
+                  onChange={(e) =>
+                    setRuleDraft((d) => ({
+                      ...d,
+                      recurrenceMode: e.target.value as NotificationRecurrenceConfig['mode'],
+                    }))
+                  }
+                  className={`mt-1 ${inputBaseClass}`}
+                >
+                  <option value="once">{tr('1x na janela', '1x per window')}</option>
+                  <option value="times_per_window">
+                    {tr('N vezes na janela', 'N times per window')}
+                  </option>
+                  <option value="interval_hours">
+                    {tr('A cada N horas', 'Every N hours')}
+                  </option>
+                </select>
+              </label>
+
+              {ruleDraft.recurrenceMode !== 'once' && (
+                <label className="block text-xs font-semibold text-slate-700 dark:text-slate-300">
+                  {tr('Máximo de disparos na janela (1–24)', 'Max triggers per window (1–24)')}
+                  <NumericInput
+                    data-testid="rule-recurrence-max-triggers"
+                    min={1}
+                    max={24}
+                    step={1}
+                    allowEmpty={false}
+                    fallbackValue={2}
+                    value={ruleDraft.recurrenceMaxTriggers}
+                    onValueChange={(val) =>
+                      setRuleDraft((d) => ({ ...d, recurrenceMaxTriggers: val }))
+                    }
+                    className={`mt-1 ${inputBaseClass}`}
+                  />
+                </label>
+              )}
+
+              {ruleDraft.recurrenceMode === 'interval_hours' && (
+                <label className="block text-xs font-semibold text-slate-700 dark:text-slate-300">
+                  {tr('Intervalo entre alertas (horas)', 'Interval between alerts (hours)')}
+                  <NumericInput
+                    data-testid="rule-recurrence-interval-hours"
+                    min={1}
+                    max={24}
+                    step={1}
+                    allowEmpty={false}
+                    fallbackValue={3}
+                    value={ruleDraft.recurrenceIntervalHours}
+                    onValueChange={(val) =>
+                      setRuleDraft((d) => ({ ...d, recurrenceIntervalHours: val }))
+                    }
+                    className={`mt-1 ${inputBaseClass}`}
+                  />
+                </label>
+              )}
             </div>
           </div>
 
@@ -1469,7 +1999,7 @@ export function SettingsTab({
               <input
                 type="text"
                 data-testid="rule-custom-message"
-                placeholder="Variáveis opcionais: {hour}, {window}, {temp}, {wind}, {gust}, {precipProb}, {wave}, {kp}"
+                placeholder="Variáveis opcionais: {hour}, {window}, {temp}, {wind}, {gust}, {precipProb}, {wave}, {tide}, {kp}"
                 value={ruleDraft.customMessage}
                 onChange={(e) => setRuleDraft((d) => ({ ...d, customMessage: e.target.value }))}
                 className={`mt-1 ${inputBaseClass}`}
@@ -1480,7 +2010,8 @@ export function SettingsTab({
           <div className="flex flex-wrap items-center justify-between gap-3 pt-1">
             <p className="text-[11px] text-slate-500 dark:text-slate-400">
               Dica: Você pode usar tags dinâmicas como <code>{'{hour}'}</code>,{' '}
-              <code>{'{wind}'}</code>, <code>{'{wave}'}</code> e <code>{'{details}'}</code>.
+              <code>{'{wind}'}</code>, <code>{'{wave}'}</code>, <code>{'{tide}'}</code> e{' '}
+              <code>{'{details}'}</code>.
             </p>
 
             <div className="flex flex-wrap items-center gap-2">
@@ -1574,6 +2105,17 @@ export function SettingsTab({
                           ? ` • ${tr('Avisar das', 'Notify from')} ${rule.timeWindow.notifyFromHHMM}`
                           : ''}
                       </span>
+                      <span className="rounded-md border border-indigo-200 bg-indigo-50 px-2 py-0.5 text-[11px] font-medium text-indigo-800 dark:border-indigo-800/70 dark:bg-indigo-950/50 dark:text-indigo-200">
+                        {formatRuleRecurrenceLabel(rule.recurrence, tr)}
+                      </span>
+                      {((rule.conditions.minTideMslM !== undefined &&
+                        rule.conditions.minTideMslM !== null) ||
+                        (rule.conditions.maxTideMslM !== undefined &&
+                          rule.conditions.maxTideMslM !== null)) && (
+                        <span className="rounded-md border border-amber-300 bg-amber-50 px-2 py-0.5 text-[10px] font-semibold text-amber-900 dark:border-amber-700/70 dark:bg-amber-950/50 dark:text-amber-200">
+                          {tr('MSL ~8 km ≠ DHN', 'MSL ~8 km ≠ DHN')}
+                        </span>
+                      )}
                     </div>
 
                     {chips.length > 0 && (

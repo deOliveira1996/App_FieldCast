@@ -1,0 +1,71 @@
+{
+  "name": "fieldcast-desktop",
+  "version": "4.3.0",
+  "private": true,
+  "description": "FieldCast Offline-First Desktop Wrapper (Windows .exe & macOS .dmg) built with open-source Electron",
+  "main": "main.cjs",
+  "scripts": {
+    "start": "electron .",
+    "pack:win": "electron-builder --win portable nsis",
+    "pack:mac": "electron-builder --mac dmg",
+    "pack:linux": "electron-builder --linux AppImage"
+  },
+  "devDependencies": {
+    "electron": "^33.2.1",
+    "electron-builder": "^25.1.8"
+  },
+  "build": {
+    "appId": "org.fieldcast.desktop",
+    "productName": "FieldCast",
+    "directories": {
+      "output": "release"
+    },
+    "files": [
+      "main.cjs",
+      "preload.cjs",
+      "dist/**/*"
+    ],
+    "win": {
+      "target": [
+        {
+          "target": "portable",
+          "arch": [
+            "x64"
+          ]
+        },
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        }
+      ],
+      "icon": "dist/icons/512x512.png"
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true
+    },
+    "mac": {
+      "category": "public.app-category.weather",
+      "target": [
+        {
+          "target": "dmg",
+          "arch": [
+            "arm64",
+            "x64"
+          ]
+        }
+      ],
+      "icon": "dist/icons/512x512.png"
+    },
+    "linux": {
+      "category": "Utility",
+      "target": [
+        "AppImage"
+      ],
+      "icon": "dist/icons/512x512.png"
+    }
+  }
+}
