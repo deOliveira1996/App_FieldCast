@@ -7,6 +7,7 @@ export const TRANSLATIONS: Record<AppLocale, Record<string, string>> = {
     'nav.comparison': 'Modelos',
     'nav.navigation': 'Navegação',
     'nav.aeronautics': 'Aeronáutica',
+    'nav.planner': 'Rotas 4D',
     'nav.map': 'Mapa & Radar',
     'nav.field': 'Dados & Campo',
     'nav.settings': 'Ajustes',
@@ -147,6 +148,20 @@ export const TRANSLATIONS: Record<AppLocale, Record<string, string>> = {
     'help.close': 'Fechar ajuda',
     'help.fieldTip': 'Dica de Campo',
     'help.glossaryTitle': 'Guia Rápido & Glossário',
+
+    // Planejador de Rotas 4D, Ground-Truth & Alertas V4.3
+    'planner.title': 'Planejamento de Rotas 4D',
+    'planner.importRoute': 'Importar Rota (GPX/KML/KMZ/GeoJSON/CSV)',
+    'planner.navigationMode': 'Navegação Costeira / Náutica',
+    'planner.aerialMode': 'Aéreo / Drone (VANT)',
+    'planner.calculate4d': 'Calcular Previsão 4D',
+    'planner.exportBriefing': 'Exportar Briefing 4D',
+    'groundTruth.title': 'Validação em Campo (Ground-Truth)',
+    'groundTruth.logNow': 'Registrar Condição Atual',
+    'groundTruth.calibratedModel': 'Consenso Calibrado (Bayesiano)',
+    'alerts.tideMsl': 'Alerta de Maré Estimada (MSL ~8 km)',
+    'alerts.recurrence': 'Recorrência de Disparo',
+    'alerts.backgroundAndroid': 'Monitoramento em Segundo Plano (Android)',
   },
   en: {
     // Main navigation
@@ -154,6 +169,7 @@ export const TRANSLATIONS: Record<AppLocale, Record<string, string>> = {
     'nav.comparison': 'Models',
     'nav.navigation': 'Marine',
     'nav.aeronautics': 'Aero & Drone',
+    'nav.planner': '4D Routes',
     'nav.map': 'Map & Radar',
     'nav.field': 'Field & Data',
     'nav.settings': 'Settings',
@@ -294,6 +310,20 @@ export const TRANSLATIONS: Record<AppLocale, Record<string, string>> = {
     'help.close': 'Close help',
     'help.fieldTip': 'Field Tip',
     'help.glossaryTitle': 'Quick Guide & Glossary',
+
+    // 4D Route Planner, Ground-Truth & V4.3 Alerts
+    'planner.title': '4D Route Planning',
+    'planner.importRoute': 'Import Route (GPX/KML/KMZ/GeoJSON/CSV)',
+    'planner.navigationMode': 'Coastal / Marine Navigation',
+    'planner.aerialMode': 'Aerial / UAV Drone',
+    'planner.calculate4d': 'Compute 4D Forecast',
+    'planner.exportBriefing': 'Export 4D Briefing',
+    'groundTruth.title': 'Field Ground-Truth Validation',
+    'groundTruth.logNow': 'Log Current Conditions',
+    'groundTruth.calibratedModel': 'Calibrated Consensus (Bayesian)',
+    'alerts.tideMsl': 'Estimated Tide Alert (MSL ~8 km)',
+    'alerts.recurrence': 'Trigger Recurrence',
+    'alerts.backgroundAndroid': 'Background Monitoring (Android)',
   },
 };
 

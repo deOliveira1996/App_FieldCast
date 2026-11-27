@@ -1,4 +1,11 @@
-import type { SafeWindowStatus, ScalarStat, WeatherModelId } from './weather';
+import type { ActiveCoordinates } from './field';
+import type { ErrorLogRecord, ToastMessage } from './health';
+import type {
+  NormalizedForecast,
+  SafeWindowStatus,
+  ScalarStat,
+  WeatherModelId,
+} from './weather';
 
 /**
  * Identificadores canônicos das abas na arquitetura modular V4:
@@ -6,6 +13,7 @@ import type { SafeWindowStatus, ScalarStat, WeatherModelId } from './weather';
  * - `comparison`: Comparação Multi-Modelo & Gráficos Sob Demanda (estilo Windguru/Windy)
  * - `navigation`: Navegação Costeira, Marés MSL, Ondas, Correntes & Bússola
  * - `aeronautics`: Aeronáutica, Drone, Wind Shear, CAPE & NOAA Kp
+ * - `planner`: Planejamento de Rotas 4D (Náutico & Aéreo/VANT)
  * - `map`: Mapa Interativo, Pin Lock, Tela Cheia, Radar & Cache Offline
  * - `field`: Dados, Rotas GPS, Waypoints, Séries ERA5 & Relatórios Técnicos (Sub-vistas)
  * - `settings`: Central de Configurações, Notificações, Janelas Horárias & Templates
@@ -15,9 +23,18 @@ export type V4AppTabId =
   | 'comparison'
   | 'navigation'
   | 'aeronautics'
+  | 'planner'
   | 'map'
   | 'field'
   | 'settings';
+
+export interface RoutePlanningTabProps {
+  activeLocation: ActiveCoordinates;
+  forecast?: NormalizedForecast | null;
+  isDark?: boolean;
+  onToast?: (toast: Omit<ToastMessage, 'id'>) => void;
+  onErrorLog?: (record: ErrorLogRecord) => void | Promise<void>;
+}
 
 /**
  * Sub-vistas interativas dentro de `Dados & Relatórios` (`FieldDataTab`),
@@ -137,6 +154,14 @@ export interface CustomNotificationConditions {
   maxCloudCoverPct?: number | null;
   maxWaveM?: number | null;
   maxKpIndex?: number | null;
+  minTideMslM?: number | null;
+  maxTideMslM?: number | null;
+}
+
+export interface NotificationRecurrenceConfig {
+  mode: 'once' | 'times_per_window' | 'interval_hours';
+  maxTriggersPerWindow: number;
+  intervalHours?: number;
 }
 
 export interface CustomNotificationRule {
@@ -145,6 +170,7 @@ export interface CustomNotificationRule {
   enabled: boolean;
   conditions: CustomNotificationConditions;
   timeWindow: NotificationTimeWindow;
+  recurrence?: NotificationRecurrenceConfig;
   customTitle: string;
   customMessage: string;
   createdAtIso: string;
@@ -162,9 +188,17 @@ export interface NotificationRuleTemplate {
   suggestedMessage: string;
 }
 
+export interface ExtremeAlertsRecurrenceConfig {
+  enabled: boolean;
+  minPerDay: number;
+  urgentIntervalMinutes: number;
+}
+
 export interface UserNotificationPreferences {
   masterEnabled: boolean;
   extremeEventsAutoEnabled: boolean;
+  extremeAlertsRecurrence?: ExtremeAlertsRecurrenceConfig;
+  backgroundSyncEnabled?: boolean;
   globalActiveWindow: {
     enabled: boolean;
     startHHMM: string;
@@ -189,6 +223,9 @@ export interface DescriptiveMetricStats {
   iqr: number | null;
   linearTrendPerDay: number | null;
   anomalyZScoreMax: number | null;
+  mad?: number | null;
+  robustZScoreMax?: number | null;
+  theilSenTrendPerDay?: number | null;
 }
 
 export interface AgroClimaticWaterBalance {
@@ -241,4 +278,76 @@ export interface TechnicalReportDocument {
   resultsInterpretation: string;
   parcimonicDiscussion: string;
   limitationsAndDisclaimers: string[];
+}
+
+export type GroundTruthRainClass = 'none' | 'light' | 'moderate' | 'heavy';
+
+export type GroundTruthWindFeel = 'calm' | 'light' | 'moderate' | 'strong' | 'gale';
+
+export interface GroundTruthModelPrediction {
+  windSpeed10mKmh: number | null;
+  windGusts10mKmh?: number | null;
+  temperature2mC: number | null;
+  precipitationMm: number | null;
+  precipitationProbPct?: number | null;
+}
+
+export interface GroundTruthObservation {
+  id: string;
+  timestampUtcIso: string;
+  timestampUnix: number;
+  latitude: number;
+  longitude: number;
+  locationKey: string;
+  regionKey: string;
+  locationName: string;
+  rainClass: GroundTruthRainClass;
+  windFeel: GroundTruthWindFeel;
+  measuredWindKmh?: number | null;
+  measuredTempC?: number | null;
+  measuredWaveM?: number | null;
+  note?: string;
+  photoDataUrl?: string;
+  photoMimeType?: 'image/webp' | 'image/jpeg';
+  photoSizeKb?: number;
+  modelPredictions: Partial<Record<WeatherModelId, GroundTruthModelPrediction>>;
+  ensembleWindKmh?: number | null;
+  ensembleTempC?: number | null;
+  ensemblePrecipMm?: number | null;
+  ensemblePrecipProbPct?: number | null;
+  sourceDeviceLabel?: string;
+}
+
+export interface ModelSkillMetrics {
+  model: WeatherModelId;
+  sampleCount: number;
+  windMaeKmh: number | null;
+  windBiasKmh: number | null;
+  tempMaeC: number | null;
+  tempBiasC: number | null;
+  rainBrierScore: number | null;
+  compositeSkillScore: number;
+  weight: number;
+}
+
+export interface RegionalCalibrationResult {
+  latitude: number;
+  longitude: number;
+  radiusKm: number;
+  sampleCount: number;
+  minRequiredSamples: number;
+  calibrationEligible: boolean;
+  shrinkageFactor: number;
+  weightsByModel: Record<WeatherModelId, number>;
+  metricsByModel: Record<WeatherModelId, ModelSkillMetrics>;
+  bestModel: WeatherModelId | null;
+  computedAtIso: string;
+}
+
+export interface GroundTruthExportPackage {
+  schemaVersion: 'fieldcast-gt-v1';
+  exportedAtIso: string;
+  sourceLabel?: string;
+  observationCount: number;
+  observations: GroundTruthObservation[];
 }

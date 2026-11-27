@@ -18,6 +18,7 @@ export interface ScalarStat {
   min: number | null;
   max: number | null;
   stdDev: number | null;
+  sampleStdDev?: number | null;
   sampleCount: number;
   valuesByModel?: Partial<Record<WeatherModelId, number | null>>;
 }

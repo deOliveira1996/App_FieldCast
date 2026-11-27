@@ -11,6 +11,7 @@ import type {
   Waypoint,
 } from '../types/field';
 import type { ErrorLogRecord } from '../types/health';
+import type { GroundTruthObservation } from '../types/v4';
 import type { NormalizedForecast } from '../types/weather';
 
 export const PRIMARY_LOCATION_STORAGE_KEY = 'fieldcast_primary_location_v1';
@@ -66,6 +67,7 @@ export class FieldCastDatabase extends Dexie {
   errorLogs!: Table<ErrorLogRecord, number>;
   historicalRecurrenceRules!: Table<HistoricalRecurrenceRule, string>;
   historicalLogs!: Table<HistoricalLogEntry, string>;
+  groundTruthObservations!: Table<GroundTruthObservation, string>;
 
   constructor() {
     super('FieldCastDB');
@@ -80,6 +82,9 @@ export class FieldCastDatabase extends Dexie {
     this.version(2).stores({
       historicalRecurrenceRules: 'id, enabled, nextDueIso',
       historicalLogs: 'id, ruleId, createdAtIso',
+    });
+    this.version(3).stores({
+      groundTruthObservations: 'id, timestampUtcIso, locationKey, regionKey',
     });
   }
 }
@@ -98,6 +103,7 @@ const memoryStore = {
   offlineTiles: new Map<string, OfflineTileRecord>(),
   historicalRecurrenceRules: new Map<string, HistoricalRecurrenceRule>(),
   historicalLogs: new Map<string, HistoricalLogEntry>(),
+  groundTruthObservations: new Map<string, GroundTruthObservation>(),
   primaryLocation: null as PrimaryLocationPreference | null,
   compassPreference: { enabled: true, disabledReason: null } as CompassPreference,
   errorLogs: [] as ErrorLogRecord[],
@@ -119,6 +125,7 @@ export async function resetDatabaseForTests(): Promise<void> {
   memoryStore.offlineTiles.clear();
   memoryStore.historicalRecurrenceRules.clear();
   memoryStore.historicalLogs.clear();
+  memoryStore.groundTruthObservations.clear();
   memoryStore.primaryLocation = null;
   memoryStore.compassPreference = { enabled: true, disabledReason: null };
   memoryStore.errorLogs = [];
@@ -144,6 +151,7 @@ export async function resetDatabaseForTests(): Promise<void> {
         db.errorLogs.clear(),
         db.historicalRecurrenceRules.clear(),
         db.historicalLogs.clear(),
+        db.groundTruthObservations.clear(),
       ]);
     } catch {
       // Ignora caso o banco ainda não esteja aberto no ambiente
@@ -760,4 +768,91 @@ export async function deleteHistoricalLogEntry(id: string): Promise<void> {
       // Ignora
     }
   }
+}
+
+// ============================================================================
+// CRUD: GroundTruthObservations (Dexie v3 + memoryStore + P2P Merge)
+// ============================================================================
+
+export async function saveGroundTruthObservation(
+  observation: GroundTruthObservation,
+): Promise<void> {
+  const copy: GroundTruthObservation = {
+    ...observation,
+    modelPredictions: { ...observation.modelPredictions },
+  };
+  memoryStore.groundTruthObservations.set(copy.id, copy);
+  if (hasNativeIndexedDb()) {
+    try {
+      await db.groundTruthObservations.put(copy);
+    } catch {
+      // Mantém fallback em memória
+    }
+  }
+}
+
+export async function getGroundTruthObservations(): Promise<GroundTruthObservation[]> {
+  if (hasNativeIndexedDb()) {
+    try {
+      const list = await db.groundTruthObservations.toArray();
+      for (const item of list) {
+        memoryStore.groundTruthObservations.set(item.id, item);
+      }
+    } catch {
+      // Fallback para memória
+    }
+  }
+  return Array.from(memoryStore.groundTruthObservations.values()).sort((a, b) =>
+    b.timestampUtcIso.localeCompare(a.timestampUtcIso),
+  );
+}
+
+export async function deleteGroundTruthObservation(id: string): Promise<void> {
+  memoryStore.groundTruthObservations.delete(id);
+  if (hasNativeIndexedDb()) {
+    try {
+      await db.groundTruthObservations.delete(id);
+    } catch {
+      // Ignora
+    }
+  }
+}
+
+export async function mergeGroundTruthObservations(
+  incoming: readonly GroundTruthObservation[],
+): Promise<{ added: number; skipped: number; total: number }> {
+  const existing = await getGroundTruthObservations();
+  const seenIds = new Set(existing.map((item) => item.id));
+  const toPersist: GroundTruthObservation[] = [];
+  let added = 0;
+  let skipped = 0;
+
+  for (const item of incoming) {
+    if (!item || typeof item.id !== 'string' || !item.id.trim() || seenIds.has(item.id)) {
+      skipped += 1;
+      continue;
+    }
+    const copy: GroundTruthObservation = {
+      ...item,
+      modelPredictions: { ...item.modelPredictions },
+    };
+    seenIds.add(copy.id);
+    memoryStore.groundTruthObservations.set(copy.id, copy);
+    toPersist.push(copy);
+    added += 1;
+  }
+
+  if (toPersist.length > 0 && hasNativeIndexedDb()) {
+    try {
+      await db.groundTruthObservations.bulkPut(toPersist);
+    } catch {
+      // Fallback já atualizado em memória
+    }
+  }
+
+  return {
+    added,
+    skipped,
+    total: memoryStore.groundTruthObservations.size,
+  };
 }

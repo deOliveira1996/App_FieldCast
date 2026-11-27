@@ -31,16 +31,36 @@ export function filterValidNumbers(values: readonly (number | null | undefined)[
   return result;
 }
 
+export interface ScalarStatOptions {
+  /** Quando `true`, aplica correção de Bessel (`n - 1`) em `stdDev`. Padrão: `false`. */
+  sampleBessel?: boolean;
+  /** Pesos opcionais alinhados ao vetor `values` para média ponderada normalizada. */
+  weights?: readonly (number | null | undefined)[];
+}
+
 /**
- * Calcula estatísticas escalares (média, mínimo, máximo e desvio padrão populacional)
+ * Calcula estatísticas escalares (média, mínimo, máximo, desvio padrão populacional e amostral Bessel)
  * ignorando valores `null` ou `undefined`.
  */
 export function computeScalarStat(
   values: readonly (number | null | undefined)[],
   valuesByModel?: Partial<Record<WeatherModelId, number | null>>,
+  options?: ScalarStatOptions,
 ): ScalarStat {
-  const valid = filterValidNumbers(values);
-  const n = valid.length;
+  const validEntries: Array<{ value: number; weight: number | null }> = [];
+  const rawWeights = options?.weights;
+
+  for (let i = 0; i < values.length; i++) {
+    const val = values[i];
+    if (typeof val === 'number' && Number.isFinite(val)) {
+      const rawW = rawWeights?.[i];
+      const weight =
+        typeof rawW === 'number' && Number.isFinite(rawW) && rawW > 0 ? rawW : null;
+      validEntries.push({ value: val, weight });
+    }
+  }
+
+  const n = validEntries.length;
 
   if (n === 0) {
     return {
@@ -48,48 +68,81 @@ export function computeScalarStat(
       min: null,
       max: null,
       stdDev: null,
+      sampleStdDev: null,
       sampleCount: 0,
       ...(valuesByModel ? { valuesByModel } : {}),
     };
   }
 
   let sum = 0;
-  let min = valid[0]!;
-  let max = valid[0]!;
+  let weightedSum = 0;
+  let weightTotal = 0;
+  let min = validEntries[0]!.value;
+  let max = validEntries[0]!.value;
 
-  for (const v of valid) {
+  for (const entry of validEntries) {
+    const v = entry.value;
     sum += v;
     if (v < min) min = v;
     if (v > max) max = v;
+    if (entry.weight !== null) {
+      weightedSum += v * entry.weight;
+      weightTotal += entry.weight;
+    }
   }
 
-  const mean = sum / n;
+  const mean = rawWeights && weightTotal > 0 ? weightedSum / weightTotal : sum / n;
 
   let varianceSum = 0;
-  for (const v of valid) {
-    const diff = v - mean;
+  for (const entry of validEntries) {
+    const diff = entry.value - mean;
     varianceSum += diff * diff;
   }
-  const stdDev = Math.sqrt(varianceSum / n);
+  const populationStdDev = Math.sqrt(varianceSum / n);
+  const sampleStdDev = n > 1 ? Math.sqrt(varianceSum / (n - 1)) : 0;
+  const stdDev = options?.sampleBessel === true ? sampleStdDev : populationStdDev;
 
   return {
     mean,
     min,
     max,
     stdDev,
+    sampleStdDev,
     sampleCount: n,
     ...(valuesByModel ? { valuesByModel } : {}),
   };
 }
 
 /**
- * Calcula `ScalarStat` diretamente a partir de um mapa de valores por modelo.
+ * Calcula `ScalarStat` diretamente a partir de um mapa de valores por modelo,
+ * aplicando sempre a correção amostral de Bessel (`n - 1`) para dispersão inter-modelos
+ * e suportando pesos normalizados opcionais por modelo.
  */
 export function computeModelScalarStat(
   valuesByModel: Partial<Record<WeatherModelId, number | null>>,
+  weightsByModel?: Partial<Record<WeatherModelId, number>>,
 ): ScalarStat {
   const values = WEATHER_MODELS.map((m) => valuesByModel[m] ?? null);
-  return computeScalarStat(values, valuesByModel);
+  const weights = weightsByModel
+    ? WEATHER_MODELS.map((m) => {
+        const w = weightsByModel[m];
+        return typeof w === 'number' && Number.isFinite(w) && w > 0 ? w : 0;
+      })
+    : undefined;
+  return computeScalarStat(values, valuesByModel, {
+    sampleBessel: true,
+    ...(weights ? { weights } : {}),
+  });
+}
+
+/**
+ * Alias explícito para cálculo ponderado multi-modelo com correção amostral de Bessel (`n - 1`).
+ */
+export function computeWeightedModelScalarStat(
+  valuesByModel: Partial<Record<WeatherModelId, number | null>>,
+  weightsByModel?: Partial<Record<WeatherModelId, number>>,
+): ScalarStat {
+  return computeModelScalarStat(valuesByModel, weightsByModel);
 }
 
 /**

@@ -69,6 +69,12 @@ const TOPIC_TO_CATEGORY: Record<HelpTopicId, GlossaryEntry['category']> = {
   report_zscore_ols: 'modelos',
   report_era5_hybrid: 'campo',
   report_16d_projection: 'modelos',
+  route_planning_4d: 'campo',
+  goes_satellite: 'modelos',
+  ground_truth_validation: 'confianca',
+  bessel_robust_stats: 'modelos',
+  tide_alerts_dhn: 'marinho',
+  background_alerts_android: 'alertas',
 };
 
 const TOPIC_BADGES: Record<HelpTopicId, string> = {
@@ -95,6 +101,12 @@ const TOPIC_BADGES: Record<HelpTopicId, string> = {
   report_zscore_ols: '|Z| máx & Regressão OLS',
   report_era5_hybrid: 'Reanálise ERA5 + Híbrido',
   report_16d_projection: 'Horizonte Estendido 16 Dias',
+  route_planning_4d: 'Rota 4D (GPX/KML/KMZ + ETA)',
+  goes_satellite: 'Satélite IR / Vapor d’Água',
+  ground_truth_validation: 'Campo + Calibração Bayesiana',
+  bessel_robust_stats: 'Bessel (n−1) • MAD • Theil-Sen',
+  tide_alerts_dhn: 'Maré MSL ~8 km (≠ DHN)',
+  background_alerts_android: 'Android 2º Plano & Recorrência',
 };
 
 const TOPIC_BADGES_EN: Record<HelpTopicId, string> = {
@@ -121,6 +133,12 @@ const TOPIC_BADGES_EN: Record<HelpTopicId, string> = {
   report_zscore_ols: '|Z| max & OLS Trend',
   report_era5_hybrid: 'ERA5 Reanalysis + Hybrid',
   report_16d_projection: 'Extended 16-Day Horizon',
+  route_planning_4d: '4D Route (GPX/KML/KMZ + ETA)',
+  goes_satellite: 'GOES Satellite IR / Water Vapor',
+  ground_truth_validation: 'Field Truth + Bayesian Skill',
+  bessel_robust_stats: 'Bessel (n−1) • MAD • Theil-Sen',
+  tide_alerts_dhn: 'MSL Tide ~8 km (≠ DHN)',
+  background_alerts_android: 'Android Background & Recurrence',
 };
 
 const FIELD_EXTRA_ENTRIES_PT: GlossaryEntry[] = [

@@ -2,6 +2,8 @@ import { Capacitor, registerPlugin } from '@capacitor/core';
 import type {
   CustomNotificationConditions,
   CustomNotificationRule,
+  ExtremeAlertsRecurrenceConfig,
+  NotificationRecurrenceConfig,
   NotificationRuleTemplate,
   NotificationTimeWindow,
   UserNotificationPreferences,
@@ -16,9 +18,44 @@ import {
 export const NOTIFICATION_PREFS_STORAGE_KEY = 'fieldcast_notification_prefs_v4';
 export const NOTIFICATION_LEDGER_STORAGE_KEY = 'fieldcast_notification_ledger_v4';
 
+export const DHN_TIDE_DISCLAIMER_PT =
+  'Aviso: cota oceânica MSL (~8 km) é estimativa hidrodinâmica e NÃO substitui as tábuas de marés oficiais da DHN / Marinha do Brasil.';
+export const DHN_TIDE_DISCLAIMER_EN =
+  'Notice: estimated MSL sea level (~8 km) is hydrodynamic guidance and does NOT replace official DHN / Brazilian Navy tide tables.';
+
 const LEDGER_RETENTION_MS = 24 * 60 * 60 * 1000;
 
-interface FieldCastNotificationsPluginBridge {
+export interface ScheduledNativeAlertPayload {
+  id: number;
+  tag: string;
+  triggerAtEpochMs: number;
+  title: string;
+  body: string;
+  subText?: string;
+  kind: 'extreme' | 'custom';
+  urgent?: boolean;
+}
+
+export interface NativeBackgroundMonitorConfig {
+  enabled: boolean;
+  latitude: number;
+  longitude: number;
+  locationName: string;
+  timezone: string;
+  extremeEventsAutoEnabled: boolean;
+  extremeMinPerDay: number;
+  urgentIntervalMinutes: number;
+  rulesJson: string;
+}
+
+export interface NativeBackgroundAlertStatus {
+  supported: boolean;
+  notificationsGranted: boolean;
+  exactAlarmAllowed: boolean;
+  ignoringBatteryOptimizations: boolean;
+}
+
+export interface FieldCastNotificationsPluginBridge {
   checkPermissions(): Promise<{ notifications: 'granted' | 'denied' | 'prompt' | string }>;
   requestPermissions(): Promise<{ notifications: 'granted' | 'denied' | 'prompt' | string }>;
   dispatchNotification(options: {
@@ -27,6 +64,16 @@ interface FieldCastNotificationsPluginBridge {
     notificationId?: number;
     subText?: string;
   }): Promise<{ dispatched: boolean; notificationId?: number; reason?: string }>;
+  scheduleBackgroundAlerts?(options: {
+    alerts: ScheduledNativeAlertPayload[];
+  }): Promise<{ scheduled: number }>;
+  cancelAllScheduledAlerts?(): Promise<{ cancelled: boolean }>;
+  syncBackgroundMonitorConfig?(
+    config: NativeBackgroundMonitorConfig,
+  ): Promise<{ synced: boolean }>;
+  getBackgroundAlertStatus?(): Promise<Partial<NativeBackgroundAlertStatus>>;
+  requestBatteryOptimizationExemption?(): Promise<{ requested: boolean }>;
+  openExactAlarmSettings?(): Promise<{ opened: boolean }>;
 }
 
 const FieldCastNotificationsBridge = registerPlugin<FieldCastNotificationsPluginBridge>(
@@ -121,6 +168,12 @@ function clonePreferences(source: UserNotificationPreferences): UserNotification
   return {
     masterEnabled: Boolean(source.masterEnabled),
     extremeEventsAutoEnabled: Boolean(source.extremeEventsAutoEnabled),
+    ...(source.extremeAlertsRecurrence
+      ? { extremeAlertsRecurrence: { ...source.extremeAlertsRecurrence } }
+      : {}),
+    ...(source.backgroundSyncEnabled !== undefined
+      ? { backgroundSyncEnabled: Boolean(source.backgroundSyncEnabled) }
+      : {}),
     globalActiveWindow: {
       enabled: Boolean(source.globalActiveWindow.enabled),
       startHHMM: source.globalActiveWindow.startHHMM,
@@ -130,6 +183,7 @@ function clonePreferences(source: UserNotificationPreferences): UserNotification
       ...r,
       conditions: { ...r.conditions },
       timeWindow: { ...r.timeWindow },
+      ...(r.recurrence ? { recurrence: { ...r.recurrence } } : {}),
     })),
     updatedAtIso: source.updatedAtIso,
   };
@@ -175,6 +229,8 @@ function sanitizeConditions(
   const maxCloudCoverPct = sanitizeOptionalNumber(raw.maxCloudCoverPct);
   const maxWaveM = sanitizeOptionalNumber(raw.maxWaveM);
   const maxKpIndex = sanitizeOptionalNumber(raw.maxKpIndex);
+  const minTideMslM = sanitizeOptionalNumber(raw.minTideMslM);
+  const maxTideMslM = sanitizeOptionalNumber(raw.maxTideMslM);
 
   if (minTempC !== null) out.minTempC = minTempC;
   if (maxTempC !== null) out.maxTempC = maxTempC;
@@ -184,8 +240,57 @@ function sanitizeConditions(
   if (maxCloudCoverPct !== null) out.maxCloudCoverPct = maxCloudCoverPct;
   if (maxWaveM !== null) out.maxWaveM = maxWaveM;
   if (maxKpIndex !== null) out.maxKpIndex = maxKpIndex;
+  if (minTideMslM !== null) out.minTideMslM = minTideMslM;
+  if (maxTideMslM !== null) out.maxTideMslM = maxTideMslM;
 
   return out;
+}
+
+function sanitizeRecurrence(
+  raw: Partial<NotificationRecurrenceConfig> | null | undefined,
+): NotificationRecurrenceConfig | undefined {
+  if (!raw || typeof raw !== 'object') {
+    return undefined;
+  }
+  const mode: NotificationRecurrenceConfig['mode'] =
+    raw.mode === 'times_per_window' || raw.mode === 'interval_hours' || raw.mode === 'once'
+      ? raw.mode
+      : 'once';
+  const rawMax =
+    typeof raw.maxTriggersPerWindow === 'number' && Number.isFinite(raw.maxTriggersPerWindow)
+      ? Math.max(1, Math.min(24, Math.floor(raw.maxTriggersPerWindow)))
+      : 1;
+  const rawInterval =
+    typeof raw.intervalHours === 'number' && Number.isFinite(raw.intervalHours)
+      ? Math.max(1, Math.min(24, Math.floor(raw.intervalHours)))
+      : undefined;
+
+  return {
+    mode,
+    maxTriggersPerWindow: rawMax,
+    ...(rawInterval !== undefined ? { intervalHours: rawInterval } : {}),
+  };
+}
+
+function sanitizeExtremeAlertsRecurrence(
+  raw: Partial<ExtremeAlertsRecurrenceConfig> | null | undefined,
+): ExtremeAlertsRecurrenceConfig | undefined {
+  if (!raw || typeof raw !== 'object') {
+    return undefined;
+  }
+  const minPerDay =
+    typeof raw.minPerDay === 'number' && Number.isFinite(raw.minPerDay)
+      ? Math.max(2, Math.min(12, Math.floor(raw.minPerDay)))
+      : 2;
+  const urgentIntervalMinutes =
+    typeof raw.urgentIntervalMinutes === 'number' && Number.isFinite(raw.urgentIntervalMinutes)
+      ? Math.max(15, Math.min(360, Math.floor(raw.urgentIntervalMinutes)))
+      : 180;
+  return {
+    enabled: raw.enabled !== false,
+    minPerDay,
+    urgentIntervalMinutes,
+  };
 }
 
 function sanitizeRule(raw: Partial<CustomNotificationRule>, index: number): CustomNotificationRule {
@@ -194,6 +299,7 @@ function sanitizeRule(raw: Partial<CustomNotificationRule>, index: number): Cust
     twRaw?.notifyFromHHMM && typeof twRaw.notifyFromHHMM === 'string' && twRaw.notifyFromHHMM.trim()
       ? normalizeHHMM(twRaw.notifyFromHHMM, '07:00')
       : null;
+  const recurrence = sanitizeRecurrence(raw.recurrence);
 
   return {
     id:
@@ -211,6 +317,7 @@ function sanitizeRule(raw: Partial<CustomNotificationRule>, index: number): Cust
       endHHMM: normalizeHHMM(twRaw?.endHHMM, '20:00'),
       notifyFromHHMM: rawNotifyFrom,
     },
+    ...(recurrence ? { recurrence } : {}),
     customTitle: typeof raw.customTitle === 'string' ? raw.customTitle : '',
     customMessage: typeof raw.customMessage === 'string' ? raw.customMessage : '',
     createdAtIso:
@@ -227,6 +334,7 @@ function sanitizeNotificationPreferences(
 ): UserNotificationPreferences {
   const globalRaw = raw?.globalActiveWindow;
   const rawRules: unknown[] = Array.isArray(raw?.rules) ? raw.rules : [];
+  const extremeAlertsRecurrence = sanitizeExtremeAlertsRecurrence(raw?.extremeAlertsRecurrence);
 
   return {
     masterEnabled: Boolean(raw?.masterEnabled ?? DEFAULT_NOTIFICATION_PREFERENCES.masterEnabled),
@@ -234,6 +342,10 @@ function sanitizeNotificationPreferences(
       raw?.extremeEventsAutoEnabled !== undefined
         ? Boolean(raw.extremeEventsAutoEnabled)
         : DEFAULT_NOTIFICATION_PREFERENCES.extremeEventsAutoEnabled,
+    ...(extremeAlertsRecurrence ? { extremeAlertsRecurrence } : {}),
+    ...(raw?.backgroundSyncEnabled !== undefined
+      ? { backgroundSyncEnabled: Boolean(raw.backgroundSyncEnabled) }
+      : {}),
     globalActiveWindow: {
       enabled: Boolean(
         globalRaw?.enabled ?? DEFAULT_NOTIFICATION_PREFERENCES.globalActiveWindow.enabled,
@@ -433,6 +545,7 @@ interface RuleEvaluationMatch {
   hour: EnsembleHour;
   breaches: string[];
   usedMarine: boolean;
+  usedTide: boolean;
   usedKp: boolean;
   meanCloudPct: number | null;
 }
@@ -446,6 +559,7 @@ function evaluateRuleAgainstHour(
   let configuredCount = 0;
   const breaches: string[] = [];
   let usedMarine = false;
+  let usedTide = false;
   let usedKp = false;
 
   const temp = hour.temperature2mC.mean;
@@ -524,6 +638,34 @@ function evaluateRuleAgainstHour(
     }
   }
 
+  // Maré estimada MSL (~8 km): segura em pontos continentais (`tideMsl === null` nunca lança erro)
+  const tideMsl = hour.marine?.seaLevelHeightMsl ?? null;
+  if (
+    cond.minTideMslM !== undefined &&
+    cond.minTideMslM !== null &&
+    Number.isFinite(cond.minTideMslM)
+  ) {
+    configuredCount += 1;
+    if (tideMsl !== null && Number.isFinite(tideMsl) && tideMsl <= cond.minTideMslM) {
+      breaches.push(`Maré MSL ${tideMsl.toFixed(2)} m <= ${cond.minTideMslM} m`);
+      usedMarine = true;
+      usedTide = true;
+    }
+  }
+
+  if (
+    cond.maxTideMslM !== undefined &&
+    cond.maxTideMslM !== null &&
+    Number.isFinite(cond.maxTideMslM)
+  ) {
+    configuredCount += 1;
+    if (tideMsl !== null && Number.isFinite(tideMsl) && tideMsl >= cond.maxTideMslM) {
+      breaches.push(`Maré MSL ${tideMsl.toFixed(2)} m >= ${cond.maxTideMslM} m`);
+      usedMarine = true;
+      usedTide = true;
+    }
+  }
+
   if (
     cond.maxKpIndex !== undefined &&
     cond.maxKpIndex !== null &&
@@ -544,6 +686,7 @@ function evaluateRuleAgainstHour(
     hour,
     breaches,
     usedMarine,
+    usedTide,
     usedKp,
     meanCloudPct,
   };
@@ -598,6 +741,11 @@ function formatCustomRuleAlertText(params: {
       match.hour.marine?.waveHeight !== null && match.hour.marine?.waveHeight !== undefined
         ? match.hour.marine.waveHeight.toFixed(2)
         : '—',
+    tide:
+      match.hour.marine?.seaLevelHeightMsl !== null &&
+      match.hour.marine?.seaLevelHeightMsl !== undefined
+        ? match.hour.marine.seaLevelHeightMsl.toFixed(2)
+        : '—',
     kp:
       kpValue !== undefined && kpValue !== null && Number.isFinite(kpValue)
         ? kpValue.toFixed(1)
@@ -610,9 +758,13 @@ function formatCustomRuleAlertText(params: {
     : `Alerta: ${rule.name} (${hourBadge})`;
 
   const trimmedMessage = rule.customMessage.trim();
-  const message = trimmedMessage
+  let message = trimmedMessage
     ? formatRuleTemplateTokens(trimmedMessage, tokens)
     : `Janela ${windowLabel} às ${hourBadge}: ${detailsText}.`;
+
+  if (match.usedTide && !/\bDHN\b/i.test(message)) {
+    message = `${message} ${DHN_TIDE_DISCLAIMER_PT}`;
+  }
 
   return { title, message };
 }
@@ -745,6 +897,20 @@ export function evaluateForecastNotificationTriggers(params: {
       continue;
     }
 
+    const recurrence = rule.recurrence;
+    const mode = recurrence?.mode ?? 'once';
+    const maxPerWindow =
+      mode === 'once'
+        ? 1
+        : Math.max(1, Math.min(24, Math.floor(recurrence?.maxTriggersPerWindow ?? 1)));
+    const intervalSeconds =
+      mode === 'interval_hours'
+        ? Math.max(1, Math.floor(recurrence?.intervalHours ?? 1)) * 3600
+        : 0;
+
+    let emittedForRule = 0;
+    let lastEmittedHourUnix: number | null = null;
+
     for (const hour of candidateHours) {
       const hourParts = getLocalDateParts(
         new Date(hour.timestampUnix * 1000),
@@ -753,6 +919,14 @@ export function evaluateForecastNotificationTriggers(params: {
       const hourMinuteOfDay = hourParts.hour * 60 + hourParts.minute;
 
       if (!isMinuteWithinTimeWindow(hourMinuteOfDay, rule.timeWindow, currentMinuteOfDay)) {
+        continue;
+      }
+
+      if (
+        mode === 'interval_hours' &&
+        lastEmittedHourUnix !== null &&
+        hour.timestampUnix - lastEmittedHourUnix < intervalSeconds
+      ) {
         continue;
       }
 
@@ -776,6 +950,7 @@ export function evaluateForecastNotificationTriggers(params: {
         sourceParts.push('NOAA SWPC Kp');
       }
 
+      const prevCount = triggers.length;
       tryEmitTrigger({
         key: `custom:${forecast.locationKey}:${rule.id}:${hour.timestampUnix}`,
         kind: 'custom',
@@ -785,8 +960,17 @@ export function evaluateForecastNotificationTriggers(params: {
         matchedHourUnix: hour.timestampUnix,
       });
 
-      // Emite no máximo 1 disparo consolidado por regra por ciclo de avaliação
-      break;
+      if (triggers.length > prevCount || ignoreLedger) {
+        emittedForRule += 1;
+        lastEmittedHourUnix = hour.timestampUnix;
+      } else if (mode === 'once') {
+        // Dedup no ledger já disparou esta janela; encerra avaliação da regra única
+        break;
+      }
+
+      if (emittedForRule >= maxPerWindow) {
+        break;
+      }
     }
   }
 
@@ -940,4 +1124,293 @@ export async function dispatchSystemNotification(payload: {
   } catch {
     return false;
   }
+}
+
+// ============================================================================
+// Agendamento Nativo em Segundo Plano (Android AlarmManager / WorkManager Bridge)
+// ============================================================================
+
+/**
+ * Constrói a lista de alertas agendáveis para as próximas 24h respeitando recorrência das regras,
+ * avisos obrigatórios DHN/Marinha para maré MSL e reforço de eventos extremos (>= 2x/dia).
+ */
+export function buildUpcomingBackgroundAlertPayloads(
+  prefs: UserNotificationPreferences,
+  forecast: NormalizedForecast,
+  locationName: string,
+  now: Date = new Date(),
+  kpValue?: number | null,
+): ScheduledNativeAlertPayload[] {
+  if (!prefs.masterEnabled || prefs.backgroundSyncEnabled === false) {
+    return [];
+  }
+
+  const nowMs = now.getTime();
+  const nowUnix = Math.floor(nowMs / 1000);
+  const horizonUnix = nowUnix + 24 * 3600;
+  const payloads: ScheduledNativeAlertPayload[] = [];
+  const seenTags = new Set<string>();
+
+  const pushPayload = (item: ScheduledNativeAlertPayload) => {
+    if (seenTags.has(item.tag)) return;
+    seenTags.add(item.tag);
+    payloads.push(item);
+  };
+
+  // 1. Eventos Extremos Automáticos com reforço mínimo (>= 2x/dia)
+  if (prefs.extremeEventsAutoEnabled && Array.isArray(forecast.extremeEvents)) {
+    const extRec = prefs.extremeAlertsRecurrence;
+    const minPerDay =
+      extRec?.enabled === false ? 1 : Math.max(2, Math.min(8, extRec?.minPerDay ?? 2));
+    const urgentIntervalMs = Math.max(15, extRec?.urgentIntervalMinutes ?? 180) * 60_000;
+
+    for (const ev of forecast.extremeEvents) {
+      if (ev.windowEndUnix < nowUnix || ev.windowStartUnix > horizonUnix) {
+        continue;
+      }
+
+      const coastalDisclaimer =
+        ev.category === 'coastal_swell' ? ` ${DHN_TIDE_DISCLAIMER_PT}` : '';
+      const baseBody = `${ev.summary} (${ev.metricBadge}). ${ev.recommendedAction}${coastalDisclaimer} — Fonte: ${ev.sourceName}.`;
+
+      const firstTriggerMs = Math.max(nowMs + 60_000, ev.windowStartUnix * 1000);
+      for (let rep = 0; rep < minPerDay; rep++) {
+        const triggerAtEpochMs = firstTriggerMs + rep * urgentIntervalMs;
+        if (triggerAtEpochMs > nowMs + 24 * 3600 * 1000) {
+          break;
+        }
+        const tag = `bg:extreme:${forecast.locationKey}:${ev.id}:r${rep}`;
+        pushPayload({
+          id: hashTagToNotificationId(tag),
+          tag,
+          triggerAtEpochMs,
+          title: rep === 0 ? ev.title : `[Reforço] ${ev.title}`,
+          body: baseBody,
+          subText: `${locationName} • ${ev.sourceName}`,
+          kind: 'extreme',
+          urgent: ev.severity === 'extreme' || ev.severity === 'severe',
+        });
+      }
+    }
+  }
+
+  // 2. Regras Personalizadas nas próximas 24h respeitando timeWindow e recurrence
+  const next24hHours = forecast.hours.filter(
+    (h) => h.timestampUnix >= nowUnix - 1800 && h.timestampUnix <= horizonUnix,
+  );
+
+  for (const rule of prefs.rules) {
+    if (!rule.enabled) continue;
+
+    const recurrence = rule.recurrence;
+    const mode = recurrence?.mode ?? 'once';
+    const maxPerWindow =
+      mode === 'once'
+        ? 1
+        : Math.max(1, Math.min(24, Math.floor(recurrence?.maxTriggersPerWindow ?? 1)));
+    const intervalSeconds =
+      mode === 'interval_hours'
+        ? Math.max(1, Math.floor(recurrence?.intervalHours ?? 1)) * 3600
+        : 0;
+
+    let scheduledCount = 0;
+    let lastScheduledUnix: number | null = null;
+
+    for (const hour of next24hHours) {
+      const hourParts = getLocalDateParts(
+        new Date(hour.timestampUnix * 1000),
+        forecast.timezone,
+      );
+      const minuteOfDay = hourParts.hour * 60 + hourParts.minute;
+      if (!isMinuteWithinTimeWindow(minuteOfDay, rule.timeWindow)) {
+        continue;
+      }
+
+      if (
+        mode === 'interval_hours' &&
+        lastScheduledUnix !== null &&
+        hour.timestampUnix - lastScheduledUnix < intervalSeconds
+      ) {
+        continue;
+      }
+
+      const match = evaluateRuleAgainstHour(rule, hour, kpValue);
+      if (!match) continue;
+
+      const formatted = formatCustomRuleAlertText({
+        rule,
+        match,
+        timezone: forecast.timezone,
+        kpValue,
+      });
+
+      const triggerAtEpochMs = Math.max(nowMs + 60_000, hour.timestampUnix * 1000);
+      const tag = `bg:custom:${forecast.locationKey}:${rule.id}:${hour.timestampUnix}`;
+      pushPayload({
+        id: hashTagToNotificationId(tag),
+        tag,
+        triggerAtEpochMs,
+        title: formatted.title,
+        body: formatted.message,
+        subText: `${locationName} • FieldCast`,
+        kind: 'custom',
+        urgent: false,
+      });
+
+      scheduledCount += 1;
+      lastScheduledUnix = hour.timestampUnix;
+      if (scheduledCount >= maxPerWindow) {
+        break;
+      }
+    }
+  }
+
+  return payloads.sort((a, b) => a.triggerAtEpochMs - b.triggerAtEpochMs);
+}
+
+/**
+ * Sincroniza a agenda de alertas das próximas 24h e a configuração do monitor periódico
+ * com o plugin nativo Android (`FieldCastNotifications`). No-op seguro na Web.
+ */
+export async function syncNativeBackgroundAlertSchedule(
+  prefs: UserNotificationPreferences,
+  forecast: NormalizedForecast | null | undefined,
+  locationName: string,
+  coordinates: { latitude: number; longitude: number },
+): Promise<{
+  scheduled: number;
+  platform: 'android' | 'ios' | 'web';
+  syncedConfig: boolean;
+}> {
+  const rawPlatform = Capacitor.getPlatform();
+  const platform: 'android' | 'ios' | 'web' =
+    rawPlatform === 'android' ? 'android' : rawPlatform === 'ios' ? 'ios' : 'web';
+
+  if (
+    !Capacitor.isNativePlatform() ||
+    !Capacitor.isPluginAvailable('FieldCastNotifications')
+  ) {
+    return { scheduled: 0, platform: 'web', syncedConfig: false };
+  }
+
+  const enabled = Boolean(prefs.masterEnabled && prefs.backgroundSyncEnabled !== false);
+  const alerts =
+    enabled && forecast
+      ? buildUpcomingBackgroundAlertPayloads(prefs, forecast, locationName)
+      : [];
+
+  let scheduled = 0;
+  let syncedConfig = false;
+
+  try {
+    if (enabled && alerts.length > 0 && FieldCastNotificationsBridge.scheduleBackgroundAlerts) {
+      const res = await FieldCastNotificationsBridge.scheduleBackgroundAlerts({ alerts });
+      scheduled = typeof res?.scheduled === 'number' ? res.scheduled : alerts.length;
+    } else if (!enabled && FieldCastNotificationsBridge.cancelAllScheduledAlerts) {
+      await FieldCastNotificationsBridge.cancelAllScheduledAlerts();
+    }
+  } catch {
+    scheduled = 0;
+  }
+
+  try {
+    if (FieldCastNotificationsBridge.syncBackgroundMonitorConfig) {
+      const extRec = prefs.extremeAlertsRecurrence;
+      const res = await FieldCastNotificationsBridge.syncBackgroundMonitorConfig({
+        enabled,
+        latitude: coordinates.latitude,
+        longitude: coordinates.longitude,
+        locationName: locationName.trim() || 'Área Principal',
+        timezone: forecast?.timezone ?? 'UTC',
+        extremeEventsAutoEnabled: Boolean(prefs.extremeEventsAutoEnabled),
+        extremeMinPerDay:
+          extRec?.enabled === false ? 1 : Math.max(2, extRec?.minPerDay ?? 2),
+        urgentIntervalMinutes: Math.max(15, extRec?.urgentIntervalMinutes ?? 180),
+        rulesJson: JSON.stringify(prefs.rules),
+      });
+      syncedConfig = Boolean(res?.synced);
+    }
+  } catch {
+    syncedConfig = false;
+  }
+
+  return { scheduled, platform, syncedConfig };
+}
+
+/**
+ * Consulta permissões e privilégios de execução em segundo plano no Android
+ * (notificações, alarmes exatos e isenção de otimização de bateria).
+ */
+export async function getNativeBackgroundAlertStatus(): Promise<NativeBackgroundAlertStatus> {
+  try {
+    if (
+      Capacitor.isNativePlatform() &&
+      Capacitor.isPluginAvailable('FieldCastNotifications')
+    ) {
+      if (FieldCastNotificationsBridge.getBackgroundAlertStatus) {
+        const res = await FieldCastNotificationsBridge.getBackgroundAlertStatus();
+        return {
+          supported: true,
+          notificationsGranted: Boolean(res?.notificationsGranted),
+          exactAlarmAllowed: Boolean(res?.exactAlarmAllowed),
+          ignoringBatteryOptimizations: Boolean(res?.ignoringBatteryOptimizations),
+        };
+      }
+      const perm = await FieldCastNotificationsBridge.checkPermissions();
+      return {
+        supported: true,
+        notificationsGranted: perm?.notifications === 'granted',
+        exactAlarmAllowed: false,
+        ignoringBatteryOptimizations: false,
+      };
+    }
+  } catch {
+    // Fallback seguro
+  }
+
+  const webPerm = await getSystemNotificationPermissionState();
+  return {
+    supported: false,
+    notificationsGranted: webPerm === 'granted',
+    exactAlarmAllowed: false,
+    ignoringBatteryOptimizations: false,
+  };
+}
+
+/**
+ * Solicita ao sistema Android a isenção de otimização de bateria (Doze Mode) para alertas confiáveis.
+ */
+export async function requestNativeBatteryExemption(): Promise<boolean> {
+  try {
+    if (
+      Capacitor.isNativePlatform() &&
+      Capacitor.isPluginAvailable('FieldCastNotifications') &&
+      FieldCastNotificationsBridge.requestBatteryOptimizationExemption
+    ) {
+      const res = await FieldCastNotificationsBridge.requestBatteryOptimizationExemption();
+      return Boolean(res?.requested);
+    }
+  } catch {
+    return false;
+  }
+  return false;
+}
+
+/**
+ * Abre a tela de configurações do Android para permitir Alarmes Exatos (`SCHEDULE_EXACT_ALARM`).
+ */
+export async function openNativeExactAlarmSettings(): Promise<boolean> {
+  try {
+    if (
+      Capacitor.isNativePlatform() &&
+      Capacitor.isPluginAvailable('FieldCastNotifications') &&
+      FieldCastNotificationsBridge.openExactAlarmSettings
+    ) {
+      const res = await FieldCastNotificationsBridge.openExactAlarmSettings();
+      return Boolean(res?.opened);
+    }
+  } catch {
+    return false;
+  }
+  return false;
 }

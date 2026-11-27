@@ -349,3 +349,59 @@ export const NoaaSwpcKpPointSchema = z
 
 export const NoaaSwpcKpForecastSchema = z.array(NoaaSwpcKpPointSchema);
 export type NoaaSwpcKpPoint = z.infer<typeof NoaaSwpcKpPointSchema>;
+
+/**
+ * Schemas V4.3 para Validação em Campo (Ground-Truth) e Exportação/Importação Peer-to-Peer.
+ */
+export const GroundTruthRainClassSchema = z.enum(['none', 'light', 'moderate', 'heavy']);
+export const GroundTruthWindFeelSchema = z.enum(['calm', 'light', 'moderate', 'strong', 'gale']);
+
+export const GroundTruthModelPredictionSchema = z.object({
+  windSpeed10mKmh: z.number().finite().nullable(),
+  windGusts10mKmh: z.number().finite().nullable().optional(),
+  temperature2mC: z.number().finite().nullable(),
+  precipitationMm: z.number().finite().nullable(),
+  precipitationProbPct: z.number().finite().nullable().optional(),
+});
+
+export const GroundTruthObservationSchema = z.object({
+  id: z.string().min(1),
+  timestampUtcIso: z.string().min(1),
+  timestampUnix: z.number().finite(),
+  latitude: z.number().finite().min(-90).max(90),
+  longitude: z.number().finite().min(-180).max(180),
+  locationKey: z.string().min(1),
+  regionKey: z.string().min(1),
+  locationName: z.string(),
+  rainClass: GroundTruthRainClassSchema,
+  windFeel: GroundTruthWindFeelSchema,
+  measuredWindKmh: z.number().finite().min(0).max(400).nullable().optional(),
+  measuredTempC: z.number().finite().min(-90).max(70).nullable().optional(),
+  measuredWaveM: z.number().finite().min(0).max(40).nullable().optional(),
+  note: z.string().optional(),
+  photoDataUrl: z.string().optional(),
+  photoMimeType: z.enum(['image/webp', 'image/jpeg']).optional(),
+  photoSizeKb: z.number().finite().min(0).optional(),
+  modelPredictions: z.object({
+    ecmwf_ifs025: GroundTruthModelPredictionSchema.optional(),
+    gfs_seamless: GroundTruthModelPredictionSchema.optional(),
+    icon_seamless: GroundTruthModelPredictionSchema.optional(),
+    gem_seamless: GroundTruthModelPredictionSchema.optional(),
+  }),
+  ensembleWindKmh: z.number().finite().nullable().optional(),
+  ensembleTempC: z.number().finite().nullable().optional(),
+  ensemblePrecipMm: z.number().finite().nullable().optional(),
+  ensemblePrecipProbPct: z.number().finite().nullable().optional(),
+  sourceDeviceLabel: z.string().optional(),
+});
+
+export const GroundTruthExportPackageSchema = z.object({
+  schemaVersion: z.literal('fieldcast-gt-v1'),
+  exportedAtIso: z.string().min(1),
+  sourceLabel: z.string().optional(),
+  observationCount: z.number().int().min(0),
+  observations: z.array(GroundTruthObservationSchema),
+});
+
+export type GroundTruthObservationParsed = z.infer<typeof GroundTruthObservationSchema>;
+export type GroundTruthExportPackageParsed = z.infer<typeof GroundTruthExportPackageSchema>;

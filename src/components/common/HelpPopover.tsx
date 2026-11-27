@@ -25,7 +25,13 @@ export type HelpTopicId =
   | 'report_era5_hybrid'
   | 'report_16d_projection'
   | 'summary_overview'
-  | 'alerts_builder_help';
+  | 'alerts_builder_help'
+  | 'route_planning_4d'
+  | 'goes_satellite'
+  | 'ground_truth_validation'
+  | 'bessel_robust_stats'
+  | 'tide_alerts_dhn'
+  | 'background_alerts_android';
 
 export interface HelpTopicDefinition {
   title: string;
@@ -296,11 +302,81 @@ export const HELP_TOPICS: Record<HelpTopicId, HelpTopicDefinition> = {
     summary:
       'Permite criar regras personalizadas com condições combinadas, janela de horário ativo e templates prontos de missão.',
     details: [
-      'Defina tetos opcionais para temperatura, chuva, vento, rajadas, nebulosidade, ondas ou índice geomagnético Kp.',
-      'Limite os alertas para disparar apenas dentro da sua janela operacional (ex.: 06:00 às 18:00).',
+      'Defina tetos opcionais para temperatura, chuva, vento, rajadas, nebulosidade, ondas, maré MSL ou índice geomagnético Kp.',
+      'Limite os alertas para disparar apenas dentro da sua janela operacional (ex.: 06:00 às 18:00) e configure recorrência.',
     ],
     operationalTip:
       'Comece aplicando um Template (Voo de Drone, Navegação Costeira ou Campo Agrícola) e ajuste apenas os campos necessários.',
+  },
+  route_planning_4d: {
+    title: 'Planejamento de Rotas 4D (Espaço + Tempo + Altitude)',
+    summary:
+      'Avalia a meteorologia exata no horário estimado de passagem (ETA) em cada ponto da sua rota náutica ou aérea.',
+    details: [
+      'Importação Offline: Suporta arquivos GPX, KML, KMZ, GeoJSON e CSV ou marcação manual no mapa, resumindo trajetos longos em até 20 checkpoints preservando origem e destino.',
+      'Navegação Costeira: Combina vento relativo (proa, través e popa), ondas Hs, correntes e cota MSL (~8 km — não substitui tábuas oficiais DHN/Marinha).',
+      'Aéreo / VANT (10m–1000m): Interpola vento em altitude (10m, 80m, 120m e 925 hPa) e calcula Wind Shear (kt/100ft); não substitui briefings oficiais REDEMET/DECEA.',
+    ],
+    operationalTip:
+      'Teste diferentes horários de partida para encontrar a janela verde ao longo de toda a rota e exporte o Briefing 4D em PDF/DOCX/CSV.',
+  },
+  goes_satellite: {
+    title: 'Satélite Geoestacionário GOES / Infravermelho & Vapor d’Água',
+    summary:
+      'Sobrepõe imagens abertas de satélite sobre o mapa tático para acompanhar frentes frias, nuvens de tempestade (topos frios IR) e cobertura sinótica.',
+    details: [
+      'Complementa o radar RainViewer cobrindo oceanos e regiões do interior sem cobertura de radar Doppler de solo.',
+      'Permite identificar rapidamente linhas de instabilidade, aglomerados convectivos e avanços frontais antes da chegada da chuva.',
+    ],
+    operationalTip:
+      'Alterne entre Satélite e Radar de Precipitação para cruzar o topo das nuvens com a chuva efetivamente precipitando.',
+  },
+  ground_truth_validation: {
+    title: 'Validação em Campo (Ground-Truth) & Calibração Bayesiana',
+    summary:
+      'Registra condições reais observadas em campo pareadas com os 4 modelos NWP (ECMWF, GFS, ICON e GEM) para medir acurácia regional.',
+    details: [
+      'Divergência Imediata (t0): Relatos recentes (≤ 90 min e ≤ 20 km) geram alerta visual instantâneo na hora atual sem adulterar previsões futuras.',
+      'Calibração Conservadora: Ao acumular 10 ou mais registros na região, calcula pesos com encolhimento Bayesiano (n / (n + 10)) limitados a [10%, 50%] por modelo.',
+      'Troca Offline Peer-to-Peer: Exporte e importe pacotes JSON validados para somar observações da sua equipe sem servidor.',
+    ],
+    operationalTip:
+      'O modelo calibrado é opcional — ative ou desative o consenso ponderado quando quiser comparar com a média padrão dos 4 modelos.',
+  },
+  bessel_robust_stats: {
+    title: 'Dispersão de Bessel (n−1), MAD, Z-Robusto & Theil-Sen',
+    summary:
+      'Estatísticas resistentes a extremos assimétricos (como pancadas de chuva e rajadas) para maior rigor técnico nos relatórios.',
+    details: [
+      'Correção de Bessel (n − 1): Corrige o viés de subestimação do desvio-padrão ao calcular a dispersão entre apenas 4 modelos meteorológicos.',
+      'MAD & Z-Robusto: Baseados na mediana (0.6745 × |x − Med| / MAD), evitam distorções quando um único pico extremo infla a média.',
+      'Tendência de Theil-Sen: Mediana das inclinações par-a-par ao longo do tempo, mais estável que OLS diante de picos isolados.',
+    ],
+    operationalTip:
+      'Compare a tendência OLS com Theil-Sen em séries com tempestades isoladas para distinguir deriva climática real de um evento pontual.',
+  },
+  tide_alerts_dhn: {
+    title: 'Alertas de Maré Estimada (MSL ~8 km) — Aviso DHN',
+    summary:
+      'Notifica quando a altura estimada do nível do mar (sea_level_height_msl) atingir limites mínimos (maré seca) ou máximos (preamar/ressaca).',
+    details: [
+      'Em coordenadas continentais (sem grade marinha), condições de maré são ignoradas com segurança sem gerar falsos alertas.',
+      'Aviso Obrigatório: A cota MSL (~8 km) é estimativa hidrodinâmica global e NÃO substitui tábuas de marés oficiais da DHN / Marinha do Brasil nem cartas náuticas.',
+    ],
+    operationalTip:
+      'Use os alertas MSL como referência antecipada de janela costeira e confirme horários exatos de estofo na tábua oficial da DHN.',
+  },
+  background_alerts_android: {
+    title: 'Alertas em Segundo Plano (Android Nativo & Recorrência)',
+    summary:
+      'Agenda notificações locais e monitoramento periódico no Android mesmo com o aplicativo fechado, respeitando janelas horárias e recorrência.',
+    details: [
+      'Recorrência Configurável: Escolha entre 1 disparo por janela, N disparos na janela ou intervalo em horas.',
+      'Eventos Extremos Prioritários: Tempestades severas, vendavais e alertas críticos podem reforçar o aviso pelo menos 2x ao dia.',
+      'Permissões Android: Para entrega pontual em modo economia (Doze), habilite Notificações, Alarmes Exatos e isenção de otimização de bateria.',
+    ],
+    operationalTip:
+      'No modo Web/PWA, os alertas são avaliados enquanto o aplicativo está ativo; no APK Android, o agendador nativo mantém vigília contínua.',
   },
 };
 
@@ -566,11 +642,81 @@ export const HELP_TOPICS_EN: Record<HelpTopicId, HelpTopicDefinition> = {
     summary:
       'Create multi-condition alert rules with active local-hour schedules and ready-to-use mission templates.',
     details: [
-      'Combine optional thresholds for temperature, rain, wind, gusts, clouds, waves, or NOAA Kp index.',
-      'Restrict alerts to your operational work window (e.g. 06:00–18:00).',
+      'Combine optional thresholds for temperature, rain, wind, gusts, clouds, waves, MSL tide, or NOAA Kp index.',
+      'Restrict alerts to your operational work window (e.g. 06:00–18:00) and configure trigger recurrence.',
     ],
     operationalTip:
       'Start from a preset Template (Drone Flight, Coastal Navigation, or Field Agronomy) and fine-tune only what you need.',
+  },
+  route_planning_4d: {
+    title: '4D Route Planning (Space + Time + Altitude)',
+    summary:
+      'Evaluates weather at each checkpoint for your exact Estimated Time of Arrival (ETA) along coastal or aerial missions.',
+    details: [
+      'Offline Track Import: Supports GPX, KML, KMZ, GeoJSON, and CSV files or map pins, resampling long tracks up to 20 checkpoints while preserving exact start and end points.',
+      'Coastal Navigation: Combines relative wind (headwind, crosswind, tailwind), Hs waves, currents, and MSL sea level (~8 km — does NOT replace official DHN/Navy tide tables).',
+      'Aerial / UAV (10m–1000m): Interpolates wind across 10m, 80m, 120m, and 925 hPa and computes Wind Shear (kt/100ft); does NOT replace official REDEMET/DECEA briefings.',
+    ],
+    operationalTip:
+      'Test multiple departure times to find an all-green transit window and export the 4D Route Briefing as PDF, DOCX, or CSV.',
+  },
+  goes_satellite: {
+    title: 'Geostationary GOES Satellite (IR & Water Vapor)',
+    summary:
+      'Overlays open satellite imagery on the tactical map to monitor fronts, cold convective cloud tops (IR), and synoptic coverage.',
+    details: [
+      'Complements RainViewer radar across oceans and inland zones outside ground Doppler radar range.',
+      'Helps identify squall lines, convective clusters, and frontal approaches before precipitation arrives.',
+    ],
+    operationalTip:
+      'Toggle between Satellite and Precipitation Radar to cross-check cloud-top cooling against active rainfall.',
+  },
+  ground_truth_validation: {
+    title: 'Field Ground-Truth Validation & Bayesian Calibration',
+    summary:
+      'Logs real field observations paired with all 4 NWP models (ECMWF, GFS, ICON & GEM) to audit regional model skill.',
+    details: [
+      'Immediate t0 Divergence: Recent local reports (≤ 90 min, ≤ 20 km) display an instant visual divergence notice for the current hour without mutating future hours.',
+      'Conservative Calibration: Once 10+ regional samples are collected, computes Bayesian shrinkage weights (n / (n + 10)) clamped to [10%, 50%] per model.',
+      'Offline Peer-to-Peer Exchange: Export and import Zod-validated JSON packages to pool team observations with zero backend.',
+    ],
+    operationalTip:
+      'Calibrated ensemble weighting is optional — toggle it on or off anytime to compare against the equal-weight consensus.',
+  },
+  bessel_robust_stats: {
+    title: 'Bessel Spread (n−1), MAD, Robust-Z & Theil-Sen Trend',
+    summary:
+      'Outlier-resistant statistics tailored to skewed meteorological variables like rainfall spikes and wind gusts.',
+    details: [
+      'Bessel Correction (n − 1): Eliminates downward variance bias when computing ensemble spread across only 4 NWP models.',
+      'MAD & Robust-Z: Median-centered scale (0.6745 × |x − Median| / MAD) prevents single spikes from distorting anomaly detection.',
+      'Theil-Sen Trend: Median of pairwise slopes over time, resisting isolated extreme hours better than OLS.',
+    ],
+    operationalTip:
+      'Compare OLS and Theil-Sen slopes during storm passages to separate sustained synoptic trends from single-hour spikes.',
+  },
+  tide_alerts_dhn: {
+    title: 'Estimated Tide Alerts (MSL ~8 km) — DHN Notice',
+    summary:
+      'Triggers when estimated sea level height (sea_level_height_msl) crosses low-tide or high-tide thresholds.',
+    details: [
+      'On continental/inland coordinates (no marine grid), tide checks are safely skipped without errors or false alarms.',
+      'Mandatory Notice: Estimated MSL (~8 km) is hydrodynamic guidance only and does NOT replace official DHN / Brazilian Navy tide tables or nautical charts.',
+    ],
+    operationalTip:
+      'Use MSL tide triggers as early planning reminders and confirm exact slack-water times against official port tide tables.',
+  },
+  background_alerts_android: {
+    title: 'Android Background Alerts & Recurrence Engine',
+    summary:
+      'Schedules native Android notifications and background checks even when the app is closed, honoring active windows and recurrence.',
+    details: [
+      'Flexible Recurrence: Choose once per window, N times per window, or every K hours.',
+      'Priority Extreme Events: Severe storms and extreme hazards can repeat at least 2x/day until cleared.',
+      'Android Permissions: Grant Notifications, Exact Alarms, and Battery Optimization exemption for timely delivery under Doze mode.',
+    ],
+    operationalTip:
+      'In Web/PWA mode alerts run while the app is open; in the Android APK, the native scheduler watches continuously in the background.',
   },
 };
 

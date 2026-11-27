@@ -48,7 +48,9 @@ function computeQuantileSorted(sorted: readonly number[], quantile: number): num
 /**
  * Calcula estatísticas descritivas rigorosas de uma série escalar:
  * `sampleCount`, `mean`, `median`, `stdDev` populacional, `min`, `max`,
- * `p10`, `p90`, `iqr` (`p75 - p25`), tendência linear por OLS (`linearTrendPerDay`, unidades/24h)
+ * `p10`, `p90`, `iqr` (`p75 - p25`), `mad` (Median Absolute Deviation),
+ * `robustZScoreMax` (`max(0.6745 * |x - median| / mad)`), tendência linear por OLS
+ * (`linearTrendPerDay`, unidades/24h), estimador robusto de Theil-Sen (`theilSenTrendPerDay`)
  * e anomalia padronizada máxima (`anomalyZScoreMax` = `max(|x - mean| / stdDev)`).
  */
 export function computeDescriptiveStats(
@@ -88,6 +90,9 @@ export function computeDescriptiveStats(
       iqr: null,
       linearTrendPerDay: null,
       anomalyZScoreMax: null,
+      mad: null,
+      robustZScoreMax: null,
+      theilSenTrendPerDay: null,
     };
   }
 
@@ -115,6 +120,21 @@ export function computeDescriptiveStats(
   const p75 = computeQuantileSorted(sorted, 0.75);
   const iqr = cleanZero(p75 - p25);
 
+  const absDevsSorted = validValues.map((v) => Math.abs(v - median)).sort((a, b) => a - b);
+  const mad = cleanZero(computeQuantileSorted(absDevsSorted, 0.5));
+
+  let robustZScoreMax = 0;
+  if (mad > 1e-12) {
+    let maxRobustZ = 0;
+    for (const v of validValues) {
+      const rz = (0.6745 * Math.abs(v - median)) / mad;
+      if (rz > maxRobustZ) {
+        maxRobustZ = rz;
+      }
+    }
+    robustZScoreMax = cleanZero(maxRobustZ);
+  }
+
   let anomalyZScoreMax = 0;
   if (stdDev > 1e-12) {
     let maxZ = 0;
@@ -128,6 +148,7 @@ export function computeDescriptiveStats(
   }
 
   let linearTrendPerDay: number | null = null;
+  let theilSenTrendPerDay: number | null = null;
   if (n >= 2) {
     const t0 = pairedTimestamps[0]!;
     const days: number[] = pairedTimestamps.map((ts) => (ts - t0) / SECONDS_PER_DAY);
@@ -147,6 +168,41 @@ export function computeDescriptiveStats(
     }
 
     linearTrendPerDay = sumXX > 1e-12 ? cleanZero(sumXY / sumXX) : 0;
+
+    // Estimador robusto de Theil-Sen (mediana das inclinações par-a-par; subamostra uniforme até 120 pts)
+    const maxTheilPoints = 120;
+    const sampleIndices: number[] = [];
+    if (n <= maxTheilPoints) {
+      for (let i = 0; i < n; i++) {
+        sampleIndices.push(i);
+      }
+    } else {
+      const step = (n - 1) / (maxTheilPoints - 1);
+      for (let k = 0; k < maxTheilPoints; k++) {
+        sampleIndices.push(Math.round(k * step));
+      }
+    }
+
+    const slopes: number[] = [];
+    for (let a = 0; a < sampleIndices.length; a++) {
+      const i = sampleIndices[a]!;
+      const di = days[i]!;
+      const yi = validValues[i]!;
+      for (let b = a + 1; b < sampleIndices.length; b++) {
+        const j = sampleIndices[b]!;
+        const dd = days[j]! - di;
+        if (Math.abs(dd) > 1e-12) {
+          slopes.push((validValues[j]! - yi) / dd);
+        }
+      }
+    }
+
+    if (slopes.length > 0) {
+      slopes.sort((a, b) => a - b);
+      theilSenTrendPerDay = cleanZero(computeQuantileSorted(slopes, 0.5));
+    } else {
+      theilSenTrendPerDay = 0;
+    }
   }
 
   return {
@@ -164,6 +220,9 @@ export function computeDescriptiveStats(
     iqr,
     linearTrendPerDay,
     anomalyZScoreMax,
+    mad,
+    robustZScoreMax,
+    theilSenTrendPerDay,
   };
 }
 
