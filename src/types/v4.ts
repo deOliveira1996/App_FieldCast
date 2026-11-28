@@ -284,12 +284,21 @@ export type GroundTruthRainClass = 'none' | 'light' | 'moderate' | 'heavy';
 
 export type GroundTruthWindFeel = 'calm' | 'light' | 'moderate' | 'strong' | 'gale';
 
+export type GroundTruthSkyCoverClass = 'clear' | 'partly_cloudy' | 'overcast';
+
+/**
+ * Classificação ordinal relativa ancorada na previsão exibida em t0:
+ * -2 = Muito abaixo, -1 = Abaixo, 0 = Conforme previsto, +1 = Acima, +2 = Muito acima.
+ */
+export type GroundTruthRelativeRating = -2 | -1 | 0 | 1 | 2;
+
 export interface GroundTruthModelPrediction {
   windSpeed10mKmh: number | null;
   windGusts10mKmh?: number | null;
   temperature2mC: number | null;
   precipitationMm: number | null;
   precipitationProbPct?: number | null;
+  cloudCoverPct?: number | null;
 }
 
 export interface GroundTruthObservation {
@@ -303,6 +312,9 @@ export interface GroundTruthObservation {
   locationName: string;
   rainClass: GroundTruthRainClass;
   windFeel: GroundTruthWindFeel;
+  skyCoverClass?: GroundTruthSkyCoverClass;
+  tempRelativeRating?: GroundTruthRelativeRating | null;
+  windRelativeRating?: GroundTruthRelativeRating | null;
   measuredWindKmh?: number | null;
   measuredTempC?: number | null;
   measuredWaveM?: number | null;
@@ -315,6 +327,7 @@ export interface GroundTruthObservation {
   ensembleTempC?: number | null;
   ensemblePrecipMm?: number | null;
   ensemblePrecipProbPct?: number | null;
+  ensembleCloudCoverPct?: number | null;
   sourceDeviceLabel?: string;
 }
 
@@ -326,6 +339,9 @@ export interface ModelSkillMetrics {
   tempMaeC: number | null;
   tempBiasC: number | null;
   rainBrierScore: number | null;
+  skyCoverBrierScore?: number | null;
+  ordinalAlignmentPct?: number | null;
+  effectiveEvidenceWeight?: number;
   compositeSkillScore: number;
   weight: number;
 }
@@ -335,6 +351,8 @@ export interface RegionalCalibrationResult {
   longitude: number;
   radiusKm: number;
   sampleCount: number;
+  deduplicatedFromCount?: number;
+  cooldownWindowMinutes?: number;
   minRequiredSamples: number;
   calibrationEligible: boolean;
   shrinkageFactor: number;
