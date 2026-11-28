@@ -6,6 +6,8 @@ import type {
   GroundTruthModelPrediction,
   GroundTruthObservation,
   GroundTruthRainClass,
+  GroundTruthRelativeRating,
+  GroundTruthSkyCoverClass,
   GroundTruthWindFeel,
   ModelSkillMetrics,
   RegionalCalibrationResult,
@@ -24,12 +26,16 @@ import { findCurrentLocalHourIndex } from './localTimeHour';
 export const MIN_CALIBRATION_SAMPLES = 10;
 export const GROUND_TRUTH_SCHEMA_VERSION = 'fieldcast-gt-v1' as const;
 export const CALIBRATION_PREF_STORAGE_KEY = 'fieldcast_use_calibrated_model_v43';
+export const GROUND_TRUTH_COOLDOWN_MINUTES = 30;
+export const OBJECTIVE_EVIDENCE_WEIGHT = 1.0;
+export const PERCEPTUAL_EVIDENCE_WEIGHT = 0.5;
 
 const UNIFORM_MODEL_WEIGHT = 1 / WEATHER_MODELS.length;
 const MIN_CALIBRATED_WEIGHT = 0.1;
 const MAX_CALIBRATED_WEIGHT = 0.5;
 const LIVE_DIVERGENCE_MAX_AGE_MINUTES = 90;
 const LIVE_DIVERGENCE_MAX_DISTANCE_KM = 20;
+const COOLDOWN_SAME_LOCATION_KM = 2.0;
 
 const WIND_FEEL_ESTIMATED_KMH: Record<GroundTruthWindFeel, number> = {
   calm: 3,
@@ -37,6 +43,12 @@ const WIND_FEEL_ESTIMATED_KMH: Record<GroundTruthWindFeel, number> = {
   moderate: 25,
   strong: 42,
   gale: 62,
+};
+
+const SKY_COVER_TARGET_FRACTION: Record<GroundTruthSkyCoverClass, number> = {
+  clear: 0.1,
+  partly_cloudy: 0.5,
+  overcast: 0.9,
 };
 
 const RAIN_CLASS_LABEL_PT: Record<GroundTruthRainClass, string> = {
@@ -67,6 +79,34 @@ const WIND_FEEL_LABEL_EN: Record<GroundTruthWindFeel, string> = {
   moderate: 'Moderate wind (~25 km/h)',
   strong: 'Strong wind (~42 km/h)',
   gale: 'Gale (> 55 km/h)',
+};
+
+const SKY_COVER_LABEL_PT: Record<GroundTruthSkyCoverClass, string> = {
+  clear: 'Ensolarado / Céu limpo',
+  partly_cloudy: 'Parcialmente nublado',
+  overcast: 'Nublado / Encoberto',
+};
+
+const SKY_COVER_LABEL_EN: Record<GroundTruthSkyCoverClass, string> = {
+  clear: 'Clear / Sunny',
+  partly_cloudy: 'Partly Cloudy',
+  overcast: 'Overcast',
+};
+
+const RELATIVE_RATING_LABEL_PT: Record<GroundTruthRelativeRating, string> = {
+  [-2]: 'muito abaixo do previsto (-2)',
+  [-1]: 'abaixo do previsto (-1)',
+  [0]: 'conforme previsto (0)',
+  [1]: 'acima do previsto (+1)',
+  [2]: 'muito acima do previsto (+2)',
+};
+
+const RELATIVE_RATING_LABEL_EN: Record<GroundTruthRelativeRating, string> = {
+  [-2]: 'much lower than forecast (-2)',
+  [-1]: 'lower than forecast (-1)',
+  [0]: 'as forecast (0)',
+  [1]: 'higher than forecast (+1)',
+  [2]: 'much higher than forecast (+2)',
 };
 
 let memoryCalibratedModelPref = false;
@@ -114,13 +154,182 @@ export function buildRegionKey(latitude: number, longitude: number): string {
   return `${latBucket},${lonBucket}`;
 }
 
+function sanitizeFiniteOrNull(val: number | null | undefined): number | null {
+  return typeof val === 'number' && Number.isFinite(val) ? val : null;
+}
+
+function computeCombinedCloudPct(
+  low: number | null | undefined,
+  mid: number | null | undefined,
+  high: number | null | undefined,
+): number | null {
+  const vals = [low, mid, high].filter((v): v is number => typeof v === 'number' && Number.isFinite(v));
+  if (vals.length === 0) return null;
+  return Math.max(0, Math.min(100, Math.round(Math.max(...vals))));
+}
+
+/**
+ * Classifica cobertura de nuvens (%) em classe visual objetiva de céu.
+ */
+export function classifySkyCoverFromCloudPct(
+  cloudPct: number | null | undefined,
+): GroundTruthSkyCoverClass {
+  if (cloudPct === null || cloudPct === undefined || !Number.isFinite(cloudPct)) {
+    return 'partly_cloudy';
+  }
+  if (cloudPct < 25) return 'clear';
+  if (cloudPct < 70) return 'partly_cloudy';
+  return 'overcast';
+}
+
+/**
+ * Estima a sensação categórica de vento (`windFeel`) a partir da previsão em `t0`
+ * combinada à classificação ordinal relativa (`-2..+2`), garantindo retrocompatibilidade.
+ */
+export function deriveWindFeelFromRelativeRating(
+  predictedWindKmh: number | null | undefined,
+  rating: GroundTruthRelativeRating,
+): GroundTruthWindFeel {
+  const base =
+    typeof predictedWindKmh === 'number' && Number.isFinite(predictedWindKmh)
+      ? predictedWindKmh
+      : 15;
+  const multipliers: Record<GroundTruthRelativeRating, number> = {
+    [-2]: 0.35,
+    [-1]: 0.7,
+    [0]: 1.0,
+    [1]: 1.4,
+    [2]: 1.85,
+  };
+  const adjusted = Math.max(0, base * multipliers[rating] + (rating > 0 ? rating * 4 : rating * 3));
+  if (adjusted < 7) return 'calm';
+  if (adjusted < 18) return 'light';
+  if (adjusted < 33) return 'moderate';
+  if (adjusted < 52) return 'strong';
+  return 'gale';
+}
+
+export interface T0ForecastReference {
+  hourIndex: number;
+  timestampUnix: number;
+  temperature2mC: number | null;
+  windSpeed10mKmh: number | null;
+  windGusts10mKmh: number | null;
+  precipitationMm: number | null;
+  precipitationProbPct: number | null;
+  cloudCoverPct: number | null;
+  skyCoverClass: GroundTruthSkyCoverClass;
+}
+
+/**
+ * Extrai a referência consolidada de `t0` (hora local atual) para o cartão âncora do modal
+ * e pareamento com os modelos globais.
+ */
+export function extractT0ForecastReference(
+  forecast: NormalizedForecast | null | undefined,
+  now: Date = new Date(),
+): T0ForecastReference | null {
+  if (!forecast || forecast.hours.length === 0) {
+    return null;
+  }
+  const t0Idx = findCurrentLocalHourIndex(forecast.hours, forecast.timezone, now);
+  const hour = forecast.hours[t0Idx] ?? forecast.hours[0]!;
+  const cloudCoverPct = computeCombinedCloudPct(
+    hour.cloudCover?.lowPct?.mean,
+    hour.cloudCover?.midPct?.mean,
+    hour.cloudCover?.highPct?.mean,
+  );
+
+  return {
+    hourIndex: t0Idx,
+    timestampUnix: hour.timestampUnix,
+    temperature2mC: sanitizeFiniteOrNull(hour.temperature2mC.mean),
+    windSpeed10mKmh: sanitizeFiniteOrNull(hour.windSpeed10m.mean),
+    windGusts10mKmh: sanitizeFiniteOrNull(hour.windGusts10m.mean),
+    precipitationMm: sanitizeFiniteOrNull(hour.precipitationMm.mean),
+    precipitationProbPct: sanitizeFiniteOrNull(hour.precipitationProbabilityPct.mean),
+    cloudCoverPct,
+    skyCoverClass: classifySkyCoverFromCloudPct(cloudCoverPct),
+  };
+}
+
+export interface GroundTruthCooldownStatus {
+  isCoolingDown: boolean;
+  remainingMinutes: number;
+  remainingSeconds: number;
+  lastObservation: GroundTruthObservation | null;
+}
+
+function isSameCooldownLocation(
+  latA: number,
+  lonA: number,
+  keyA: string,
+  obs: GroundTruthObservation,
+): boolean {
+  if (obs.locationKey === keyA) return true;
+  return haversineDistanceKm(latA, lonA, obs.latitude, obs.longitude) <= COOLDOWN_SAME_LOCATION_KM;
+}
+
+/**
+ * Verifica guarda de cooldown por localidade (padrão 30 min) para impedir spam de duplicatas
+ * que inflaria artificialmente `n` ou distorceria a calibração.
+ */
+export function checkGroundTruthCooldown(
+  observations: readonly GroundTruthObservation[],
+  latitude: number,
+  longitude: number,
+  nowUnix?: number,
+  cooldownMinutes = GROUND_TRUTH_COOLDOWN_MINUTES,
+): GroundTruthCooldownStatus {
+  const safeCooldownMin =
+    Number.isFinite(cooldownMinutes) && cooldownMinutes > 0
+      ? cooldownMinutes
+      : GROUND_TRUTH_COOLDOWN_MINUTES;
+  const cooldownSec = safeCooldownMin * 60;
+  const resolvedNowUnix = nowUnix ?? Math.floor(Date.now() / 1000);
+  const targetKey = buildLocationKey(latitude, longitude);
+
+  let latestSameLoc: GroundTruthObservation | null = null;
+  for (const obs of observations) {
+    if (!isSameCooldownLocation(latitude, longitude, targetKey, obs)) {
+      continue;
+    }
+    const elapsedSec = resolvedNowUnix - obs.timestampUnix;
+    if (elapsedSec >= 0 && elapsedSec < cooldownSec) {
+      if (!latestSameLoc || obs.timestampUnix > latestSameLoc.timestampUnix) {
+        latestSameLoc = obs;
+      }
+    }
+  }
+
+  if (!latestSameLoc) {
+    return {
+      isCoolingDown: false,
+      remainingMinutes: 0,
+      remainingSeconds: 0,
+      lastObservation: null,
+    };
+  }
+
+  const remainingSeconds = Math.max(0, Math.ceil(cooldownSec - (resolvedNowUnix - latestSameLoc.timestampUnix)));
+  return {
+    isCoolingDown: remainingSeconds > 0,
+    remainingMinutes: Math.max(1, Math.ceil(remainingSeconds / 60)),
+    remainingSeconds,
+    lastObservation: latestSameLoc,
+  };
+}
+
 export interface CreateGroundTruthObservationInput {
   id?: string;
   latitude: number;
   longitude: number;
   locationName: string;
   rainClass: GroundTruthRainClass;
-  windFeel: GroundTruthWindFeel;
+  windFeel?: GroundTruthWindFeel;
+  skyCoverClass?: GroundTruthSkyCoverClass;
+  tempRelativeRating?: GroundTruthRelativeRating | null;
+  windRelativeRating?: GroundTruthRelativeRating | null;
   measuredWindKmh?: number | null;
   measuredTempC?: number | null;
   measuredWaveM?: number | null;
@@ -133,12 +342,9 @@ export interface CreateGroundTruthObservationInput {
   sourceDeviceLabel?: string;
 }
 
-function sanitizeFiniteOrNull(val: number | null | undefined): number | null {
-  return typeof val === 'number' && Number.isFinite(val) ? val : null;
-}
-
 /**
  * Cria um registro pareado de Ground-Truth capturando a observação de campo
+ * (classes visuais objetivas + classificação ordinal ancorada `-2..+2` + medições instrumentais opcionais)
  * junto às previsões dos 4 modelos NWP (`ecmwf_ifs025`, `gfs_seamless`, `icon_seamless`, `gem_seamless`)
  * na hora local atual `t0` — mantendo foto estritamente opcional.
  */
@@ -157,6 +363,7 @@ export function createGroundTruthObservation(
   let ensembleTempC: number | null = null;
   let ensemblePrecipMm: number | null = null;
   let ensemblePrecipProbPct: number | null = null;
+  let ensembleCloudCoverPct: number | null = null;
 
   const forecast = input.forecast;
   if (forecast && forecast.hours.length > 0) {
@@ -167,6 +374,11 @@ export function createGroundTruthObservation(
     ensembleTempC = sanitizeFiniteOrNull(hour.temperature2mC.mean);
     ensemblePrecipMm = sanitizeFiniteOrNull(hour.precipitationMm.mean);
     ensemblePrecipProbPct = sanitizeFiniteOrNull(hour.precipitationProbabilityPct.mean);
+    ensembleCloudCoverPct = computeCombinedCloudPct(
+      hour.cloudCover?.lowPct?.mean,
+      hour.cloudCover?.midPct?.mean,
+      hour.cloudCover?.highPct?.mean,
+    );
 
     for (const model of WEATHER_MODELS) {
       const nativeSeries = forecast.nativeByModel[model];
@@ -190,12 +402,18 @@ export function createGroundTruthObservation(
         nativeHour?.precipitationProbability ??
           hour.precipitationProbabilityPct.valuesByModel?.[model],
       );
+      const cloudCoverPct = computeCombinedCloudPct(
+        nativeHour?.cloudCoverLow ?? hour.cloudCover?.lowPct?.valuesByModel?.[model],
+        nativeHour?.cloudCoverMid ?? hour.cloudCover?.midPct?.valuesByModel?.[model],
+        nativeHour?.cloudCoverHigh ?? hour.cloudCover?.highPct?.valuesByModel?.[model],
+      );
 
       if (
         windSpeed10mKmh !== null ||
         temperature2mC !== null ||
         precipitationMm !== null ||
-        precipitationProbPct !== null
+        precipitationProbPct !== null ||
+        cloudCoverPct !== null
       ) {
         modelPredictions[model] = {
           windSpeed10mKmh,
@@ -203,6 +421,7 @@ export function createGroundTruthObservation(
           temperature2mC,
           precipitationMm,
           precipitationProbPct,
+          ...(cloudCoverPct !== null ? { cloudCoverPct } : {}),
         };
       }
     }
@@ -212,6 +431,12 @@ export function createGroundTruthObservation(
   const measuredTemp = sanitizeFiniteOrNull(input.measuredTempC);
   const measuredWave = sanitizeFiniteOrNull(input.measuredWaveM);
   const cleanNote = input.note?.trim();
+
+  const resolvedWindFeel: GroundTruthWindFeel =
+    input.windFeel ??
+    (input.windRelativeRating !== undefined && input.windRelativeRating !== null
+      ? deriveWindFeelFromRelativeRating(ensembleWindKmh, input.windRelativeRating)
+      : 'light');
 
   const obs: GroundTruthObservation = {
     id,
@@ -223,7 +448,14 @@ export function createGroundTruthObservation(
     regionKey: buildRegionKey(input.latitude, input.longitude),
     locationName: input.locationName.trim() || 'Ponto de Campo',
     rainClass: input.rainClass,
-    windFeel: input.windFeel,
+    windFeel: resolvedWindFeel,
+    ...(input.skyCoverClass ? { skyCoverClass: input.skyCoverClass } : {}),
+    ...(input.tempRelativeRating !== undefined && input.tempRelativeRating !== null
+      ? { tempRelativeRating: input.tempRelativeRating }
+      : {}),
+    ...(input.windRelativeRating !== undefined && input.windRelativeRating !== null
+      ? { windRelativeRating: input.windRelativeRating }
+      : {}),
     ...(measuredWind !== null ? { measuredWindKmh: measuredWind } : {}),
     ...(measuredTemp !== null ? { measuredTempC: measuredTemp } : {}),
     ...(measuredWave !== null ? { measuredWaveM: measuredWave } : {}),
@@ -238,6 +470,7 @@ export function createGroundTruthObservation(
     ensembleTempC,
     ensemblePrecipMm,
     ensemblePrecipProbPct,
+    ...(ensembleCloudCoverPct !== null ? { ensembleCloudCoverPct } : {}),
     ...(input.sourceDeviceLabel?.trim()
       ? { sourceDeviceLabel: input.sourceDeviceLabel.trim() }
       : {}),
@@ -310,7 +543,7 @@ export function detectLiveDivergence(
   const reasonsEn: string[] = [];
   let isSevere = false;
 
-  // 1. Divergência de Precipitação em t0
+  // 1. Divergência de Precipitação em t0 (classe visual objetiva)
   const predPrecipMm = hour.precipitationMm.mean ?? 0;
   const predPrecipProb = hour.precipitationProbabilityPct.mean ?? null;
   const obsIsRaining = obs.rainClass !== 'none';
@@ -337,34 +570,68 @@ export function detectLiveDivergence(
     );
   }
 
-  // 2. Divergência de Vento em t0
-  const predWind = hour.windSpeed10m.mean;
-  const obsWind =
-    typeof obs.measuredWindKmh === 'number' && Number.isFinite(obs.measuredWindKmh)
-      ? obs.measuredWindKmh
-      : WIND_FEEL_ESTIMATED_KMH[obs.windFeel];
+  // 2. Divergência de Céu / Nuvens em t0 (classe visual objetiva)
+  const predCloudPct = computeCombinedCloudPct(
+    hour.cloudCover?.lowPct?.mean,
+    hour.cloudCover?.midPct?.mean,
+    hour.cloudCover?.highPct?.mean,
+  );
+  if (obs.skyCoverClass && predCloudPct !== null) {
+    if (obs.skyCoverClass === 'clear' && predCloudPct >= 80) {
+      reasonsPt.push(
+        `Campo relata ${SKY_COVER_LABEL_PT.clear.toLowerCase()}, enquanto a grade indica céu encoberto (${predCloudPct}% nuvens).`,
+      );
+      reasonsEn.push(
+        `Field reports ${SKY_COVER_LABEL_EN.clear.toLowerCase()}, while the grid indicates overcast skies (${predCloudPct}% clouds).`,
+      );
+    } else if (obs.skyCoverClass === 'overcast' && predCloudPct <= 15) {
+      reasonsPt.push(
+        `Campo relata ${SKY_COVER_LABEL_PT.overcast.toLowerCase()}, enquanto a grade prevê céu limpo (${predCloudPct}% nuvens).`,
+      );
+      reasonsEn.push(
+        `Field reports ${SKY_COVER_LABEL_EN.overcast.toLowerCase()}, while the grid forecasts clear skies (${predCloudPct}% clouds).`,
+      );
+    }
+  }
 
-  if (predWind !== null && Number.isFinite(predWind)) {
+  // 3. Divergência de Vento em t0 (medição exata, rating ordinal extremo ou legado windFeel)
+  const predWind = hour.windSpeed10m.mean;
+  if (typeof obs.measuredWindKmh === 'number' && Number.isFinite(obs.measuredWindKmh)) {
+    if (predWind !== null && Number.isFinite(predWind)) {
+      const windDiff = Math.abs(obs.measuredWindKmh - predWind);
+      if (windDiff >= 15) {
+        reasonsPt.push(
+          `Vento medido (${obs.measuredWindKmh.toFixed(1)} km/h) diverge da previsão atual (${predWind.toFixed(1)} km/h).`,
+        );
+        reasonsEn.push(
+          `Measured wind (${obs.measuredWindKmh.toFixed(1)} km/h) diverges from current forecast (${predWind.toFixed(1)} km/h).`,
+        );
+        if (windDiff >= 20) isSevere = true;
+      }
+    }
+  } else if (obs.windRelativeRating !== undefined && obs.windRelativeRating !== null) {
+    if (Math.abs(obs.windRelativeRating) >= 2) {
+      reasonsPt.push(
+        `Observador indica vento ${RELATIVE_RATING_LABEL_PT[obs.windRelativeRating]}.`,
+      );
+      reasonsEn.push(
+        `Observer reports wind ${RELATIVE_RATING_LABEL_EN[obs.windRelativeRating]}.`,
+      );
+      if (obs.windRelativeRating === 2) isSevere = true;
+    }
+  } else if (predWind !== null && Number.isFinite(predWind)) {
+    const obsWind = WIND_FEEL_ESTIMATED_KMH[obs.windFeel];
     const windDiff = Math.abs(obsWind - predWind);
     const qualitativeMismatch =
       ((obs.windFeel === 'strong' || obs.windFeel === 'gale') && predWind < 18) ||
       (obs.windFeel === 'calm' && predWind >= 30);
 
     if (windDiff >= 15 || qualitativeMismatch) {
-      const obsWindDescPt =
-        obs.measuredWindKmh != null
-          ? `${obs.measuredWindKmh.toFixed(1)} km/h (medido)`
-          : WIND_FEEL_LABEL_PT[obs.windFeel];
-      const obsWindDescEn =
-        obs.measuredWindKmh != null
-          ? `${obs.measuredWindKmh.toFixed(1)} km/h (measured)`
-          : WIND_FEEL_LABEL_EN[obs.windFeel];
-
       reasonsPt.push(
-        `Vento observado (${obsWindDescPt}) diverge da previsão atual (${predWind.toFixed(1)} km/h).`,
+        `Vento observado (${WIND_FEEL_LABEL_PT[obs.windFeel]}) diverge da previsão atual (${predWind.toFixed(1)} km/h).`,
       );
       reasonsEn.push(
-        `Observed wind (${obsWindDescEn}) diverges from current forecast (${predWind.toFixed(1)} km/h).`,
+        `Observed wind (${WIND_FEEL_LABEL_EN[obs.windFeel]}) diverges from current forecast (${predWind.toFixed(1)} km/h).`,
       );
       if (windDiff >= 20 || obs.windFeel === 'gale') {
         isSevere = true;
@@ -372,7 +639,7 @@ export function detectLiveDivergence(
     }
   }
 
-  // 3. Divergência de Temperatura em t0 (quando medida)
+  // 4. Divergência de Temperatura em t0 (medição exata ou rating ordinal extremo)
   const predTemp = hour.temperature2mC.mean;
   if (
     typeof obs.measuredTempC === 'number' &&
@@ -389,6 +656,17 @@ export function detectLiveDivergence(
         `Measured temperature (${obs.measuredTempC.toFixed(1)} °C) differs by ${tempDiff.toFixed(1)} °C from grid (${predTemp.toFixed(1)} °C).`,
       );
     }
+  } else if (
+    obs.tempRelativeRating !== undefined &&
+    obs.tempRelativeRating !== null &&
+    Math.abs(obs.tempRelativeRating) >= 2
+  ) {
+    reasonsPt.push(
+      `Observador indica temperatura ${RELATIVE_RATING_LABEL_PT[obs.tempRelativeRating]}.`,
+    );
+    reasonsEn.push(
+      `Observer reports temperature ${RELATIVE_RATING_LABEL_EN[obs.tempRelativeRating]}.`,
+    );
   }
 
   if (reasonsPt.length === 0) {
@@ -496,22 +774,102 @@ function estimateRainProbabilityFromPrediction(pred: GroundTruthModelPrediction)
 }
 
 /**
- * Calcula métricas regionais de skill (MAE vento/temp, bias, Brier Score de chuva)
- * e pesos calibrados por encolhimento Bayesiano (`shrinkage = n / (n + 10)`)
- * em direção ao prior uniforme `0.25`, limitados ao intervalo seguro `[0.10, 0.50]`.
+ * Deduplica observações dentro de janelas de `cooldownMinutes` (30 min) para uma mesma
+ * localidade (`locationKey` ou distância <= 2 km), mantendo apenas o registro mais recente
+ * de cada janela — impedindo spam de duplicatas que inflariam `n`.
+ */
+function deduplicateRegionalObservationsWithCooldown(
+  regionalObs: readonly GroundTruthObservation[],
+  cooldownMinutes: number,
+): GroundTruthObservation[] {
+  const cooldownSec = cooldownMinutes * 60;
+  const sortedAsc = [...regionalObs].sort((a, b) => a.timestampUnix - b.timestampUnix);
+  const kept: GroundTruthObservation[] = [];
+
+  for (const obs of sortedAsc) {
+    let replacedIdx = -1;
+    for (let i = kept.length - 1; i >= 0; i--) {
+      const prev = kept[i]!;
+      if (obs.timestampUnix - prev.timestampUnix >= cooldownSec) {
+        break;
+      }
+      if (isSameCooldownLocation(obs.latitude, obs.longitude, obs.locationKey, prev)) {
+        replacedIdx = i;
+        break;
+      }
+    }
+    if (replacedIdx >= 0) {
+      kept[replacedIdx] = obs;
+    } else {
+      kept.push(obs);
+    }
+  }
+
+  return kept;
+}
+
+/**
+ * Calcula perda ordinal direcional (`0.0` = melhor alinhamento com a direção informada,
+ * `0.5` = neutro no consenso, `1.0` = direção oposta) comparando o modelo `predValue`
+ * com o consenso (`ensembleRef`) e a dispersão entre os 4 modelos no instante `t0`.
+ * Evita viés de escala absoluta entre observadores sem instrumento.
+ */
+function computeOrdinalDirectionalLoss(
+  predValue: number,
+  ensembleRef: number,
+  peerValues: readonly number[],
+  rating: GroundTruthRelativeRating,
+  minScale: number,
+): number {
+  const maxAbsDev = peerValues.reduce(
+    (maxDev, v) => Math.max(maxDev, Math.abs(v - ensembleRef)),
+    0,
+  );
+  const scale = Math.max(minScale, maxAbsDev);
+  const signedPos = Math.max(-1, Math.min(1, (predValue - ensembleRef) / scale));
+
+  if (rating === 0) {
+    // Conforme previsto: premia modelos próximos ao consenso exibido
+    return Math.abs(signedPos);
+  }
+
+  // Direção real (+1/+2 = acima do previsto; -1/-2 = abaixo do previsto)
+  const dir = rating > 0 ? 1 : -1;
+  const directionalAlignment = Math.max(-1, Math.min(1, signedPos * dir));
+  const baseLoss = (1 - directionalAlignment) / 2; // 0 (extremo na direção certa) .. 1 (direção oposta)
+
+  // Para ±2 ("Muito acima / Muito abaixo"), acentua suavemente a penalidade de modelos na direção errada
+  if (Math.abs(rating) === 2) {
+    return Math.min(1, Math.pow(baseLoss, 0.85));
+  }
+  return baseLoss;
+}
+
+/**
+ * Calcula métricas regionais de skill (MAE/Viés instrumental, Brier de chuva e céu,
+ * alinhamento ordinal direcional com mitigação de viés do observador) e pesos calibrados
+ * por encolhimento Bayesiano (`shrinkage = n / (n + 10)`) em direção ao prior uniforme `0.25`,
+ * limitados ao intervalo seguro `[0.10, 0.50]` e protegidos por cooldown de 30 min por localidade.
  */
 export function computeRegionalCalibration(
   observations: readonly GroundTruthObservation[],
   latitude: number,
   longitude: number,
   radiusKm = 35,
+  cooldownMinutes = GROUND_TRUTH_COOLDOWN_MINUTES,
 ): RegionalCalibrationResult {
   const safeRadius = Number.isFinite(radiusKm) && radiusKm > 0 ? radiusKm : 35;
+  const safeCooldown =
+    Number.isFinite(cooldownMinutes) && cooldownMinutes > 0
+      ? cooldownMinutes
+      : GROUND_TRUTH_COOLDOWN_MINUTES;
 
-  const regionalObs = observations.filter((obs) => {
+  const rawRegionalObs = observations.filter((obs) => {
     const dist = haversineDistanceKm(latitude, longitude, obs.latitude, obs.longitude);
     return dist <= safeRadius && Object.keys(obs.modelPredictions ?? {}).length > 0;
   });
+
+  const regionalObs = deduplicateRegionalObservationsWithCooldown(rawRegionalObs, safeCooldown);
 
   const sampleCount = regionalObs.length;
   const calibrationEligible = sampleCount >= MIN_CALIBRATION_SAMPLES;
@@ -531,6 +889,7 @@ export function computeRegionalCalibration(
 
   for (const model of WEATHER_MODELS) {
     let pairedCount = 0;
+
     let windAbsErrSum = 0;
     let windSignedErrSum = 0;
     let windCount = 0;
@@ -542,41 +901,129 @@ export function computeRegionalCalibration(
     let brierSum = 0;
     let rainCount = 0;
 
+    let skyBrierSum = 0;
+    let skyCount = 0;
+
+    let ordinalLossSum = 0;
+    let ordinalCount = 0;
+
+    let weightedLossSum = 0;
+    let totalEvidenceWeight = 0;
+
     for (const obs of regionalObs) {
       const pred = obs.modelPredictions?.[model];
       if (!pred) continue;
       pairedCount += 1;
 
-      const obsWind =
-        typeof obs.measuredWindKmh === 'number' && Number.isFinite(obs.measuredWindKmh)
-          ? obs.measuredWindKmh
-          : WIND_FEEL_ESTIMATED_KMH[obs.windFeel];
-
-      if (typeof pred.windSpeed10mKmh === 'number' && Number.isFinite(pred.windSpeed10mKmh)) {
-        const err = pred.windSpeed10mKmh - obsWind;
-        windAbsErrSum += Math.abs(err);
-        windSignedErrSum += err;
-        windCount += 1;
-      }
-
-      if (
-        typeof obs.measuredTempC === 'number' &&
-        Number.isFinite(obs.measuredTempC) &&
-        typeof pred.temperature2mC === 'number' &&
-        Number.isFinite(pred.temperature2mC)
-      ) {
-        const err = pred.temperature2mC - obs.measuredTempC;
-        tempAbsErrSum += Math.abs(err);
-        tempSignedErrSum += err;
-        tempCount += 1;
-      }
-
+      // 1. Precipitação (classe visual objetiva -> peso de evidência 1.0)
       const predRainProb = estimateRainProbabilityFromPrediction(pred);
       if (predRainProb !== null) {
         const obsRainBinary = obs.rainClass === 'none' ? 0 : 1;
         const diff = predRainProb - obsRainBinary;
-        brierSum += diff * diff;
+        const brier = diff * diff;
+        brierSum += brier;
         rainCount += 1;
+
+        weightedLossSum += (brier / 0.25) * OBJECTIVE_EVIDENCE_WEIGHT;
+        totalEvidenceWeight += OBJECTIVE_EVIDENCE_WEIGHT;
+      }
+
+      // 2. Cobertura de Nuvens / Céu (classe visual objetiva -> peso de evidência 1.0)
+      if (
+        obs.skyCoverClass &&
+        typeof pred.cloudCoverPct === 'number' &&
+        Number.isFinite(pred.cloudCoverPct)
+      ) {
+        const predCloudFrac = Math.max(0, Math.min(1, pred.cloudCoverPct / 100));
+        const targetCloudFrac = SKY_COVER_TARGET_FRACTION[obs.skyCoverClass];
+        const skyErr = (predCloudFrac - targetCloudFrac) ** 2;
+        skyBrierSum += skyErr;
+        skyCount += 1;
+
+        weightedLossSum += (skyErr / 0.2) * OBJECTIVE_EVIDENCE_WEIGHT;
+        totalEvidenceWeight += OBJECTIVE_EVIDENCE_WEIGHT;
+      }
+
+      // 3. Vento: instrumental exato (peso 1.0) OU ordinal direcional ancorado (peso 0.5) OU windFeel legado (peso 0.5)
+      if (typeof pred.windSpeed10mKmh === 'number' && Number.isFinite(pred.windSpeed10mKmh)) {
+        if (typeof obs.measuredWindKmh === 'number' && Number.isFinite(obs.measuredWindKmh)) {
+          const err = pred.windSpeed10mKmh - obs.measuredWindKmh;
+          windAbsErrSum += Math.abs(err);
+          windSignedErrSum += err;
+          windCount += 1;
+
+          weightedLossSum += (Math.abs(err) / 15) * OBJECTIVE_EVIDENCE_WEIGHT;
+          totalEvidenceWeight += OBJECTIVE_EVIDENCE_WEIGHT;
+        } else if (obs.windRelativeRating !== undefined && obs.windRelativeRating !== null) {
+          const peerWinds = WEATHER_MODELS.map(
+            (mId) => obs.modelPredictions?.[mId]?.windSpeed10mKmh,
+          ).filter((v): v is number => typeof v === 'number' && Number.isFinite(v));
+          const ensWindRef =
+            typeof obs.ensembleWindKmh === 'number' && Number.isFinite(obs.ensembleWindKmh)
+              ? obs.ensembleWindKmh
+              : peerWinds.length > 0
+                ? peerWinds.reduce((a, b) => a + b, 0) / peerWinds.length
+                : pred.windSpeed10mKmh;
+
+          const ordLoss = computeOrdinalDirectionalLoss(
+            pred.windSpeed10mKmh,
+            ensWindRef,
+            peerWinds,
+            obs.windRelativeRating,
+            4.0,
+          );
+          ordinalLossSum += ordLoss;
+          ordinalCount += 1;
+
+          weightedLossSum += ordLoss * PERCEPTUAL_EVIDENCE_WEIGHT;
+          totalEvidenceWeight += PERCEPTUAL_EVIDENCE_WEIGHT;
+        } else {
+          // Compatibilidade com observações legadas (windFeel qualitativo -> peso atenuado 0.5)
+          const estWind = WIND_FEEL_ESTIMATED_KMH[obs.windFeel];
+          const err = pred.windSpeed10mKmh - estWind;
+          windAbsErrSum += Math.abs(err);
+          windSignedErrSum += err;
+          windCount += 1;
+
+          weightedLossSum += (Math.abs(err) / 15) * PERCEPTUAL_EVIDENCE_WEIGHT;
+          totalEvidenceWeight += PERCEPTUAL_EVIDENCE_WEIGHT;
+        }
+      }
+
+      // 4. Temperatura: instrumental exato (peso 1.0) OU ordinal direcional ancorado (peso 0.5)
+      if (typeof pred.temperature2mC === 'number' && Number.isFinite(pred.temperature2mC)) {
+        if (typeof obs.measuredTempC === 'number' && Number.isFinite(obs.measuredTempC)) {
+          const err = pred.temperature2mC - obs.measuredTempC;
+          tempAbsErrSum += Math.abs(err);
+          tempSignedErrSum += err;
+          tempCount += 1;
+
+          weightedLossSum += (Math.abs(err) / 3) * OBJECTIVE_EVIDENCE_WEIGHT;
+          totalEvidenceWeight += OBJECTIVE_EVIDENCE_WEIGHT;
+        } else if (obs.tempRelativeRating !== undefined && obs.tempRelativeRating !== null) {
+          const peerTemps = WEATHER_MODELS.map(
+            (mId) => obs.modelPredictions?.[mId]?.temperature2mC,
+          ).filter((v): v is number => typeof v === 'number' && Number.isFinite(v));
+          const ensTempRef =
+            typeof obs.ensembleTempC === 'number' && Number.isFinite(obs.ensembleTempC)
+              ? obs.ensembleTempC
+              : peerTemps.length > 0
+                ? peerTemps.reduce((a, b) => a + b, 0) / peerTemps.length
+                : pred.temperature2mC;
+
+          const ordLoss = computeOrdinalDirectionalLoss(
+            pred.temperature2mC,
+            ensTempRef,
+            peerTemps,
+            obs.tempRelativeRating,
+            1.0,
+          );
+          ordinalLossSum += ordLoss;
+          ordinalCount += 1;
+
+          weightedLossSum += ordLoss * PERCEPTUAL_EVIDENCE_WEIGHT;
+          totalEvidenceWeight += PERCEPTUAL_EVIDENCE_WEIGHT;
+        }
       }
     }
 
@@ -585,16 +1032,13 @@ export function computeRegionalCalibration(
     const tempMaeC = tempCount > 0 ? Number((tempAbsErrSum / tempCount).toFixed(2)) : null;
     const tempBiasC = tempCount > 0 ? Number((tempSignedErrSum / tempCount).toFixed(2)) : null;
     const rainBrierScore = rainCount > 0 ? Number((brierSum / rainCount).toFixed(4)) : null;
+    const skyCoverBrierScore = skyCount > 0 ? Number((skyBrierSum / skyCount).toFixed(4)) : null;
+    const ordinalAlignmentPct =
+      ordinalCount > 0
+        ? Math.max(0, Math.min(100, Math.round((1 - ordinalLossSum / ordinalCount) * 100)))
+        : null;
 
-    const normalizedLosses: number[] = [];
-    if (windMaeKmh !== null) normalizedLosses.push(windMaeKmh / 15);
-    if (tempMaeC !== null) normalizedLosses.push(tempMaeC / 3);
-    if (rainBrierScore !== null) normalizedLosses.push(rainBrierScore / 0.25);
-
-    const meanLoss =
-      normalizedLosses.length > 0
-        ? normalizedLosses.reduce((acc, v) => acc + v, 0) / normalizedLosses.length
-        : 1;
+    const meanLoss = totalEvidenceWeight > 0 ? weightedLossSum / totalEvidenceWeight : 1;
 
     const compositeSkillScore =
       pairedCount > 0 ? Math.max(0, Math.min(100, Math.round(100 / (1 + meanLoss)))) : 50;
@@ -609,6 +1053,9 @@ export function computeRegionalCalibration(
       tempMaeC,
       tempBiasC,
       rainBrierScore,
+      skyCoverBrierScore,
+      ordinalAlignmentPct,
+      effectiveEvidenceWeight: Number(totalEvidenceWeight.toFixed(2)),
       compositeSkillScore,
       weight: UNIFORM_MODEL_WEIGHT,
     };
@@ -659,6 +1106,8 @@ export function computeRegionalCalibration(
     longitude,
     radiusKm: safeRadius,
     sampleCount,
+    deduplicatedFromCount: rawRegionalObs.length,
+    cooldownWindowMinutes: safeCooldown,
     minRequiredSamples: MIN_CALIBRATION_SAMPLES,
     calibrationEligible,
     shrinkageFactor,

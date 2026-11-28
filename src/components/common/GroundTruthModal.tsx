@@ -2,13 +2,21 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
   Camera,
   CheckCircle2,
+  ChevronDown,
+  ChevronUp,
+  Clock,
+  Cloud,
   CloudRain,
+  CloudSun,
   Download,
+  Gauge,
   Image as ImageIcon,
   MapPin,
   Scale,
   ShieldCheck,
   Sparkles,
+  Sun,
+  Thermometer,
   Trash2,
   Upload,
   Wind,
@@ -34,18 +42,24 @@ import type { ErrorLogRecord, ToastMessage } from '../../types/health';
 import type {
   GroundTruthObservation,
   GroundTruthRainClass,
-  GroundTruthWindFeel,
+  GroundTruthRelativeRating,
+  GroundTruthSkyCoverClass,
 } from '../../types/v4';
 import { WEATHER_MODELS, type NormalizedForecast } from '../../types/weather';
 import {
+  checkGroundTruthCooldown,
   computeRegionalCalibration,
   createGroundTruthObservation,
+  deriveWindFeelFromRelativeRating,
+  extractT0ForecastReference,
+  GROUND_TRUTH_COOLDOWN_MINUTES,
   loadUseCalibratedModelPref,
   MIN_CALIBRATION_SAMPLES,
   parseAndValidateGroundTruthPackage,
   saveUseCalibratedModelPref,
   serializeGroundTruthPackage,
 } from '../../utils/groundTruthCalibration';
+import { formatLocalHourBadge } from '../../utils/localTimeHour';
 import { MODEL_COLORS, MODEL_DISPLAY_LABELS } from '../../utils/modelComparison';
 import { safeAction } from '../../utils/safeAction';
 import {
@@ -78,16 +92,33 @@ const RAIN_CLASS_OPTIONS: ReadonlyArray<{
   { id: 'heavy', labelPt: 'Forte', labelEn: 'Heavy' },
 ];
 
-const WIND_FEEL_OPTIONS: ReadonlyArray<{
-  id: GroundTruthWindFeel;
+const SKY_COVER_OPTIONS: ReadonlyArray<{
+  id: GroundTruthSkyCoverClass;
   labelPt: string;
   labelEn: string;
+  Icon: React.ComponentType<{ className?: string }>;
 }> = [
-  { id: 'calm', labelPt: 'Calmo', labelEn: 'Calm' },
-  { id: 'light', labelPt: 'Brisa Leve', labelEn: 'Light Breeze' },
-  { id: 'moderate', labelPt: 'Moderado', labelEn: 'Moderate' },
-  { id: 'strong', labelPt: 'Forte', labelEn: 'Strong' },
-  { id: 'gale', labelPt: 'Vendaval', labelEn: 'Gale' },
+  { id: 'clear', labelPt: 'Ensolarado', labelEn: 'Clear / Sunny', Icon: Sun },
+  {
+    id: 'partly_cloudy',
+    labelPt: 'Parcialmente Nublado',
+    labelEn: 'Partly Cloudy',
+    Icon: CloudSun,
+  },
+  { id: 'overcast', labelPt: 'Nublado', labelEn: 'Overcast', Icon: Cloud },
+];
+
+const RELATIVE_RATING_OPTIONS: ReadonlyArray<{
+  value: GroundTruthRelativeRating;
+  shortPt: string;
+  shortEn: string;
+  tag: string;
+}> = [
+  { value: -2, shortPt: 'Muito abaixo', shortEn: 'Much lower', tag: '-2' },
+  { value: -1, shortPt: 'Abaixo', shortEn: 'Lower', tag: '-1' },
+  { value: 0, shortPt: 'Conforme previsto', shortEn: 'As forecast', tag: '0' },
+  { value: 1, shortPt: 'Acima', shortEn: 'Higher', tag: '+1' },
+  { value: 2, shortPt: 'Muito acima', shortEn: 'Much higher', tag: '+2' },
 ];
 
 function dispatchGroundTruthUpdated(): void {
@@ -120,10 +151,14 @@ function formatRainClassShort(cls: GroundTruthRainClass, locale: 'pt' | 'en'): s
   return locale === 'en' ? item.labelEn : item.labelPt;
 }
 
-function formatWindFeelShort(feel: GroundTruthWindFeel, locale: 'pt' | 'en'): string {
-  const item = WIND_FEEL_OPTIONS.find((o) => o.id === feel);
-  if (!item) return feel;
+function formatSkyCoverShort(cls: GroundTruthSkyCoverClass, locale: 'pt' | 'en'): string {
+  const item = SKY_COVER_OPTIONS.find((o) => o.id === cls);
+  if (!item) return cls;
   return locale === 'en' ? item.labelEn : item.labelPt;
+}
+
+function formatRatingTag(rating: GroundTruthRelativeRating): string {
+  return rating > 0 ? `+${rating}` : String(rating);
 }
 
 export const GroundTruthModal: React.FC<GroundTruthModalProps> = ({
@@ -136,17 +171,34 @@ export const GroundTruthModal: React.FC<GroundTruthModalProps> = ({
   onCalibrationChange,
 }) => {
   const { locale, tr } = useLocale();
-  const { units, windLabel, tempLabel, waveLabel } = useUnits();
+  const {
+    units,
+    windLabel,
+    tempLabel,
+    waveLabel,
+    formatTempValue,
+    formatWindValue,
+    formatPrecipValue,
+  } = useUnits();
   const intlLocale = locale === 'en' ? 'en-US' : 'pt-BR';
+
+  const t0Reference = useMemo(() => extractT0ForecastReference(forecast), [forecast]);
 
   const [observations, setObservations] = useState<GroundTruthObservation[]>([]);
   const [useCalibratedModel, setUseCalibratedModel] = useState<boolean>(() =>
     loadUseCalibratedModelPref(),
   );
 
-  // Check-in form states
+  // Check-in form states (anchored to t0 reference; zero instrument required!)
   const [rainClass, setRainClass] = useState<GroundTruthRainClass>('none');
-  const [windFeel, setWindFeel] = useState<GroundTruthWindFeel>('light');
+  const [skyCoverClass, setSkyCoverClass] = useState<GroundTruthSkyCoverClass>(
+    () => t0Reference?.skyCoverClass ?? 'partly_cloudy',
+  );
+  const [tempRelativeRating, setTempRelativeRating] = useState<GroundTruthRelativeRating>(0);
+  const [windRelativeRating, setWindRelativeRating] = useState<GroundTruthRelativeRating>(0);
+
+  // Secondary / collapsed optional exact instrument inputs
+  const [showInstrumentInputs, setShowInstrumentInputs] = useState<boolean>(false);
   const [measuredWindDisplay, setMeasuredWindDisplay] = useState<number | null>(null);
   const [measuredTempDisplay, setMeasuredTempDisplay] = useState<number | null>(null);
   const [measuredWaveDisplay, setMeasuredWaveDisplay] = useState<number | null>(null);
@@ -170,6 +222,9 @@ export const GroundTruthModal: React.FC<GroundTruthModalProps> = ({
   useEffect(() => {
     if (!isOpen) return;
     let cancelled = false;
+    setSkyCoverClass(t0Reference?.skyCoverClass ?? 'partly_cloudy');
+    setTempRelativeRating(0);
+    setWindRelativeRating(0);
     void (async () => {
       const list = await getGroundTruthObservations();
       if (!cancelled) {
@@ -188,11 +243,21 @@ export const GroundTruthModal: React.FC<GroundTruthModalProps> = ({
       cancelled = true;
       document.removeEventListener('keydown', handleKeyDown);
     };
-  }, [isOpen, onClose]);
+  }, [isOpen, onClose, t0Reference?.skyCoverClass]);
 
   const calibration = useMemo(
     () =>
       computeRegionalCalibration(
+        observations,
+        activeLocation.latitude,
+        activeLocation.longitude,
+      ),
+    [observations, activeLocation.latitude, activeLocation.longitude],
+  );
+
+  const cooldown = useMemo(
+    () =>
+      checkGroundTruthCooldown(
         observations,
         activeLocation.latitude,
         activeLocation.longitude,
@@ -208,6 +273,11 @@ export const GroundTruthModal: React.FC<GroundTruthModalProps> = ({
     100,
     Math.round((calibration.sampleCount / Math.max(1, calibration.minRequiredSamples)) * 100),
   );
+
+  const t0HourBadge =
+    t0Reference && forecast
+      ? formatLocalHourBadge(t0Reference.timestampUnix, forecast.timezone)
+      : tr('Agora', 'Now');
 
   const handleCaptureCameraPhoto = () => {
     void safeAction(
@@ -264,6 +334,18 @@ export const GroundTruthModal: React.FC<GroundTruthModalProps> = ({
 
   const handleSubmitObservation = (event: React.FormEvent) => {
     event.preventDefault();
+    if (cooldown.isCoolingDown) {
+      onToast?.({
+        type: 'warning',
+        title: tr('Intervalo de segurança ativo (30 min)', '30-minute safety cooldown active'),
+        message: tr(
+          `Aguarde ${cooldown.remainingMinutes} min para registrar novamente nesta coordenada.`,
+          `Please wait ${cooldown.remainingMinutes} min before logging again at this coordinate.`,
+        ),
+      });
+      return;
+    }
+
     void safeAction(
       async () => {
         const measuredWindKmh =
@@ -275,12 +357,20 @@ export const GroundTruthModal: React.FC<GroundTruthModalProps> = ({
         const measuredWaveM =
           measuredWaveDisplay !== null ? waveHeightToM(measuredWaveDisplay, units.wave) : null;
 
+        const derivedWindFeel = deriveWindFeelFromRelativeRating(
+          t0Reference?.windSpeed10mKmh,
+          windRelativeRating,
+        );
+
         const obs = createGroundTruthObservation({
           latitude: activeLocation.latitude,
           longitude: activeLocation.longitude,
           locationName: activeLocation.name,
           rainClass,
-          windFeel,
+          skyCoverClass,
+          windFeel: derivedWindFeel,
+          tempRelativeRating,
+          windRelativeRating,
           measuredWindKmh,
           measuredTempC,
           measuredWaveM,
@@ -503,132 +593,344 @@ export const GroundTruthModal: React.FC<GroundTruthModalProps> = ({
             onSubmit={handleSubmitObservation}
             className="rounded-2xl border border-sky-200/80 dark:border-sky-800/80 bg-[#f8fbff] dark:bg-[#0d1f36]/80 p-3.5 sm:p-4 space-y-3.5"
           >
-            <div className="flex flex-wrap items-center justify-between gap-2">
-              <h3 className="text-sm font-extrabold text-slate-900 dark:text-white">
-                {tr('Registrar Tempo Observado Agora (t0)', 'Log Current Observed Weather (t0)')}
-              </h3>
-              <span className="text-[11px] font-semibold text-slate-500 dark:text-sky-300/80">
-                {tr(
-                  'Pareamento automático com ECMWF, GFS, ICON e GEM',
-                  'Auto-paired with ECMWF, GFS, ICON & GEM',
+            {/* Pre-populated t0 Reference Card */}
+            <div
+              data-testid="gt-t0-reference-card"
+              className="rounded-xl border border-sky-200/90 dark:border-sky-700/80 bg-white dark:bg-[#132a47] p-3 space-y-2 shadow-2xs"
+            >
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <span className="text-xs font-extrabold text-slate-900 dark:text-white inline-flex items-center gap-1.5">
+                  <Sparkles className="w-3.5 h-3.5 text-[#0080cd] dark:text-sky-400" aria-hidden="true" />
+                  {tr(
+                    `Previsão FieldCast Agora (${t0HourBadge}) — Referência para Comparação`,
+                    `Current FieldCast Forecast (${t0HourBadge}) — Comparison Anchor`,
+                  )}
+                </span>
+                <span className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-sky-50 dark:bg-sky-950/70 text-[#0070b8] dark:text-sky-300 border border-sky-200/80 dark:border-sky-800">
+                  ECMWF • GFS • ICON • GEM
+                </span>
+              </div>
+
+              {t0Reference ? (
+                <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 text-xs">
+                  <div className="rounded-lg bg-sky-50/70 dark:bg-[#0d1f36] px-2.5 py-1.5 border border-sky-100 dark:border-sky-800/70">
+                    <span className="text-[10px] font-semibold text-slate-500 dark:text-sky-300/75 block">
+                      {tr('Temperatura', 'Temperature')}
+                    </span>
+                    <span className="text-sm font-extrabold text-slate-900 dark:text-white">
+                      {formatTempValue(t0Reference.temperature2mC, 1)}
+                    </span>
+                  </div>
+
+                  <div className="rounded-lg bg-sky-50/70 dark:bg-[#0d1f36] px-2.5 py-1.5 border border-sky-100 dark:border-sky-800/70">
+                    <span className="text-[10px] font-semibold text-slate-500 dark:text-sky-300/75 block">
+                      {tr('Velocidade do Vento', 'Wind Speed')}
+                    </span>
+                    <span className="text-sm font-extrabold text-slate-900 dark:text-white">
+                      {formatWindValue(t0Reference.windSpeed10mKmh, 0)}
+                    </span>
+                  </div>
+
+                  <div className="rounded-lg bg-sky-50/70 dark:bg-[#0d1f36] px-2.5 py-1.5 border border-sky-100 dark:border-sky-800/70">
+                    <span className="text-[10px] font-semibold text-slate-500 dark:text-sky-300/75 block">
+                      {tr('Chuva', 'Rain')}
+                    </span>
+                    <span className="text-sm font-extrabold text-slate-900 dark:text-white">
+                      {formatPrecipValue(t0Reference.precipitationMm ?? 0, 1)}/h{' '}
+                      <span className="text-[11px] font-bold text-[#0070b8] dark:text-sky-300">
+                        ({t0Reference.precipitationProbPct !== null
+                          ? `${Math.round(t0Reference.precipitationProbPct)}%`
+                          : '0%'})
+                      </span>
+                    </span>
+                  </div>
+
+                  <div className="rounded-lg bg-sky-50/70 dark:bg-[#0d1f36] px-2.5 py-1.5 border border-sky-100 dark:border-sky-800/70">
+                    <span className="text-[10px] font-semibold text-slate-500 dark:text-sky-300/75 block">
+                      {tr('Cobertura / Céu', 'Cloud / Sky')}
+                    </span>
+                    <span className="text-xs sm:text-sm font-extrabold text-slate-900 dark:text-white">
+                      {formatSkyCoverShort(t0Reference.skyCoverClass, locale)}
+                      {t0Reference.cloudCoverPct !== null ? ` (${t0Reference.cloudCoverPct}%)` : ''}
+                    </span>
+                  </div>
+                </div>
+              ) : (
+                <p className="text-xs text-slate-500 dark:text-sky-300/80">
+                  {tr(
+                    'Previsão horária ainda não carregada para este ponto; o registro será salvo com suas coordenadas.',
+                    'Hourly forecast not loaded yet for this coordinate; check-in will still save with active coordinates.',
+                  )}
+                </p>
+              )}
+            </div>
+
+            {/* 30-Minute Per-Location Cooldown Notice */}
+            {cooldown.isCoolingDown && (
+              <div
+                role="status"
+                data-testid="gt-cooldown-banner"
+                className="rounded-xl border border-amber-300 dark:border-amber-700/80 bg-amber-50/90 dark:bg-amber-950/50 px-3 py-2 flex items-center gap-2 text-xs text-amber-950 dark:text-amber-100"
+              >
+                <Clock className="w-4 h-4 text-amber-600 dark:text-amber-300 shrink-0" aria-hidden="true" />
+                <span>
+                  {tr(
+                    `Intervalo anti-duplicidade (${GROUND_TRUTH_COOLDOWN_MINUTES} min por ponto): aguarde ~${cooldown.remainingMinutes} min para novo check-in nesta coordenada.`,
+                    `Anti-duplicate cooldown (${GROUND_TRUTH_COOLDOWN_MINUTES} min per location): wait ~${cooldown.remainingMinutes} min before logging again here.`,
+                  )}
+                </span>
+              </div>
+            )}
+
+            {/* Objective Visual Selectors: Sky Cover + Rain (Full Evidence Weight 1.0) */}
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+              {/* Sky Cover / Clouds */}
+              <div className="space-y-1.5" data-testid="gt-sky-group">
+                <div className="flex items-center justify-between gap-1">
+                  <span className="text-xs font-bold text-slate-700 dark:text-sky-200 inline-flex items-center gap-1.5">
+                    <CloudSun className="w-3.5 h-3.5 text-amber-500" aria-hidden="true" />
+                    {tr('Céu / Nuvens Observados', 'Observed Sky / Clouds')}
+                  </span>
+                  <span className="text-[10px] font-bold text-emerald-700 dark:text-emerald-300">
+                    {tr('Visual • Peso 1.0', 'Visual • Wt 1.0')}
+                  </span>
+                </div>
+                <div className="grid grid-cols-3 gap-1.5">
+                  {SKY_COVER_OPTIONS.map(({ id, labelPt, labelEn, Icon }) => {
+                    const selected = skyCoverClass === id;
+                    return (
+                      <button
+                        key={id}
+                        type="button"
+                        data-testid={`gt-sky-${id}`}
+                        aria-pressed={selected}
+                        onClick={() => setSkyCoverClass(id)}
+                        className={`min-h-[44px] px-2 py-1.5 rounded-xl text-[11px] font-bold border inline-flex flex-col sm:flex-row items-center justify-center gap-1 text-center transition-colors focus:outline-none focus:ring-2 focus:ring-sky-500 ${
+                          selected
+                            ? 'bg-[#0080cd] text-white border-[#0080cd] shadow-xs'
+                            : 'bg-white dark:bg-[#132a47] text-slate-700 dark:text-sky-200 border-slate-200 dark:border-sky-800 hover:bg-sky-50 dark:hover:bg-sky-900/50'
+                        }`}
+                      >
+                        <Icon className="w-3.5 h-3.5 shrink-0" aria-hidden="true" />
+                        <span className="leading-tight">{tr(labelPt, labelEn)}</span>
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+
+              {/* Objective Rain Class */}
+              <div className="space-y-1.5">
+                <div className="flex items-center justify-between gap-1">
+                  <span className="text-xs font-bold text-slate-700 dark:text-sky-200 inline-flex items-center gap-1.5">
+                    <CloudRain className="w-3.5 h-3.5 text-[#0080cd] dark:text-sky-400" aria-hidden="true" />
+                    {tr('Chuva Observada', 'Observed Rain')}
+                  </span>
+                  <span className="text-[10px] font-bold text-emerald-700 dark:text-emerald-300">
+                    {tr('Visual • Peso 1.0', 'Visual • Wt 1.0')}
+                  </span>
+                </div>
+                <div className="grid grid-cols-2 sm:grid-cols-4 gap-1.5">
+                  {RAIN_CLASS_OPTIONS.map((opt) => {
+                    const selected = rainClass === opt.id;
+                    return (
+                      <button
+                        key={opt.id}
+                        type="button"
+                        data-testid={`gt-rain-${opt.id}`}
+                        aria-pressed={selected}
+                        onClick={() => setRainClass(opt.id)}
+                        className={`min-h-[44px] px-2 py-1.5 rounded-xl text-[11px] font-bold border transition-colors focus:outline-none focus:ring-2 focus:ring-sky-500 ${
+                          selected
+                            ? 'bg-[#0080cd] text-white border-[#0080cd] shadow-xs'
+                            : 'bg-white dark:bg-[#132a47] text-slate-700 dark:text-sky-200 border-slate-200 dark:border-sky-800 hover:bg-sky-50 dark:hover:bg-sky-900/50'
+                        }`}
+                      >
+                        {tr(opt.labelPt, opt.labelEn)}
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+            </div>
+
+            {/* Anchored 5-Level Relative Ordinal Classifiers (Zero Instrument Required, Evidence Weight 0.5) */}
+            <div className="space-y-3 pt-1 border-t border-sky-100 dark:border-sky-800/70">
+              {/* Temperature Relative Ordinal */}
+              <div className="space-y-1.5" data-testid="gt-temp-rating-group">
+                <div className="flex flex-wrap items-center justify-between gap-1">
+                  <span className="text-xs font-bold text-slate-700 dark:text-sky-200 inline-flex items-center gap-1.5">
+                    <Thermometer className="w-3.5 h-3.5 text-orange-500" aria-hidden="true" />
+                    <span>
+                      {tr('Temperatura Real vs. Prevista', 'Actual vs. Forecast Temperature')}
+                      {t0Reference?.temperature2mC !== null &&
+                        t0Reference?.temperature2mC !== undefined && (
+                          <strong className="ml-1 text-[#0070b8] dark:text-sky-300">
+                            ({formatTempValue(t0Reference.temperature2mC, 1)})
+                          </strong>
+                        )}
+                    </span>
+                  </span>
+                  <span className="text-[10px] font-semibold text-slate-500 dark:text-sky-300/80">
+                    {tr('Ordinal direcional • Peso 0.5', 'Directional ordinal • Wt 0.5')}
+                  </span>
+                </div>
+                <div className="grid grid-cols-5 gap-1">
+                  {RELATIVE_RATING_OPTIONS.map((opt) => {
+                    const selected = tempRelativeRating === opt.value;
+                    return (
+                      <button
+                        key={opt.value}
+                        type="button"
+                        data-testid={`gt-temp-rating-${opt.value}`}
+                        aria-pressed={selected}
+                        onClick={() => setTempRelativeRating(opt.value)}
+                        className={`min-h-[44px] px-1.5 py-1.5 rounded-xl text-[10px] sm:text-[11px] font-bold border flex flex-col items-center justify-center leading-tight text-center transition-colors focus:outline-none focus:ring-2 focus:ring-sky-500 ${
+                          selected
+                            ? opt.value === 0
+                              ? 'bg-emerald-600 text-white border-emerald-600 shadow-xs'
+                              : opt.value < 0
+                                ? 'bg-sky-600 text-white border-sky-600 shadow-xs'
+                                : 'bg-orange-500 text-white border-orange-500 shadow-xs'
+                            : 'bg-white dark:bg-[#132a47] text-slate-700 dark:text-sky-200 border-slate-200 dark:border-sky-800 hover:bg-sky-50 dark:hover:bg-sky-900/50'
+                        }`}
+                      >
+                        <span>{tr(opt.shortPt, opt.shortEn)}</span>
+                        <span className="text-[10px] font-mono opacity-85">({opt.tag})</span>
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+
+              {/* Wind Relative Ordinal */}
+              <div className="space-y-1.5" data-testid="gt-wind-rating-group">
+                <div className="flex flex-wrap items-center justify-between gap-1">
+                  <span className="text-xs font-bold text-slate-700 dark:text-sky-200 inline-flex items-center gap-1.5">
+                    <Wind className="w-3.5 h-3.5 text-[#0080cd] dark:text-sky-400" aria-hidden="true" />
+                    <span>
+                      {tr('Vento Real vs. Previsto', 'Actual vs. Forecast Wind')}
+                      {t0Reference?.windSpeed10mKmh !== null &&
+                        t0Reference?.windSpeed10mKmh !== undefined && (
+                          <strong className="ml-1 text-[#0070b8] dark:text-sky-300">
+                            ({formatWindValue(t0Reference.windSpeed10mKmh, 0)})
+                          </strong>
+                        )}
+                    </span>
+                  </span>
+                  <span className="text-[10px] font-semibold text-slate-500 dark:text-sky-300/80">
+                    {tr('Ordinal direcional • Peso 0.5', 'Directional ordinal • Wt 0.5')}
+                  </span>
+                </div>
+                <div className="grid grid-cols-5 gap-1">
+                  {RELATIVE_RATING_OPTIONS.map((opt) => {
+                    const selected = windRelativeRating === opt.value;
+                    return (
+                      <button
+                        key={opt.value}
+                        type="button"
+                        data-testid={`gt-wind-rating-${opt.value}`}
+                        aria-pressed={selected}
+                        onClick={() => setWindRelativeRating(opt.value)}
+                        className={`min-h-[44px] px-1.5 py-1.5 rounded-xl text-[10px] sm:text-[11px] font-bold border flex flex-col items-center justify-center leading-tight text-center transition-colors focus:outline-none focus:ring-2 focus:ring-sky-500 ${
+                          selected
+                            ? opt.value === 0
+                              ? 'bg-emerald-600 text-white border-emerald-600 shadow-xs'
+                              : opt.value < 0
+                                ? 'bg-sky-600 text-white border-sky-600 shadow-xs'
+                                : 'bg-amber-600 text-white border-amber-600 shadow-xs'
+                            : 'bg-white dark:bg-[#132a47] text-slate-700 dark:text-sky-200 border-slate-200 dark:border-sky-800 hover:bg-sky-50 dark:hover:bg-sky-900/50'
+                        }`}
+                      >
+                        <span>{tr(opt.shortPt, opt.shortEn)}</span>
+                        <span className="text-[10px] font-mono opacity-85">({opt.tag})</span>
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+            </div>
+
+            {/* Collapsed / Secondary Optional Exact Instrument Measurements (Weight 1.0) */}
+            <div className="rounded-xl border border-slate-200/85 dark:border-sky-800/75 bg-white/75 dark:bg-[#132a47]/65">
+              <button
+                type="button"
+                data-testid="gt-instrument-toggle"
+                aria-expanded={showInstrumentInputs}
+                onClick={() => setShowInstrumentInputs((prev) => !prev)}
+                className="w-full min-h-[44px] px-3 py-2 flex items-center justify-between gap-2 text-xs font-bold text-slate-700 dark:text-sky-200 hover:bg-sky-50/70 dark:hover:bg-sky-900/30 rounded-xl transition-colors"
+              >
+                <span className="inline-flex items-center gap-1.5">
+                  <Gauge className="w-3.5 h-3.5 text-[#0080cd] dark:text-sky-400" aria-hidden="true" />
+                  <span>
+                    {tr(
+                      'Medições Instrumentais Exatas — Peso 1.0 (Opcional)',
+                      'Exact Instrument Readings — Weight 1.0 (Optional)',
+                    )}
+                  </span>
+                </span>
+                {showInstrumentInputs ? (
+                  <ChevronUp className="w-4 h-4 shrink-0" aria-hidden="true" />
+                ) : (
+                  <ChevronDown className="w-4 h-4 shrink-0" aria-hidden="true" />
                 )}
-              </span>
-            </div>
+              </button>
 
-            {/* Rain Class Selector */}
-            <div className="space-y-1.5">
-              <span className="text-xs font-bold text-slate-700 dark:text-sky-200 inline-flex items-center gap-1.5">
-                <CloudRain className="w-3.5 h-3.5 text-[#0080cd] dark:text-sky-400" aria-hidden="true" />
-                {tr('Chuva Observada', 'Observed Rain')}
-              </span>
-              <div className="grid grid-cols-2 sm:grid-cols-4 gap-1.5">
-                {RAIN_CLASS_OPTIONS.map((opt) => {
-                  const selected = rainClass === opt.id;
-                  return (
-                    <button
-                      key={opt.id}
-                      type="button"
-                      data-testid={`gt-rain-${opt.id}`}
-                      aria-pressed={selected}
-                      onClick={() => setRainClass(opt.id)}
-                      className={`min-h-[44px] px-2.5 py-1.5 rounded-xl text-xs font-bold border transition-colors focus:outline-none focus:ring-2 focus:ring-sky-500 ${
-                        selected
-                          ? 'bg-[#0080cd] text-white border-[#0080cd] shadow-xs'
-                          : 'bg-white dark:bg-[#132a47] text-slate-700 dark:text-sky-200 border-slate-200 dark:border-sky-800 hover:bg-sky-50 dark:hover:bg-sky-900/50'
-                      }`}
-                    >
-                      {tr(opt.labelPt, opt.labelEn)}
-                    </button>
-                  );
-                })}
-              </div>
-            </div>
+              {showInstrumentInputs && (
+                <div className="px-3 pb-3 pt-1 grid grid-cols-1 sm:grid-cols-3 gap-2.5 border-t border-slate-100 dark:border-sky-800/60">
+                  <label className="space-y-1 text-xs">
+                    <span className="font-semibold text-slate-600 dark:text-sky-200 block">
+                      {tr(`Vento Medido (${windLabel})`, `Measured Wind (${windLabel})`)}
+                    </span>
+                    <NumericInput
+                      data-testid="gt-measured-wind"
+                      value={measuredWindDisplay}
+                      min={0}
+                      max={300}
+                      decimals={1}
+                      placeholder="—"
+                      onValueChange={(_raw, parsed) => setMeasuredWindDisplay(parsed)}
+                      onCommit={(committed) => setMeasuredWindDisplay(committed)}
+                      className="w-full min-h-[44px] px-3 py-2 rounded-xl border border-slate-200 dark:border-sky-800 bg-white dark:bg-[#0d1f36] text-sm font-semibold text-slate-900 dark:text-white focus:outline-none focus:ring-2 focus:ring-sky-500"
+                    />
+                  </label>
 
-            {/* Wind Feel Selector */}
-            <div className="space-y-1.5">
-              <span className="text-xs font-bold text-slate-700 dark:text-sky-200 inline-flex items-center gap-1.5">
-                <Wind className="w-3.5 h-3.5 text-[#0080cd] dark:text-sky-400" aria-hidden="true" />
-                {tr('Sensação de Vento', 'Wind Feel')}
-              </span>
-              <div className="grid grid-cols-2 sm:grid-cols-5 gap-1.5">
-                {WIND_FEEL_OPTIONS.map((opt) => {
-                  const selected = windFeel === opt.id;
-                  return (
-                    <button
-                      key={opt.id}
-                      type="button"
-                      data-testid={`gt-wind-${opt.id}`}
-                      aria-pressed={selected}
-                      onClick={() => setWindFeel(opt.id)}
-                      className={`min-h-[44px] px-2.5 py-1.5 rounded-xl text-xs font-bold border transition-colors focus:outline-none focus:ring-2 focus:ring-sky-500 ${
-                        selected
-                          ? 'bg-[#0080cd] text-white border-[#0080cd] shadow-xs'
-                          : 'bg-white dark:bg-[#132a47] text-slate-700 dark:text-sky-200 border-slate-200 dark:border-sky-800 hover:bg-sky-50 dark:hover:bg-sky-900/50'
-                      }`}
-                    >
-                      {tr(opt.labelPt, opt.labelEn)}
-                    </button>
-                  );
-                })}
-              </div>
-            </div>
+                  <label className="space-y-1 text-xs">
+                    <span className="font-semibold text-slate-600 dark:text-sky-200 block">
+                      {tr(`Temperatura (${tempLabel})`, `Temperature (${tempLabel})`)}
+                    </span>
+                    <NumericInput
+                      data-testid="gt-measured-temp"
+                      value={measuredTempDisplay}
+                      min={-60}
+                      max={140}
+                      decimals={1}
+                      allowNegative={true}
+                      placeholder="—"
+                      onValueChange={(_raw, parsed) => setMeasuredTempDisplay(parsed)}
+                      onCommit={(committed) => setMeasuredTempDisplay(committed)}
+                      className="w-full min-h-[44px] px-3 py-2 rounded-xl border border-slate-200 dark:border-sky-800 bg-white dark:bg-[#0d1f36] text-sm font-semibold text-slate-900 dark:text-white focus:outline-none focus:ring-2 focus:ring-sky-500"
+                    />
+                  </label>
 
-            {/* Optional Numeric Measurements */}
-            <div className="grid grid-cols-1 sm:grid-cols-3 gap-2.5">
-              <label className="space-y-1 text-xs">
-                <span className="font-semibold text-slate-600 dark:text-sky-200 block">
-                  {tr(`Vento Medido (${windLabel})`, `Measured Wind (${windLabel})`)}{' '}
-                  <span className="text-[10px] opacity-70">({tr('Opcional', 'Optional')})</span>
-                </span>
-                <NumericInput
-                  data-testid="gt-measured-wind"
-                  value={measuredWindDisplay}
-                  min={0}
-                  max={300}
-                  decimals={1}
-                  placeholder="—"
-                  onValueChange={(_raw, parsed) => setMeasuredWindDisplay(parsed)}
-                  onCommit={(committed) => setMeasuredWindDisplay(committed)}
-                  className="w-full min-h-[44px] px-3 py-2 rounded-xl border border-slate-200 dark:border-sky-800 bg-white dark:bg-[#132a47] text-sm font-semibold text-slate-900 dark:text-white focus:outline-none focus:ring-2 focus:ring-sky-500"
-                />
-              </label>
-
-              <label className="space-y-1 text-xs">
-                <span className="font-semibold text-slate-600 dark:text-sky-200 block">
-                  {tr(`Temperatura (${tempLabel})`, `Temperature (${tempLabel})`)}{' '}
-                  <span className="text-[10px] opacity-70">({tr('Opcional', 'Optional')})</span>
-                </span>
-                <NumericInput
-                  data-testid="gt-measured-temp"
-                  value={measuredTempDisplay}
-                  min={-60}
-                  max={140}
-                  decimals={1}
-                  allowNegative={true}
-                  placeholder="—"
-                  onValueChange={(_raw, parsed) => setMeasuredTempDisplay(parsed)}
-                  onCommit={(committed) => setMeasuredTempDisplay(committed)}
-                  className="w-full min-h-[44px] px-3 py-2 rounded-xl border border-slate-200 dark:border-sky-800 bg-white dark:bg-[#132a47] text-sm font-semibold text-slate-900 dark:text-white focus:outline-none focus:ring-2 focus:ring-sky-500"
-                />
-              </label>
-
-              <label className="space-y-1 text-xs">
-                <span className="font-semibold text-slate-600 dark:text-sky-200 block">
-                  {tr(`Onda (${waveLabel})`, `Wave (${waveLabel})`)}{' '}
-                  <span className="text-[10px] opacity-70">({tr('Opcional', 'Optional')})</span>
-                </span>
-                <NumericInput
-                  data-testid="gt-measured-wave"
-                  value={measuredWaveDisplay}
-                  min={0}
-                  max={40}
-                  decimals={1}
-                  placeholder="—"
-                  onValueChange={(_raw, parsed) => setMeasuredWaveDisplay(parsed)}
-                  onCommit={(committed) => setMeasuredWaveDisplay(committed)}
-                  className="w-full min-h-[44px] px-3 py-2 rounded-xl border border-slate-200 dark:border-sky-800 bg-white dark:bg-[#132a47] text-sm font-semibold text-slate-900 dark:text-white focus:outline-none focus:ring-2 focus:ring-sky-500"
-                />
-              </label>
+                  <label className="space-y-1 text-xs">
+                    <span className="font-semibold text-slate-600 dark:text-sky-200 block">
+                      {tr(`Onda (${waveLabel})`, `Wave (${waveLabel})`)}
+                    </span>
+                    <NumericInput
+                      data-testid="gt-measured-wave"
+                      value={measuredWaveDisplay}
+                      min={0}
+                      max={40}
+                      decimals={1}
+                      placeholder="—"
+                      onValueChange={(_raw, parsed) => setMeasuredWaveDisplay(parsed)}
+                      onCommit={(committed) => setMeasuredWaveDisplay(committed)}
+                      className="w-full min-h-[44px] px-3 py-2 rounded-xl border border-slate-200 dark:border-sky-800 bg-white dark:bg-[#0d1f36] text-sm font-semibold text-slate-900 dark:text-white focus:outline-none focus:ring-2 focus:ring-sky-500"
+                    />
+                  </label>
+                </div>
+              )}
             </div>
 
             {/* Optional Note + Strictly Optional Photo */}
@@ -719,14 +1021,19 @@ export const GroundTruthModal: React.FC<GroundTruthModalProps> = ({
               <button
                 type="submit"
                 data-testid="gt-submit-btn"
-                disabled={isSaving}
-                className="min-h-[44px] px-5 py-2 rounded-xl text-xs sm:text-sm font-extrabold inline-flex items-center justify-center gap-2 bg-[#0080cd] hover:bg-[#006bb3] text-white shadow-sm disabled:opacity-60 transition-colors focus:outline-none focus:ring-2 focus:ring-sky-500"
+                disabled={isSaving || cooldown.isCoolingDown}
+                className="min-h-[44px] px-5 py-2 rounded-xl text-xs sm:text-sm font-extrabold inline-flex items-center justify-center gap-2 bg-[#0080cd] hover:bg-[#006bb3] text-white shadow-sm disabled:opacity-60 disabled:cursor-not-allowed transition-colors focus:outline-none focus:ring-2 focus:ring-sky-500"
               >
                 <CheckCircle2 className="w-4 h-4" aria-hidden="true" />
                 <span>
                   {isSaving
                     ? tr('Salvando...', 'Saving...')
-                    : tr('Registrar Validação em Campo', 'Save Field Validation')}
+                    : cooldown.isCoolingDown
+                      ? tr(
+                          `Aguarde ${cooldown.remainingMinutes} min`,
+                          `Wait ${cooldown.remainingMinutes} min`,
+                        )
+                      : tr('Registrar Validação em Campo', 'Save Field Validation')}
                 </span>
               </button>
             </div>
@@ -749,7 +1056,7 @@ export const GroundTruthModal: React.FC<GroundTruthModalProps> = ({
                 className="px-2.5 py-0.5 rounded-full text-xs font-extrabold bg-sky-50 dark:bg-sky-950/70 text-[#0070b8] dark:text-sky-200 border border-sky-200 dark:border-sky-800"
               >
                 {calibration.sampleCount} / {MIN_CALIBRATION_SAMPLES}{' '}
-                {tr('registros na região', 'regional records')}
+                {tr('registros independentes', 'independent records')}
               </span>
             </div>
 
@@ -767,12 +1074,12 @@ export const GroundTruthModal: React.FC<GroundTruthModalProps> = ({
                 <span>
                   {calibration.calibrationEligible
                     ? tr(
-                        `Calibração Bayesiana desbloqueada (encolhimento λ = ${Math.round(calibration.shrinkageFactor * 100)}%, limites [10%–50%]).`,
-                        `Bayesian calibration unlocked (shrinkage λ = ${Math.round(calibration.shrinkageFactor * 100)}%, bounds [10%–50%]).`,
+                        `Calibração Bayesiana desbloqueada (λ = ${Math.round(calibration.shrinkageFactor * 100)}%, limites [10%–50%], evidência 1.0 visual/instrumental vs. 0.5 ordinal).`,
+                        `Bayesian calibration unlocked (λ = ${Math.round(calibration.shrinkageFactor * 100)}%, bounds [10%–50%], 1.0 visual/instrument vs. 0.5 ordinal weight).`,
                       )
                     : tr(
-                        `Faltam ${Math.max(0, MIN_CALIBRATION_SAMPLES - calibration.sampleCount)} registro(s) para desbloquear calibração regional.`,
-                        `${Math.max(0, MIN_CALIBRATION_SAMPLES - calibration.sampleCount)} more record(s) needed to unlock regional calibration.`,
+                        `Faltam ${Math.max(0, MIN_CALIBRATION_SAMPLES - calibration.sampleCount)} registro(s) independentes (cooldown 30 min/ponto) para desbloquear calibração.`,
+                        `${Math.max(0, MIN_CALIBRATION_SAMPLES - calibration.sampleCount)} more independent record(s) (30-min/site cooldown) needed to unlock calibration.`,
                       )}
                 </span>
                 {calibration.bestModel && (
@@ -791,6 +1098,7 @@ export const GroundTruthModal: React.FC<GroundTruthModalProps> = ({
                   <tr className="border-b border-slate-200 dark:border-sky-800 bg-slate-50 dark:bg-[#132a47] text-slate-600 dark:text-sky-200">
                     <th className="py-2 px-2.5 font-bold">{tr('Modelo', 'Model')}</th>
                     <th className="py-2 px-2.5 font-bold">Skill</th>
+                    <th className="py-2 px-2.5 font-bold">{tr('Alinh. Ord.', 'Ord. Align')}</th>
                     <th className="py-2 px-2.5 font-bold">{tr('MAE Vento', 'Wind MAE')}</th>
                     <th className="py-2 px-2.5 font-bold">{tr('Viés Vento', 'Wind Bias')}</th>
                     <th className="py-2 px-2.5 font-bold">{tr('MAE Temp', 'Temp MAE')}</th>
@@ -821,6 +1129,11 @@ export const GroundTruthModal: React.FC<GroundTruthModalProps> = ({
                         </th>
                         <td className="py-2 px-2.5 font-extrabold">
                           {m.sampleCount > 0 ? `${m.compositeSkillScore}/100` : '—'}
+                        </td>
+                        <td className="py-2 px-2.5 font-mono text-[11px]">
+                          {m.ordinalAlignmentPct !== null && m.ordinalAlignmentPct !== undefined
+                            ? `${m.ordinalAlignmentPct}%`
+                            : '—'}
                         </td>
                         <td className="py-2 px-2.5 font-mono text-[11px]">
                           {formatSkillWind(m.windMaeKmh)}
@@ -983,8 +1296,18 @@ export const GroundTruthModal: React.FC<GroundTruthModalProps> = ({
                             {obs.locationName}
                           </p>
                           <p className="text-[11px] text-slate-600 dark:text-sky-200">
-                            {formatRainClassShort(obs.rainClass, locale)} •{' '}
-                            {formatWindFeelShort(obs.windFeel, locale)}
+                            {formatRainClassShort(obs.rainClass, locale)}
+                            {obs.skyCoverClass
+                              ? ` • ${formatSkyCoverShort(obs.skyCoverClass, locale)}`
+                              : ''}
+                            {obs.tempRelativeRating !== undefined &&
+                            obs.tempRelativeRating !== null
+                              ? ` • T(${formatRatingTag(obs.tempRelativeRating)})`
+                              : ''}
+                            {obs.windRelativeRating !== undefined &&
+                            obs.windRelativeRating !== null
+                              ? ` • V(${formatRatingTag(obs.windRelativeRating)})`
+                              : ''}
                           </p>
                           <p className="text-[10px] text-slate-500 dark:text-sky-300/75 font-mono">
                             {new Date(obs.timestampUtcIso).toLocaleString(intlLocale, {

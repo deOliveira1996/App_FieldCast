@@ -177,12 +177,12 @@ const FIELD_EXTRA_ENTRIES_PT: GlossaryEntry[] = [
     title: 'Manual V4.3: Validação Local (Ground-Truth), Calibração Bayesiana & Troca JSON',
     badge: 'Ground-Truth • Troca P2P JSON',
     summary:
-      'Como registrar condições reais em campo, auditar o desempenho dos 4 modelos na sua região e compartilhar datasets offline com sua equipe.',
+      'Como registrar condições reais em campo sem instrumentos, mitigar viés do observador e compartilhar datasets offline com sua equipe.',
     bullets: [
-      'Check-in Rápido ("Validar Tempo"): Vincula automaticamente as coordenadas ativas e pareia sua observação (chuva, sensação de vento, medições opcionais e foto estritamente opcional) com ECMWF, GFS, ICON e GEM em t0.',
+      'Referência t0 + Classificador Ordinal Ancorado (-2 a +2): O modal exibe a previsão atual (Temperatura, Vento, Chuva e Céu) como âncora; basta marcar se a temperatura/vento reais estão de "Muito abaixo (-2)" a "Muito acima (+2)", selecionar céu/chuva visual e opcionalmente abrir medições instrumentais ou foto.',
+      'Mitigação de Viés do Observador & Cooldown 30 min: Classes visuais objetivas (chuva/céu) e medições instrumentais recebem peso de evidência 1.0; avaliações ordinais relativas recebem peso atenuado 0.5 com ranqueamento direcional entre ECMWF/GFS/ICON/GEM, e um cooldown de 30 min por ponto impede duplicatas.',
       'Aviso de Divergência em Tempo Real (t0): Se um check-in recente (≤ 90 min, ≤ 20 km) contradisser a previsão atual, o Resumo Diário exibe um banner visual apenas para a hora atual, preservando intactas todas as horas futuras.',
-      'Calibração Bayesiana Conservadora (n ≥ 10): Após 10 registros na região (raio 35 km), desbloqueia o modo opcional "Usar Modelo Calibrado Localmente" com encolhimento n / (n + 10) e pesos restritos a [10%–50%] — evitando sobreajuste.',
-      'Troca Offline Peer-to-Peer (.json): Exporte seu conjunto em formato validado (fieldcast-gt-v1) e mescle arquivos recebidos de colegas diretamente no aparelho, sem backend e sem duplicar registros.',
+      'Calibração Bayesiana Conservadora (n ≥ 10) & Troca P2P (.json): Após 10 registros independentes na região (raio 35 km), desbloqueia o modo opcional "Calibrado Local" com encolhimento n / (n + 10) e limites [10%–50%], além de exportação/mesclagem JSON (fieldcast-gt-v1) sem servidor.',
     ],
     tip: 'O consenso uniforme FieldCast Ensemble permanece como padrão; você pode alternar para "Calibrado Local" e voltar ao padrão com 1 clique.',
   },
@@ -252,12 +252,12 @@ const FIELD_EXTRA_ENTRIES_EN: GlossaryEntry[] = [
     title: 'V4.3 Manual: Local Ground-Truth Validation, Bayesian Calibration & Peer JSON Sharing',
     badge: 'Ground-Truth • Peer JSON Share',
     summary:
-      'How to log observed weather in the field, audit regional NWP model skill, and merge offline datasets across team devices.',
+      'How to log observed field weather with zero instruments, mitigate observer bias, and merge offline datasets across team devices.',
     bullets: [
-      'Quick Check-In ("Validate Weather"): Auto-binds your active GPS/location coordinates and pairs your report (rain class, wind feel, optional measurements, and strictly optional photo) with ECMWF, GFS, ICON, and GEM at t0.',
+      'Pre-populated t0 Anchor + 5-Level Ordinal Classifier (-2 to +2): Displays current forecast Temperature, Wind, Rain, and Sky Cover right at the top; rate real temperature/wind from "Much lower (-2)" to "Much higher (+2)", pick visual sky/rain classes, and optionally expand exact instrument inputs or attach a photo.',
+      'Observer-Bias Mitigation & 30-Min Cooldown: Objective visual classes (rain/sky) and exact instrument readings carry full evidence weight (1.0); perceptual ordinal ratings carry attenuated weight (0.5) using directional model ranking across ECMWF/GFS/ICON/GEM, while a 30-min per-location cooldown guards against duplicate spam.',
       'Live Current-Hour Divergence Banner (t0): Recent local check-ins (≤ 90 min, ≤ 20 km) that contradict t0 show an immediate visual notice on the Daily Summary while keeping all future forecast hours untouched.',
-      'Conservative Bayesian Calibration (n ≥ 10): Collecting 10+ regional records (35 km radius) unlocks the optional "Use Locally Calibrated Model" toggle with Bayesian shrinkage n / (n + 10) clamped to [10%–50%] to prevent overfitting.',
-      'Offline Peer-to-Peer JSON Exchange: Export validated packages (fieldcast-gt-v1) and merge teammate JSON files locally with automatic deduplication and zero backend.',
+      'Conservative Bayesian Calibration (n ≥ 10) & Peer JSON Exchange: Collecting 10+ independent regional records (35 km radius) unlocks the optional "Locally Calibrated" toggle with Bayesian shrinkage n / (n + 10) clamped to [10%–50%], plus Zod-validated offline JSON export/merge (fieldcast-gt-v1).',
     ],
     tip: 'Standard equal-weight FieldCast Ensemble stays the default; switch between "Locally Calibrated" and standard consensus in one tap.',
   },

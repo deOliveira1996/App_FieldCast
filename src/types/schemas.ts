@@ -355,6 +355,14 @@ export type NoaaSwpcKpPoint = z.infer<typeof NoaaSwpcKpPointSchema>;
  */
 export const GroundTruthRainClassSchema = z.enum(['none', 'light', 'moderate', 'heavy']);
 export const GroundTruthWindFeelSchema = z.enum(['calm', 'light', 'moderate', 'strong', 'gale']);
+export const GroundTruthSkyCoverClassSchema = z.enum(['clear', 'partly_cloudy', 'overcast']);
+export const GroundTruthRelativeRatingSchema = z.union([
+  z.literal(-2),
+  z.literal(-1),
+  z.literal(0),
+  z.literal(1),
+  z.literal(2),
+]);
 
 export const GroundTruthModelPredictionSchema = z.object({
   windSpeed10mKmh: z.number().finite().nullable(),
@@ -362,6 +370,7 @@ export const GroundTruthModelPredictionSchema = z.object({
   temperature2mC: z.number().finite().nullable(),
   precipitationMm: z.number().finite().nullable(),
   precipitationProbPct: z.number().finite().nullable().optional(),
+  cloudCoverPct: z.number().finite().min(0).max(100).nullable().optional(),
 });
 
 export const GroundTruthObservationSchema = z.object({
@@ -375,6 +384,9 @@ export const GroundTruthObservationSchema = z.object({
   locationName: z.string(),
   rainClass: GroundTruthRainClassSchema,
   windFeel: GroundTruthWindFeelSchema,
+  skyCoverClass: GroundTruthSkyCoverClassSchema.optional(),
+  tempRelativeRating: GroundTruthRelativeRatingSchema.nullable().optional(),
+  windRelativeRating: GroundTruthRelativeRatingSchema.nullable().optional(),
   measuredWindKmh: z.number().finite().min(0).max(400).nullable().optional(),
   measuredTempC: z.number().finite().min(-90).max(70).nullable().optional(),
   measuredWaveM: z.number().finite().min(0).max(40).nullable().optional(),
@@ -392,6 +404,7 @@ export const GroundTruthObservationSchema = z.object({
   ensembleTempC: z.number().finite().nullable().optional(),
   ensemblePrecipMm: z.number().finite().nullable().optional(),
   ensemblePrecipProbPct: z.number().finite().nullable().optional(),
+  ensembleCloudCoverPct: z.number().finite().min(0).max(100).nullable().optional(),
   sourceDeviceLabel: z.string().optional(),
 });
 
