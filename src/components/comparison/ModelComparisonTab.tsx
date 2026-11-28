@@ -22,6 +22,7 @@ import {
   Waves,
   Wind,
 } from 'lucide-react';
+import { IS_MINIMAL_EDITION } from '../../config/appEdition';
 import { useLocale } from '../../context/LocaleContext';
 import { useUnits } from '../../context/UnitsContext';
 import { getGroundTruthObservations } from '../../db/database';
@@ -1083,99 +1084,101 @@ export const ModelComparisonTab: React.FC<ModelComparisonTabProps> = ({
           </div>
         </CollapsibleModule>
 
-        {/* 3. Compact On-Demand Plot Toggle Controls (Collapsible) */}
-        <CollapsibleModule
-          testId="comparison-plots-module"
-          title={tr(
-            `Gráficos Analíticos Sob Demanda (${horizonHours}h)`,
-            `On-Demand Analytical Charts (${horizonHours}h)`,
-          )}
-          icon={<BarChart3 className="w-4 h-4 text-[#0080cd] dark:text-sky-400" aria-hidden="true" />}
-          defaultOpen={true}
-          keepMounted={true}
-          bodyClassName="px-3 pb-2.5 pt-0.5 sm:px-3.5 sm:pb-3"
-        >
-          <div
-            data-testid="comparison-plots-toggles"
-            aria-label={tr(
-              'Controles de Gráficos Analíticos Sob Demanda',
-              'On-Demand Analytical Chart Controls',
+        {/* 3. Compact On-Demand Plot Toggle Controls (Collapsible — hidden in Minimal edition) */}
+        {!IS_MINIMAL_EDITION && (
+          <CollapsibleModule
+            testId="comparison-plots-module"
+            title={tr(
+              `Gráficos Analíticos Sob Demanda (${horizonHours}h)`,
+              `On-Demand Analytical Charts (${horizonHours}h)`,
             )}
-            className="flex flex-wrap items-center gap-1.5"
+            icon={<BarChart3 className="w-4 h-4 text-[#0080cd] dark:text-sky-400" aria-hidden="true" />}
+            defaultOpen={true}
+            keepMounted={true}
+            bodyClassName="px-3 pb-2.5 pt-0.5 sm:px-3.5 sm:pb-3"
           >
-            {/* Master Toggle */}
-            <button
-              type="button"
-              data-testid="master-plots-toggle"
-              onClick={handleMasterPlotsToggle}
-              aria-pressed={showAnalyticalPlots}
-              className={`min-h-[44px] min-w-[44px] px-3 py-1.5 rounded-xl text-xs font-extrabold inline-flex items-center justify-center gap-1.5 border shrink-0 transition-all focus:outline-none focus:ring-2 focus:ring-sky-500 ${
-                showAnalyticalPlots
-                  ? 'bg-[#0080cd] text-white border-[#0080cd] shadow-sm'
-                  : 'bg-[#f4f8fb] dark:bg-[#0d1f36] text-slate-800 dark:text-sky-100 border-sky-200 dark:border-sky-700 hover:bg-sky-50'
-              }`}
-            >
-              {showAnalyticalPlots ? (
-                <Eye className="w-3.5 h-3.5" aria-hidden="true" />
-              ) : (
-                <EyeOff className="w-3.5 h-3.5 text-[#0080cd] dark:text-sky-400" aria-hidden="true" />
+            <div
+              data-testid="comparison-plots-toggles"
+              aria-label={tr(
+                'Controles de Gráficos Analíticos Sob Demanda',
+                'On-Demand Analytical Chart Controls',
               )}
-              <span>{tr('Exibir Gráficos', 'Show Charts')}</span>
-            </button>
+              className="flex flex-wrap items-center gap-1.5"
+            >
+              {/* Master Toggle */}
+              <button
+                type="button"
+                data-testid="master-plots-toggle"
+                onClick={handleMasterPlotsToggle}
+                aria-pressed={showAnalyticalPlots}
+                className={`min-h-[44px] min-w-[44px] px-3 py-1.5 rounded-xl text-xs font-extrabold inline-flex items-center justify-center gap-1.5 border shrink-0 transition-all focus:outline-none focus:ring-2 focus:ring-sky-500 ${
+                  showAnalyticalPlots
+                    ? 'bg-[#0080cd] text-white border-[#0080cd] shadow-sm'
+                    : 'bg-[#f4f8fb] dark:bg-[#0d1f36] text-slate-800 dark:text-sky-100 border-sky-200 dark:border-sky-700 hover:bg-sky-50'
+                }`}
+              >
+                {showAnalyticalPlots ? (
+                  <Eye className="w-3.5 h-3.5" aria-hidden="true" />
+                ) : (
+                  <EyeOff className="w-3.5 h-3.5 text-[#0080cd] dark:text-sky-400" aria-hidden="true" />
+                )}
+                <span>{tr('Exibir Gráficos', 'Show Charts')}</span>
+              </button>
 
-            {/* Per-Plot Toggle Buttons */}
-            {(
-              [
-                {
-                  key: 'windAndVertical' as const,
-                  label: tr('Vento & Perfil Vertical', 'Wind & Vertical Profile'),
-                  Icon: Wind,
-                },
-                {
-                  key: 'rainAndPressure' as const,
-                  label: tr('Chuva & Pressão', 'Rain & Pressure'),
-                  Icon: CloudRain,
-                },
-                {
-                  key: 'wavesAndMsl' as const,
-                  label: tr('Ondas & Maré MSL', 'Waves & MSL Tide'),
-                  Icon: Waves,
-                },
-                {
-                  key: 'stratifiedClouds' as const,
-                  label: tr('Nebulosidade Estratificada', 'Stratified Clouds'),
-                  Icon: Cloud,
-                },
-              ] as const
-            ).map(({ key, label, Icon }) => {
-              const isActive = showAnalyticalPlots && plotToggles[key];
-              return (
-                <button
-                  key={key}
-                  type="button"
-                  data-testid={`plot-toggle-${key}`}
-                  onClick={() => handleTogglePlotGroup(key)}
-                  aria-pressed={isActive}
-                  className={`min-h-[44px] min-w-[44px] px-2.5 py-1.5 rounded-xl text-xs font-bold inline-flex items-center gap-1.5 border transition-all focus:outline-none focus:ring-2 focus:ring-sky-500 ${
-                    isActive
-                      ? 'bg-sky-50 dark:bg-sky-900/70 text-[#0070b8] dark:text-sky-100 border-sky-400 dark:border-sky-500 shadow-xs'
-                      : 'bg-white dark:bg-[#0d1f36]/65 text-slate-600 dark:text-sky-200/80 border-slate-200 dark:border-sky-800 hover:bg-sky-50/70'
-                  }`}
-                >
-                  {isActive ? (
-                    <Check className="w-3.5 h-3.5 text-[#0080cd] dark:text-sky-300" aria-hidden="true" />
-                  ) : (
-                    <Icon className="w-3.5 h-3.5 text-slate-400 dark:text-sky-400/75" aria-hidden="true" />
-                  )}
-                  <span>{label}</span>
-                </button>
-              );
-            })}
-          </div>
-        </CollapsibleModule>
+              {/* Per-Plot Toggle Buttons */}
+              {(
+                [
+                  {
+                    key: 'windAndVertical' as const,
+                    label: tr('Vento & Perfil Vertical', 'Wind & Vertical Profile'),
+                    Icon: Wind,
+                  },
+                  {
+                    key: 'rainAndPressure' as const,
+                    label: tr('Chuva & Pressão', 'Rain & Pressure'),
+                    Icon: CloudRain,
+                  },
+                  {
+                    key: 'wavesAndMsl' as const,
+                    label: tr('Ondas & Maré MSL', 'Waves & MSL Tide'),
+                    Icon: Waves,
+                  },
+                  {
+                    key: 'stratifiedClouds' as const,
+                    label: tr('Nebulosidade Estratificada', 'Stratified Clouds'),
+                    Icon: Cloud,
+                  },
+                ] as const
+              ).map(({ key, label, Icon }) => {
+                const isActive = showAnalyticalPlots && plotToggles[key];
+                return (
+                  <button
+                    key={key}
+                    type="button"
+                    data-testid={`plot-toggle-${key}`}
+                    onClick={() => handleTogglePlotGroup(key)}
+                    aria-pressed={isActive}
+                    className={`min-h-[44px] min-w-[44px] px-2.5 py-1.5 rounded-xl text-xs font-bold inline-flex items-center gap-1.5 border transition-all focus:outline-none focus:ring-2 focus:ring-sky-500 ${
+                      isActive
+                        ? 'bg-sky-50 dark:bg-sky-900/70 text-[#0070b8] dark:text-sky-100 border-sky-400 dark:border-sky-500 shadow-xs'
+                        : 'bg-white dark:bg-[#0d1f36]/65 text-slate-600 dark:text-sky-200/80 border-slate-200 dark:border-sky-800 hover:bg-sky-50/70'
+                    }`}
+                  >
+                    {isActive ? (
+                      <Check className="w-3.5 h-3.5 text-[#0080cd] dark:text-sky-300" aria-hidden="true" />
+                    ) : (
+                      <Icon className="w-3.5 h-3.5 text-slate-400 dark:text-sky-400/75" aria-hidden="true" />
+                    )}
+                    <span>{label}</span>
+                  </button>
+                );
+              })}
+            </div>
+          </CollapsibleModule>
+        )}
 
-        {/* 4. On-Demand ForecastCharts (Rendered ONLY when requested) */}
-        {showAnalyticalPlots && (
+        {/* 4. On-Demand ForecastCharts (Rendered ONLY when requested and in Full edition) */}
+        {!IS_MINIMAL_EDITION && showAnalyticalPlots && (
           <ForecastCharts
             forecast={displayForecast}
             viewMode={viewMode}

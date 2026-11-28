@@ -200,9 +200,9 @@ describe('FieldCast Modular 5-Tab UI, Kp Index, Drone Conditions & Tides (V3)', 
       const mobileNav = mounted.container.querySelector(
         'nav[aria-label="Navegação Principal Mobile"] > div',
       );
-      expect(desktopNav?.querySelectorAll('button')).toHaveLength(7);
-      expect(mobileNav?.className).toContain('grid-cols-5');
-      expect(mobileNav?.querySelectorAll('button')).toHaveLength(5);
+      expect(desktopNav?.querySelectorAll('button')).toHaveLength(8);
+      expect(mobileNav?.className).toContain('grid-cols-6');
+      expect(mobileNav?.querySelectorAll('button')).toHaveLength(6);
 
       const navButtons = Array.from(desktopNav!.querySelectorAll('button'));
       expect(navButtons.map((b) => b.getAttribute('aria-label') ?? b.textContent?.trim())).toEqual(
@@ -211,6 +211,7 @@ describe('FieldCast Modular 5-Tab UI, Kp Index, Drone Conditions & Tides (V3)', 
           expect.stringContaining('Modelos'),
           expect.stringContaining('Navegação'),
           expect.stringContaining('Aeronáutica'),
+          expect.stringContaining('Planejamento'),
           expect.stringContaining('Mapa'),
           expect.stringContaining('Armazenamento'),
           expect.stringContaining('Configurações'),
@@ -220,12 +221,14 @@ describe('FieldCast Modular 5-Tab UI, Kp Index, Drone Conditions & Tides (V3)', 
       act(() => {
         navButtons[1]!.click();
         navButtons[2]!.click();
-        navButtons[5]!.click();
+        navButtons[4]!.click();
+        navButtons[6]!.click();
       });
 
       expect(onTabChange).toHaveBeenNthCalledWith(1, 'comparison');
       expect(onTabChange).toHaveBeenNthCalledWith(2, 'navigation');
-      expect(onTabChange).toHaveBeenNthCalledWith(3, 'field');
+      expect(onTabChange).toHaveBeenNthCalledWith(3, 'planner');
+      expect(onTabChange).toHaveBeenNthCalledWith(4, 'field');
     });
 
     it('NavigationTab renders coastal tide extrema, mandatory DHN notice, and continental fallback safely', () => {

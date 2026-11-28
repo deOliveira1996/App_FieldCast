@@ -32,6 +32,7 @@ import {
   Wind,
   Zap,
 } from 'lucide-react';
+import { IS_MINIMAL_EDITION } from '../../config/appEdition';
 import { useLocale } from '../../context/LocaleContext';
 import { useUnits } from '../../context/UnitsContext';
 import { getGroundTruthObservations } from '../../db/database';
@@ -1608,7 +1609,7 @@ export const DailySummaryTab: React.FC<DailySummaryTabProps> = ({
         </CollapsibleModule>
 
         {/* Live t0 Ground-Truth Divergence Banner (strictly visual for current hour; future hours preserved) */}
-        {liveDivergence && (
+        {!IS_MINIMAL_EDITION && liveDivergence && (
           <div
             role="status"
             data-testid="live-divergence-banner"
@@ -1785,15 +1786,17 @@ export const DailySummaryTab: React.FC<DailySummaryTabProps> = ({
 
               {/* Right Status Badges: Compact Field Quality Score (0-100) + Safe Window + Validate Weather */}
               <div className="flex flex-wrap items-center gap-2 shrink-0">
-                <button
-                  type="button"
-                  data-testid="open-ground-truth-btn"
-                  onClick={() => setIsGroundTruthModalOpen(true)}
-                  className="min-h-[44px] min-w-[44px] px-3 py-1.5 rounded-xl text-xs font-extrabold inline-flex items-center gap-1.5 bg-white dark:bg-[#0d1f36] hover:bg-sky-50 dark:hover:bg-sky-900/50 text-[#0070b8] dark:text-sky-200 border border-sky-200 dark:border-sky-700 shadow-xs transition-colors focus:outline-none focus:ring-2 focus:ring-sky-500"
-                >
-                  <ClipboardCheck className="w-4 h-4 text-[#0080cd] dark:text-sky-400 shrink-0" aria-hidden="true" />
-                  <span>{tr('Validar Tempo', 'Validate Weather')}</span>
-                </button>
+                {!IS_MINIMAL_EDITION && (
+                  <button
+                    type="button"
+                    data-testid="open-ground-truth-btn"
+                    onClick={() => setIsGroundTruthModalOpen(true)}
+                    className="min-h-[44px] min-w-[44px] px-3 py-1.5 rounded-xl text-xs font-extrabold inline-flex items-center gap-1.5 bg-white dark:bg-[#0d1f36] hover:bg-sky-50 dark:hover:bg-sky-900/50 text-[#0070b8] dark:text-sky-200 border border-sky-200 dark:border-sky-700 shadow-xs transition-colors focus:outline-none focus:ring-2 focus:ring-sky-500"
+                  >
+                    <ClipboardCheck className="w-4 h-4 text-[#0080cd] dark:text-sky-400 shrink-0" aria-hidden="true" />
+                    <span>{tr('Validar Tempo', 'Validate Weather')}</span>
+                  </button>
+                )}
                 <div
                   data-testid="field-quality-score"
                   className={`min-h-[44px] px-3 py-1.5 rounded-xl border inline-flex items-center gap-1.5 ${quality.badgeClass}`}
@@ -2293,15 +2296,17 @@ export const DailySummaryTab: React.FC<DailySummaryTabProps> = ({
         />
 
         {/* Local Offline Field Validation (Ground-Truth) Modal */}
-        <GroundTruthModal
-          isOpen={isGroundTruthModalOpen}
-          onClose={() => setIsGroundTruthModalOpen(false)}
-          activeLocation={activeLocation}
-          forecast={forecast}
-          onToast={onToast}
-          onErrorLog={onErrorLog}
-          onCalibrationChange={() => void refreshGroundTruth()}
-        />
+        {!IS_MINIMAL_EDITION && (
+          <GroundTruthModal
+            isOpen={isGroundTruthModalOpen}
+            onClose={() => setIsGroundTruthModalOpen(false)}
+            activeLocation={activeLocation}
+            forecast={forecast}
+            onToast={onToast}
+            onErrorLog={onErrorLog}
+            onCalibrationChange={() => void refreshGroundTruth()}
+          />
+        )}
       </div>
     </ModuleErrorBoundary>
   );
