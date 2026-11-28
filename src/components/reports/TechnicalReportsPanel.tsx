@@ -272,7 +272,9 @@ function convertMetricRowForUnits(
   p90: number | null;
   max: number | null;
   iqr: number | null;
+  mad: number | null;
   linearTrendPerDay: number | null;
+  theilSenTrendPerDay: number | null;
 } {
   const convertPoint = (v: number | null): number | null => {
     if (v === null || !Number.isFinite(v)) return null;
@@ -345,7 +347,9 @@ function convertMetricRowForUnits(
     p90: convertPoint(metric.p90),
     max: convertPoint(metric.max),
     iqr: convertDelta(metric.iqr),
+    mad: convertDelta(metric.mad ?? null),
     linearTrendPerDay: convertDelta(metric.linearTrendPerDay),
+    theilSenTrendPerDay: convertDelta(metric.theilSenTrendPerDay ?? null),
   };
 }
 
@@ -1784,7 +1788,12 @@ export const TechnicalReportsPanel: React.FC<TechnicalReportsPanelProps> = ({
             keepMounted={true}
             hideIconStyle="eye"
             testId="report-percentiles-module"
-            headerActions={<HelpPopover topic="report_zscore_ols" align="right" />}
+            headerActions={
+              <div className="flex items-center gap-1">
+                <HelpPopover topic="report_zscore_ols" align="right" />
+                <HelpPopover topic="bessel_robust_stats" align="right" />
+              </div>
+            }
           >
             <div className="overflow-x-auto rounded-xl border border-slate-200 dark:border-sky-800/70">
               <table
@@ -1804,7 +1813,13 @@ export const TechnicalReportsPanel: React.FC<TechnicalReportsPanelProps> = ({
                     <th className="py-2.5 px-2.5 text-right">{tr('Máx', 'Max')}</th>
                     <th className="py-2.5 px-2.5 text-right">IQR</th>
                     <th className="py-2.5 px-2.5 text-right">{tr('Tendência/dia', 'Trend/day')}</th>
-                    <th className="py-2.5 px-3 text-right">|Z| {tr('máx', 'max')}</th>
+                    <th className="py-2.5 px-2.5 text-right whitespace-nowrap">
+                      {tr('Theil-Sen (/dia)', 'Theil-Sen (/day)')}
+                    </th>
+                    <th className="py-2.5 px-2.5 text-right">|Z| {tr('máx', 'max')}</th>
+                    <th className="py-2.5 px-3 text-right whitespace-nowrap">
+                      {tr('Z-Score Robusto (MAD)', 'Robust Z (MAD)')}
+                    </th>
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-slate-200 dark:divide-sky-900/60 bg-white dark:bg-[#132a47]">
@@ -1853,8 +1868,31 @@ export const TechnicalReportsPanel: React.FC<TechnicalReportsPanelProps> = ({
                           ? `${row.linearTrendPerDay >= 0 ? '+' : ''}${row.linearTrendPerDay.toFixed(2)}`
                           : 'N/D'}
                       </td>
-                      <td className="py-2.5 px-3 text-right font-mono font-semibold text-amber-700 dark:text-amber-300">
+                      <td
+                        data-testid={`metric-theil-sen-${m.variableKey}`}
+                        className="py-2.5 px-2.5 text-right font-mono font-semibold text-teal-700 dark:text-teal-300"
+                      >
+                        {row.theilSenTrendPerDay !== null
+                          ? `${row.theilSenTrendPerDay >= 0 ? '+' : ''}${row.theilSenTrendPerDay.toFixed(2)}`
+                          : 'N/D'}
+                      </td>
+                      <td className="py-2.5 px-2.5 text-right font-mono font-semibold text-amber-700 dark:text-amber-300">
                         {m.anomalyZScoreMax !== null ? m.anomalyZScoreMax.toFixed(2) : 'N/D'}
+                      </td>
+                      <td
+                        data-testid={`metric-robust-z-${m.variableKey}`}
+                        title={
+                          row.mad !== null
+                            ? `MAD: ${row.mad.toFixed(2)} ${row.unitLabel}`
+                            : undefined
+                        }
+                        className="py-2.5 px-3 text-right font-mono font-semibold text-rose-700 dark:text-rose-300"
+                      >
+                        {m.robustZScoreMax !== undefined &&
+                        m.robustZScoreMax !== null &&
+                        Number.isFinite(m.robustZScoreMax)
+                          ? m.robustZScoreMax.toFixed(2)
+                          : 'N/D'}
                       </td>
                     </tr>
                     );

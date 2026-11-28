@@ -14,8 +14,10 @@ import { FieldDataTab } from './components/field';
 import { AppShell, type AppTabId } from './components/layout';
 import { MapRadarTab } from './components/map';
 import { NavigationTab } from './components/navigation';
+import { RoutePlanningTab } from './components/planner/RoutePlanningTab';
 import { SettingsTab } from './components/settings';
 import { DailySummaryTab } from './components/summary';
+import { ENABLED_TABS, IS_MINIMAL_EDITION, isTabEnabled } from './config/appEdition';
 import {
   buildLocationKey,
   checkIndexedDbHealth,
@@ -65,6 +67,7 @@ import {
   dispatchSystemNotification,
   evaluateForecastNotificationTriggers,
   loadNotificationPreferences,
+  syncNativeBackgroundAlertSchedule,
 } from './services/notificationService';
 import { probeRainViewerHealth } from './services/rainViewerService';
 import { detectRuntimePlatform } from './services/platform';
@@ -586,6 +589,7 @@ function AppContent(): React.ReactElement {
     };
     void loadForecastForCoordinates(coords.latitude, coords.longitude, {
       silent: true,
+      forceNetwork: resolution.tierResolved === 1,
     });
   };
 
@@ -1197,6 +1201,27 @@ function AppContent(): React.ReactElement {
     }
   }, [addToast, forecast, notificationPrefs]);
 
+  // Sincronização não-bloqueante de agenda de alertas e monitor periódico Android em segundo plano
+  useEffect(() => {
+    void syncNativeBackgroundAlertSchedule(
+      notificationPrefs,
+      forecast,
+      activeLocation.name,
+      {
+        latitude: activeLocation.latitude,
+        longitude: activeLocation.longitude,
+      },
+    ).catch(() => {
+      // No-op seguro na Web ou quando plugin nativo estiver indisponível
+    });
+  }, [
+    activeLocation.latitude,
+    activeLocation.longitude,
+    activeLocation.name,
+    forecast,
+    notificationPrefs,
+  ]);
+
   const handleActivateAlertTemplate = useCallback(
     (template: NotificationRuleTemplate, updatedPrefs: UserNotificationPreferences) => {
       setNotificationPrefs(updatedPrefs);
@@ -1212,9 +1237,16 @@ function AppContent(): React.ReactElement {
     [addToast, tr],
   );
 
+  const effectiveActiveTab: AppTabId = isTabEnabled(activeTab)
+    ? activeTab
+    : (ENABLED_TABS[0] ?? 'forecast');
+
   const handleTabChange = useCallback((nextTab: AppTabId) => {
-    setActiveTab(nextTab);
-    if (nextTab === 'settings') {
+    const safeTab: AppTabId = isTabEnabled(nextTab)
+      ? nextTab
+      : (ENABLED_TABS[0] ?? 'forecast');
+    setActiveTab(safeTab);
+    if (safeTab === 'settings') {
       setUnreadNotificationsCount(0);
     }
   }, []);
@@ -1225,7 +1257,7 @@ function AppContent(): React.ReactElement {
       onClearCache={resetDatabaseForTests}
     >
       <AppShell
-        activeTab={activeTab}
+        activeTab={effectiveActiveTab}
         onTabChange={handleTabChange}
         theme={theme}
         onToggleTheme={toggleTheme}
@@ -1254,7 +1286,7 @@ function AppContent(): React.ReactElement {
         isLocationsModalOpen={isLocationsModalOpen}
         onLocationsModalOpenChange={setIsLocationsModalOpen}
       >
-        {activeTab === 'forecast' && (
+        {effectiveActiveTab === 'forecast' && (
           <ModuleErrorBoundary
             moduleName="Módulo de Resumo Diário & Alertas Globais"
             onReset={handleRefreshForecast}
@@ -1284,7 +1316,7 @@ function AppContent(): React.ReactElement {
           </ModuleErrorBoundary>
         )}
 
-        {activeTab === 'comparison' && (
+        {effectiveActiveTab === 'comparison' && (
           <ModuleErrorBoundary
             moduleName="Módulo de Comparação Multi-Modelo (168h) & Gráficos"
             onReset={handleRefreshForecast}
@@ -1314,7 +1346,7 @@ function AppContent(): React.ReactElement {
           </ModuleErrorBoundary>
         )}
 
-        {activeTab === 'navigation' && (
+        {!IS_MINIMAL_EDITION && effectiveActiveTab === 'navigation' && (
           <ModuleErrorBoundary
             moduleName="Módulo de Navegação Costeira, Marés & Bússola"
             onErrorLog={handleErrorLog}
@@ -1333,7 +1365,7 @@ function AppContent(): React.ReactElement {
           </ModuleErrorBoundary>
         )}
 
-        {activeTab === 'aeronautics' && (
+        {!IS_MINIMAL_EDITION && effectiveActiveTab === 'aeronautics' && (
           <ModuleErrorBoundary
             moduleName="Módulo Aeronáutico, Índice Kp & Condições de Drone"
             onErrorLog={handleErrorLog}
@@ -1350,7 +1382,22 @@ function AppContent(): React.ReactElement {
           </ModuleErrorBoundary>
         )}
 
-        {activeTab === 'map' && (
+        {!IS_MINIMAL_EDITION && effectiveActiveTab === 'planner' && (
+          <ModuleErrorBoundary
+            moduleName="Módulo de Planejamento de Rotas 4D"
+            onErrorLog={handleErrorLog}
+          >
+            <RoutePlanningTab
+              activeLocation={activeLocation}
+              forecast={forecast}
+              isDark={isDark}
+              onToast={addToast}
+              onErrorLog={handleErrorLog}
+            />
+          </ModuleErrorBoundary>
+        )}
+
+        {effectiveActiveTab === 'map' && (
           <ModuleErrorBoundary
             moduleName="Módulo de Mapa Interativo, Radar & Cache Offline"
             onErrorLog={handleErrorLog}
@@ -1372,7 +1419,7 @@ function AppContent(): React.ReactElement {
           </ModuleErrorBoundary>
         )}
 
-        {activeTab === 'field' && (
+        {!IS_MINIMAL_EDITION && effectiveActiveTab === 'field' && (
           <ModuleErrorBoundary
             moduleName="Módulo de Armazenamento, Campo, GPS Tracker & Relatórios"
             onErrorLog={handleErrorLog}
@@ -1394,7 +1441,7 @@ function AppContent(): React.ReactElement {
           </ModuleErrorBoundary>
         )}
 
-        {activeTab === 'settings' && (
+        {effectiveActiveTab === 'settings' && (
           <ModuleErrorBoundary
             moduleName="Central de Configurações, Notificações & Janelas Horárias"
             onErrorLog={handleErrorLog}
