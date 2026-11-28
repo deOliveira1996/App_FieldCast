@@ -10,6 +10,7 @@ import {
   CloudSun,
   Download,
   Gauge,
+  HardDrive,
   Image as ImageIcon,
   MapPin,
   Scale,
@@ -161,6 +162,28 @@ function formatRatingTag(rating: GroundTruthRelativeRating): string {
   return rating > 0 ? `+${rating}` : String(rating);
 }
 
+function estimateObservationsBytes(observations: readonly GroundTruthObservation[]): number {
+  if (observations.length === 0) return 0;
+  try {
+    const json = JSON.stringify(observations);
+    if (typeof TextEncoder !== 'undefined') {
+      return new TextEncoder().encode(json).byteLength;
+    }
+    return json.length;
+  } catch {
+    return 0;
+  }
+}
+
+function formatStorageFootprint(bytes: number): string {
+  if (!Number.isFinite(bytes) || bytes <= 0) return '0.0 KB';
+  const kb = bytes / 1024;
+  if (kb >= 1024) {
+    return `${(kb / 1024).toFixed(2)} MB`;
+  }
+  return `${kb.toFixed(1)} KB`;
+}
+
 export const GroundTruthModal: React.FC<GroundTruthModalProps> = ({
   isOpen,
   onClose,
@@ -209,6 +232,8 @@ export const GroundTruthModal: React.FC<GroundTruthModalProps> = ({
   const [isCompressingPhoto, setIsCompressingPhoto] = useState<boolean>(false);
   const [isExporting, setIsExporting] = useState<boolean>(false);
   const [isImporting, setIsImporting] = useState<boolean>(false);
+  const [isClearingAll, setIsClearingAll] = useState<boolean>(false);
+  const [confirmClearOpen, setConfirmClearOpen] = useState<boolean>(false);
 
   const photoInputRef = useRef<HTMLInputElement | null>(null);
   const importInputRef = useRef<HTMLInputElement | null>(null);
@@ -225,6 +250,7 @@ export const GroundTruthModal: React.FC<GroundTruthModalProps> = ({
     setSkyCoverClass(t0Reference?.skyCoverClass ?? 'partly_cloudy');
     setTempRelativeRating(0);
     setWindRelativeRating(0);
+    setConfirmClearOpen(false);
     void (async () => {
       const list = await getGroundTruthObservations();
       if (!cancelled) {
@@ -263,6 +289,19 @@ export const GroundTruthModal: React.FC<GroundTruthModalProps> = ({
         activeLocation.longitude,
       ),
     [observations, activeLocation.latitude, activeLocation.longitude],
+  );
+
+  const storageFootprintBytes = useMemo(
+    () => estimateObservationsBytes(observations),
+    [observations],
+  );
+  const storageFootprintText = useMemo(
+    () => formatStorageFootprint(storageFootprintBytes),
+    [storageFootprintBytes],
+  );
+  const photoAttachmentsCount = useMemo(
+    () => observations.filter((obs) => Boolean(obs.photoDataUrl)).length,
+    [observations],
   );
 
   if (!isOpen) {
@@ -510,11 +549,56 @@ export const GroundTruthModal: React.FC<GroundTruthModalProps> = ({
         await reloadObservations();
         dispatchGroundTruthUpdated();
         onCalibrationChange?.();
+        onToast?.({
+          type: 'info',
+          title: tr('Registro excluído', 'Record deleted'),
+          message: tr(
+            'Métricas regionais e armazenamento local atualizados.',
+            'Regional metrics and local storage updated.',
+          ),
+        });
       },
       {
         actionKey: 'ground_truth_delete_observation',
         moduleName: 'GroundTruthModal',
         errorTitle: tr('Erro ao remover registro', 'Failed to delete record'),
+        onToast,
+        onErrorLog,
+      },
+    );
+  };
+
+  const handleConfirmClearAll = () => {
+    void safeAction(
+      async () => {
+        const countBefore = observations.length;
+        const freedLabel = storageFootprintText;
+        for (const obs of observations) {
+          await deleteGroundTruthObservation(obs.id);
+        }
+        saveUseCalibratedModelPref(false);
+        setUseCalibratedModel(false);
+        setConfirmClearOpen(false);
+        await reloadObservations();
+        dispatchGroundTruthUpdated();
+        onCalibrationChange?.();
+        onToast?.({
+          type: 'success',
+          title: tr('Histórico de validação limpo', 'Validation history cleared'),
+          message: tr(
+            `${countBefore} registro(s) removido(s) (${freedLabel} liberados no dispositivo).`,
+            `${countBefore} record(s) removed (${freedLabel} freed on device).`,
+          ),
+        });
+      },
+      {
+        actionKey: 'ground_truth_clear_all',
+        moduleName: 'GroundTruthModal',
+        errorTitle: tr(
+          'Erro ao limpar histórico de validação',
+          'Failed to clear validation history',
+        ),
+        onLoadingChange: setIsClearingAll,
         onToast,
         onErrorLog,
       },
@@ -1269,19 +1353,105 @@ export const GroundTruthModal: React.FC<GroundTruthModalProps> = ({
                 </button>
               </div>
             </div>
+          </section>
 
-            {/* Recent Observations List */}
-            {observations.length > 0 && (
+          {/* 4. Local Storage Management Panel */}
+          <section
+            data-testid="ground-truth-storage-panel"
+            aria-label={tr('Gestão de Armazenamento Local', 'Local Storage Management')}
+            className="rounded-2xl border border-slate-200/90 dark:border-sky-800/80 bg-white dark:bg-[#0d1f36]/65 p-3.5 sm:p-4 space-y-3"
+          >
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2.5">
+              <div className="flex items-start gap-2 min-w-0">
+                <div className="p-2 rounded-xl bg-slate-100 dark:bg-[#132a47] text-[#0080cd] dark:text-sky-300 border border-slate-200/80 dark:border-sky-800 shrink-0">
+                  <HardDrive className="w-4 h-4" aria-hidden="true" />
+                </div>
+                <div className="min-w-0">
+                  <h3 className="text-xs sm:text-sm font-extrabold text-slate-900 dark:text-white">
+                    {tr('Gestão de Armazenamento Local', 'Local Storage Management')}
+                  </h3>
+                  <p className="text-[11px] text-slate-600 dark:text-sky-300/85">
+                    <strong data-testid="ground-truth-storage-count">{observations.length}</strong>{' '}
+                    {tr('registro(s)', 'record(s)')} •{' '}
+                    <strong data-testid="ground-truth-storage-size">{storageFootprintText}</strong>{' '}
+                    {tr(
+                      `(${photoAttachmentsCount} foto(s) anexada(s))`,
+                      `(${photoAttachmentsCount} attached photo(s))`,
+                    )}
+                  </p>
+                </div>
+              </div>
+
+              <button
+                type="button"
+                data-testid="clear-ground-truth-btn"
+                disabled={observations.length === 0 || isClearingAll}
+                onClick={() => setConfirmClearOpen(true)}
+                className="min-h-[44px] px-3.5 py-2 rounded-xl text-xs font-bold inline-flex items-center justify-center gap-1.5 border border-rose-200 dark:border-rose-800/80 bg-rose-50/85 dark:bg-rose-950/45 hover:bg-rose-100 dark:hover:bg-rose-900/60 text-rose-700 dark:text-rose-200 disabled:opacity-45 disabled:cursor-not-allowed transition-colors shrink-0"
+              >
+                <Trash2 className="w-4 h-4 shrink-0" aria-hidden="true" />
+                <span>
+                  {tr('Limpar Histórico de Validação', 'Clear Validation History')}
+                </span>
+              </button>
+            </div>
+
+            {/* Inline 2-step confirmation for clearing all observations */}
+            {confirmClearOpen && observations.length > 0 && (
+              <div
+                role="alert"
+                data-testid="clear-ground-truth-confirm-box"
+                className="rounded-xl border border-rose-300 dark:border-rose-700 bg-rose-50/95 dark:bg-rose-950/60 p-3 flex flex-col sm:flex-row sm:items-center justify-between gap-2.5 text-xs text-rose-950 dark:text-rose-100"
+              >
+                <p className="font-semibold">
+                  {tr(
+                    `Remover todos os ${observations.length} registro(s) locais (${storageFootprintText})? Exporte o JSON antes se desejar manter backup.`,
+                    `Delete all ${observations.length} local record(s) (${storageFootprintText})? Export JSON first if you want a backup.`,
+                  )}
+                </p>
+                <div className="flex items-center gap-2 shrink-0">
+                  <button
+                    type="button"
+                    data-testid="cancel-clear-ground-truth-btn"
+                    onClick={() => setConfirmClearOpen(false)}
+                    className="min-h-[44px] px-3 py-1.5 rounded-xl text-xs font-bold bg-white dark:bg-[#132a47] text-slate-700 dark:text-sky-100 border border-slate-200 dark:border-sky-700 hover:bg-slate-50 transition-colors"
+                  >
+                    {tr('Cancelar', 'Cancel')}
+                  </button>
+                  <button
+                    type="button"
+                    data-testid="confirm-clear-ground-truth-btn"
+                    disabled={isClearingAll}
+                    onClick={handleConfirmClearAll}
+                    className="min-h-[44px] px-3.5 py-1.5 rounded-xl text-xs font-extrabold bg-rose-600 hover:bg-rose-700 text-white shadow-xs disabled:opacity-60 transition-colors"
+                  >
+                    {isClearingAll
+                      ? tr('Limpando...', 'Clearing...')
+                      : tr('Confirmar Limpeza', 'Confirm Clear')}
+                  </button>
+                </div>
+              </div>
+            )}
+
+            {/* Compact Recent Observations List with per-record Delete */}
+            {observations.length === 0 ? (
+              <p className="text-xs text-slate-500 dark:text-sky-300/75 text-center py-2">
+                {tr(
+                  'Nenhum registro salvo localmente ainda.',
+                  'No validation records saved locally yet.',
+                )}
+              </p>
+            ) : (
               <div className="space-y-1.5 pt-1 border-t border-slate-200/80 dark:border-sky-800/70">
                 <p className="text-[11px] font-bold text-slate-600 dark:text-sky-300">
-                  {tr('Últimos registros locais', 'Recent local records')} (
-                  {Math.min(observations.length, 6)}/{observations.length})
+                  {tr('Observações salvas recentes', 'Recent saved observations')} (
+                  {Math.min(observations.length, 8)}/{observations.length})
                 </p>
                 <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
-                  {observations.slice(0, 6).map((obs) => (
+                  {observations.slice(0, 8).map((obs) => (
                     <div
                       key={obs.id}
-                      className="rounded-xl border border-slate-200/80 dark:border-sky-800 bg-white dark:bg-[#132a47] p-2.5 flex items-start justify-between gap-2 text-xs"
+                      className="rounded-xl border border-slate-200/80 dark:border-sky-800 bg-slate-50/70 dark:bg-[#132a47] p-2.5 flex items-start justify-between gap-2 text-xs"
                     >
                       <div className="flex items-start gap-2 min-w-0">
                         {obs.photoDataUrl && (
@@ -1317,6 +1487,9 @@ export const GroundTruthModal: React.FC<GroundTruthModalProps> = ({
                               minute: '2-digit',
                               hour12: false,
                             })}
+                            {typeof obs.photoSizeKb === 'number' && obs.photoSizeKb > 0
+                              ? ` • 📷 ${obs.photoSizeKb.toFixed(0)} KB`
+                              : ''}
                           </p>
                           {obs.note && (
                             <p className="text-[11px] italic text-slate-500 dark:text-sky-200/80 truncate">
@@ -1327,11 +1500,16 @@ export const GroundTruthModal: React.FC<GroundTruthModalProps> = ({
                       </div>
                       <button
                         type="button"
+                        data-testid={`delete-ground-truth-${obs.id}`}
                         onClick={() => handleDeleteObservation(obs.id)}
-                        aria-label={tr('Excluir registro', 'Delete record')}
-                        className="min-h-[36px] min-w-[36px] rounded-lg inline-flex items-center justify-center text-slate-400 hover:text-rose-600 hover:bg-rose-50 dark:hover:bg-rose-950/50 transition-colors shrink-0"
+                        aria-label={tr(
+                          `Excluir registro ${obs.locationName}`,
+                          `Delete record ${obs.locationName}`,
+                        )}
+                        className="min-h-[44px] px-2.5 rounded-xl inline-flex items-center gap-1 text-[11px] font-bold text-rose-600 dark:text-rose-300 hover:bg-rose-50 dark:hover:bg-rose-950/50 border border-transparent hover:border-rose-200 dark:hover:border-rose-800 transition-colors shrink-0"
                       >
-                        <Trash2 className="w-3.5 h-3.5" aria-hidden="true" />
+                        <Trash2 className="w-3.5 h-3.5 shrink-0" aria-hidden="true" />
+                        <span>{tr('Excluir', 'Delete')}</span>
                       </button>
                     </div>
                   ))}
