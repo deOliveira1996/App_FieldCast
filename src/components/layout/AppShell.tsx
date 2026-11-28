@@ -37,6 +37,7 @@ import type {
 } from '../../types/v4';
 import type { ForecastViewMode } from '../../types/weather';
 import type { ThemeMode } from '../../hooks/useTheme';
+import { ENABLED_TABS, IS_MINIMAL_EDITION } from '../../config/appEdition';
 import { useLocale } from '../../context/LocaleContext';
 import {
   dispatchFieldCastLayoutRefresh,
@@ -299,7 +300,7 @@ export const AppShell: React.FC<AppShellProps> = ({
     search: tr('Pin / Busca', 'Pin / Search'),
   };
 
-  const tabs: NavTabDefinition[] = [
+  const allTabs: NavTabDefinition[] = [
     {
       id: 'forecast',
       label: tr('Resumo', 'Summary'),
@@ -384,8 +385,12 @@ export const AppShell: React.FC<AppShellProps> = ({
     },
   ];
 
-  const mobilePrimaryTabs = tabs.filter((tab) => MOBILE_PRIMARY_TAB_IDS.includes(tab.id));
-  const isSecondaryMobileTabActive = !MOBILE_PRIMARY_TAB_IDS.includes(activeTab);
+  const tabs = allTabs.filter((tab) => ENABLED_TABS.includes(tab.id));
+  const mobilePrimaryTabs = IS_MINIMAL_EDITION
+    ? tabs
+    : tabs.filter((tab) => MOBILE_PRIMARY_TAB_IDS.includes(tab.id));
+  const mobilePrimaryTabIds = mobilePrimaryTabs.map((tab) => tab.id);
+  const isSecondaryMobileTabActive = !mobilePrimaryTabIds.includes(activeTab);
 
   const handleRefreshClick = () => {
     if (!onRefreshForecast) {
@@ -424,10 +429,12 @@ export const AppShell: React.FC<AppShellProps> = ({
               />
               <div>
                 <span className="text-base font-extrabold tracking-tight text-white block leading-none">
-                  FieldCast
+                  {IS_MINIMAL_EDITION ? 'FieldCast Minimal' : 'FieldCast'}
                 </span>
                 <span className="text-[10px] font-medium text-sky-100">
-                  {tr('Previsão & Campo', 'Forecast & Field')}
+                  {IS_MINIMAL_EDITION
+                    ? tr('Previsão & Radar', 'Forecast & Radar')
+                    : tr('Previsão & Campo', 'Forecast & Field')}
                 </span>
               </div>
             </div>
@@ -714,12 +721,16 @@ export const AppShell: React.FC<AppShellProps> = ({
           </main>
         </div>
 
-        {/* Mobile Fixed Bottom Tab Bar (5 Quick Tabs + Menu Drawer Button >= 48x44px) */}
+        {/* Mobile Fixed Bottom Tab Bar (Quick Tabs + Menu Drawer Button >= 48x44px) */}
         <nav
           aria-label={tr('Navegação Principal Mobile', 'Mobile Primary Navigation')}
           className="md:hidden fixed bottom-0 inset-x-0 z-40 max-w-[100vw] border-t border-sky-200 dark:border-sky-800/70 bg-white/95 dark:bg-[#0f243d]/95 backdrop-blur-md px-1.5 pt-2 pb-[max(0.65rem,env(safe-area-inset-bottom,0px))] shadow-xl"
         >
-          <div className="grid grid-cols-6 gap-1 max-w-lg mx-auto min-w-0">
+          <div
+            className={`grid ${
+              IS_MINIMAL_EDITION ? 'grid-cols-5' : 'grid-cols-6'
+            } gap-1 max-w-lg mx-auto min-w-0`}
+          >
             {mobilePrimaryTabs.map(({ id, label, mobileLabel, Icon, badgeCount }) => {
               const isActive = activeTab === id && !isMobileDrawerOpen;
               const mobileTestId =
@@ -829,10 +840,10 @@ export const AppShell: React.FC<AppShellProps> = ({
                   </button>
                 </div>
 
-                {/* All 8 Modular Tabs */}
+                {/* All Enabled Modular Tabs */}
                 <div className="space-y-1.5">
                   <span className="block text-[11px] font-extrabold uppercase tracking-wider text-sky-700 dark:text-sky-300 px-1">
-                    {tr('Todas as Seções (8)', 'All Sections (8)')}
+                    {tr(`Todas as Seções (${tabs.length})`, `All Sections (${tabs.length})`)}
                   </span>
                   <div className="flex flex-col gap-1.5">
                     {tabs.map(({ id, label, description, Icon, badgeCount }) => {

@@ -7,8 +7,12 @@
   "scripts": {
     "dev": "vite",
     "build": "tsc -b && vite build",
+    "build:full": "tsc -b && vite build",
+    "build:minimal": "tsc -b && vite build --mode minimal",
+    "build:all": "npm run build:full && npm run build:minimal",
     "build:pages": "tsc -b && vite build",
     "desktop:prepare": "powershell -ExecutionPolicy Bypass -File scripts/package-desktop.ps1",
+    "desktop:prepare:minimal": "powershell -ExecutionPolicy Bypass -File scripts/package-desktop.ps1 -Edition minimal",
     "preview": "vite preview",
     "test": "vitest run",
     "test:ui": "vitest --ui",

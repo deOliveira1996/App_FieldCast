@@ -1,8 +1,20 @@
 # FieldCast V4.3 — Guia de Distribuição & Empacotamento / Distribution & Packaging Guide
 
-O **FieldCast** é 100% open-source, offline-first e **zero backend** (sem chaves de API pagas e sem servidores proprietários). Você pode distribuir o aplicativo gratuitamente como **PWA estático (Web/Mobile)**, **APK Android nativo (Capacitor 6)** ou **aplicativo Desktop offline (Windows `.exe` / macOS `.dmg`)**.
+O **FieldCast** é 100% open-source, offline-first e **zero backend** (sem chaves de API pagas e sem servidores proprietários). Você pode distribuir o aplicativo gratuitamente como **PWA estático (Web/Mobile)**, **APK Android nativo (Capacitor 6)** ou **aplicativo Desktop offline (Windows `.exe` / macOS `.dmg`)**, em duas edições oficiais (**Full** e **Minimal**).
 
-**FieldCast** is 100% open-source, offline-first, and **zero-backend** (no paid API keys or proprietary servers). You can distribute it at zero cost as a **static PWA (Web/Mobile)**, a **native Android APK (Capacitor 6)**, or an **offline Desktop app (Windows `.exe` / macOS `.dmg`)**.
+**FieldCast** is 100% open-source, offline-first, and **zero-backend** (no paid API keys or proprietary servers). You can distribute it at zero cost as a **static PWA (Web/Mobile)**, a **native Android APK (Capacitor 6)**, or an **offline Desktop app (Windows `.exe` / macOS `.dmg`)**, across two official editions (**Full** and **Minimal**).
+
+---
+
+## 0. Edições de Build / Dual Build Editions (`Full` vs `Minimal`)
+
+| Edição / Edition | Comando / Command | Saída / OutDir | Abas & Recursos / Tabs & Features |
+| :--- | :--- | :--- | :--- |
+| **FieldCast Full** (Padrão / Default) | `npm run build:full` | `dist/` | Todas as 8 abas: Resumo (+ Efemérides + Ground-Truth), Modelos (Windguru + ECharts), Navegação Costeira, Aeronáutica/Drone, Planejamento 4D, Mapa & Radar + Satélite GOES, Campo/Dados & Relatórios Técnicos, Configurações & Alertas. |
+| **FieldCast Minimal** (Leve / Lightweight) | `npm run build:minimal` | `dist-minimal/` | 4 abas essenciais: Resumo (+ Efemérides), Modelos (tabela Windguru leve), Mapa & Radar, Configurações / Notificações / GPS. Manifesto PWA próprio (`FieldCast Minimal — Previsão & Radar`). |
+| **Ambas / Both** | `npm run build:all` | `dist/` + `dist-minimal/` | Compila as duas edições sequencialmente a partir do mesmo código-fonte. |
+
+> **Cross-platform sem arquivos `.env` secretos:** O modo Minimal é acionado nativamente por `vite build --mode minimal` (injetando `import.meta.env.VITE_APP_EDITION = "minimal"` em `vite.config.ts`), funcionando de forma idêntica no Windows PowerShell, Linux e macOS sem depender de `cross-env` nem commitar arquivos `.env`.
 
 ---
 
@@ -21,15 +33,15 @@ O repositório já inclui o workflow [`.github/workflows/deploy-pages.yml`](../.
 4. O PWA ficará disponível em `https://<usuario>.github.io/<nome-do-repo>/` com HTTPS nativo (obrigatório para GPS, Service Worker offline e instalação "Adicionar à Tela Inicial").
 
 > **Build local para subcaminho / Local subpath build:**
-> - PowerShell: `$env:VITE_BASE_PATH="/FieldCast/"; npm run build:pages`
-> - Bash/macOS/Linux: `VITE_BASE_PATH="/FieldCast/" npm run build:pages`
+> - PowerShell (Full): `$env:VITE_BASE_PATH="/FieldCast/"; npm run build:pages`
+> - PowerShell (Minimal): `$env:VITE_BASE_PATH="/FieldCast/"; npm run build:minimal`
+> - Bash/macOS/Linux: `VITE_BASE_PATH="/FieldCast/" npm run build:pages` (ou `build:minimal`)
 
 ### 1.2 Cloudflare Pages (Zero Custo / Zero Cost)
 1. Conecte o repositório no dashboard do **Cloudflare Pages** (plano gratuito ilimitado para sites estáticos).
 2. Configure:
-   - **Build command:** `npm run build`
-   - **Build output directory:** `dist`
-   - **Environment variable:** `VITE_BASE_PATH=/`
+   - **Full Edition:** Build command `npm run build:full`, Build output directory `dist`, `VITE_BASE_PATH=/`.
+   - **Minimal Edition:** Build command `npm run build:minimal`, Build output directory `dist-minimal`, `VITE_BASE_PATH=/`.
 3. O deploy gera HTTPS automático em `*.pages.dev` (ou domínio próprio).
 
 > **Nota sobre Alertas no Navegador (Web/PWA):** Sem servidor Push pago, navegadores desktop/mobile avaliam regras e alertas enquanto a aba/PWA estiver aberta. Para alertas contínuos em segundo plano com o aplicativo fechado ou tela bloqueada, utilize o APK Android nativo abaixo.
@@ -45,12 +57,13 @@ O build Android inclui:
 ### Compilação Local (Windows PowerShell)
 ```powershell
 npm run icons:generate
-npm run build
+npm run build:full
 npx cap sync android
 cd android
 .\gradlew.bat assembleDebug
 ```
 O APK compilado estará em `android/app/build/outputs/apk/debug/app-debug.apk`.
+*(Para compilar o APK da edição Minimal, rode `npm run build:minimal` e copie/aponte `dist-minimal/` para `dist/` antes de `npx cap sync android`.)*
 
 ### Permissões Recomendadas no Android (Configurações → Alertas em Segundo Plano)
 1. **Notificações (`POST_NOTIFICATIONS`)**: obrigatória no Android 13+.
@@ -65,11 +78,13 @@ O wrapper desktop em [`desktop/electron/`](../desktop/electron/) utiliza **Elect
 
 ### 3.1 Preparação e Empacotamento no Windows (`.exe` Portátil e Instalador NSIS)
 ```powershell
-# 1) Apenas compila dist/ (base ./) e sincroniza para desktop/electron/dist/
+# Edição Full (dist/)
 npm run desktop:prepare
+.\scripts\package-desktop.ps1 -Edition full -BuildInstaller
 
-# 2) Compila dist/ + instala dependências Electron + gera .exe portátil e instalador NSIS
-.\scripts\package-desktop.ps1 -BuildInstaller
+# Edição Minimal (dist-minimal/)
+npm run desktop:prepare:minimal
+.\scripts\package-desktop.ps1 -Edition minimal -BuildInstaller
 ```
 Os executáveis gerados ficam em `desktop/electron/release/`:
 - `FieldCast 4.3.0.exe` (Portátil — roda direto sem instalação / Portable)
@@ -78,8 +93,10 @@ Os executáveis gerados ficam em `desktop/electron/release/`:
 ### 3.2 Empacotamento no macOS (`.dmg` Universal / Apple Silicon & Intel)
 Execute em um Mac (macOS 12+ com Xcode Command Line Tools):
 ```bash
-VITE_BASE_PATH="./" npm run build
+# Full (dist/) ou Minimal (dist-minimal/)
+VITE_BASE_PATH="./" npm run build:full
 rm -rf desktop/electron/dist && cp -R dist desktop/electron/dist
+# Para Minimal: VITE_BASE_PATH="./" npm run build:minimal && rm -rf desktop/electron/dist && cp -R dist-minimal desktop/electron/dist
 cd desktop/electron
 npm install
 npm run pack:mac
@@ -89,7 +106,7 @@ O instalador `.dmg` será gerado em `desktop/electron/release/`.
 ### 3.3 Alternativa Ultraleve Opcional: Tauri v2 (Rust + WebView2 / WKWebView)
 Caso prefira binários menores (~10–15 MB) usando o WebView nativo do sistema operacional:
 1. Instale Rust (`rustup`) e o CLI open-source `@tauri-apps/cli`.
-2. Inicialize em uma pasta separada (`npx tauri init`) apontando `frontendDist` para `../dist` e `beforeBuildCommand` para `VITE_BASE_PATH=./ npm run build`.
+2. Inicialize em uma pasta separada (`npx tauri init`) apontando `frontendDist` para `../dist` (ou `../dist-minimal`) e `beforeBuildCommand` para `VITE_BASE_PATH=./ npm run build:full` (ou `build:minimal`).
 3. Execute `npx tauri build` para gerar `.msi`/`.exe` (Windows) ou `.dmg`/`.app` (macOS).
 
 ---
